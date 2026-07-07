@@ -378,6 +378,18 @@ function openEntryModal() {
       <input type="file" accept="image/*" capture="environment" id="m-entry-photo">
     </div>
     <div class="field">
+      <label>Date changed</label>
+      <input class="text-input" id="m-entry-date" value="${new Date().toISOString().slice(0,10)}" readonly>
+    </div>
+    <div class="field">
+      <label>What changed?</label>
+      <textarea class="textarea-input" id="m-entry-change" placeholder="Describe the attachment improvement or test change"></textarea>
+    </div>
+    <div class="field">
+      <label>Why changed?</label>
+      <textarea class="textarea-input" id="m-entry-why" placeholder="Why did you make this change?"></textarea>
+    </div>
+    <div class="field">
       <label>Notes</label>
       ${SpeechRec ? `<div class="voice-row">
         <button class="btn btn-ghost" id="m-voice-btn" type="button">&#127908; Voice note</button>
@@ -407,10 +419,15 @@ function openEntryModal() {
   document.getElementById("m-save").addEventListener("click", async () => {
     stopRecognizer();
     const notes = document.getElementById("m-entry-notes").value.trim();
-    if (!notes && !pendingPhoto) { alert("Add a photo or some notes first."); return; }
+    const change = document.getElementById("m-entry-change").value.trim();
+    const why = document.getElementById("m-entry-why").value.trim();
+    if (!notes && !pendingPhoto && !change) { alert("Add a change description, photo, or notes first."); return; }
     await dbPut("entries", {
       attachmentId: state.activeAttachmentId,
       timestamp: Date.now(),
+      dateChanged: document.getElementById("m-entry-date").value,
+      change,
+      why,
       photo: pendingPhoto,
       notes,
     });
@@ -652,7 +669,7 @@ function renderRuns() {
         <span>${state.missions.length} missions</span>
       </div>
       <div class="run-card-actions">
-        <button class="btn btn-primary" data-act="score">Score this run</button>
+        <button class="btn btn-primary" data-act="score">Start scoring run</button>
         <button class="btn btn-ghost" data-act="edit">Edit</button>
         <button class="btn btn-danger" data-act="del">Delete</button>
       </div>
@@ -693,86 +710,40 @@ function openRunEditModal(run) {
 }
 
 function openRunScoringModal(run) {
-  if (!state.missions.length) {
-    openModal(`<h2>No missions yet</h2><p class="empty-sub">Add missions in the Setup tab first, matching your season's scoring rubric.</p>
-      <div class="modal-actions"><button class="btn btn-primary" id="m-close">Got it</button></div>`);
-    document.getElementById("m-close").addEventListener("click", closeModal);
-    return;
-  }
+  if (!state.missions.length) { alert("Add missions in Setup first."); return; }
+  let index = 0;
   const raw = { ...(run.rawScores || {}) };
-  const rows = state.missions.map((m) => {
-    const max = missionMaxPoints(m);
-    let control = "";
-    if (m.type === "bool") {
-      const on = !!raw[m.id];
-      control = `<div class="score-toggle ${on ? "on" : ""}" data-mid="${m.id}" data-type="bool"><div class="knob"></div></div>`;
-    } else if (m.type === "number") {
-      const val = raw[m.id] ?? 0;
-      control = `<div class="score-control"><input type="number" min="0" max="${m.max}" step="1" value="${val}" data-mid="${m.id}" data-type="number"></div>`;
-    } else {
-      const cur = raw[m.id] ?? "";
-      control = `<div class="score-control"><select data-mid="${m.id}" data-type="choice">
-        <option value="" ${cur === "" ? "selected" : ""}>Not achieved (0)</option>
-        ${m.options.map((o, i) => `<option value="${i}" ${String(cur) === String(i) ? "selected" : ""}>${esc(o.label)} (${o.points})</option>`).join("")}
-      </select></div>`;
-    }
-    return `<div class="mission-score-row">
-      <span class="mission-score-name">${esc(m.name)} <span class="mission-score-max">/ ${max}</span></span>
-      ${control}
-    </div>`;
-  }).join("");
-
-  openModal(`
-    <h2>${esc(run.label)}</h2>
-    <div class="run-total-bar"><span class="rt-label">Total</span><span class="rt-num" id="r-live-total">${runTotal(run, state.missions)}</span></div>
-    <div id="r-score-rows">${rows}</div>
-    <div class="field" style="margin-top:14px;"><label>Run notes</label><textarea class="textarea-input" id="r-notes" placeholder="Anything worth remembering about this run?">${esc(run.notes || "")}</textarea></div>
-    <div class="modal-actions">
-      <button class="btn btn-ghost" id="m-cancel">Cancel</button>
-      <button class="btn btn-primary" id="m-save">Save run</button>
-    </div>
-  `);
-
-  function recomputeTotal() {
-    const fakeRun = { rawScores: raw };
-    document.getElementById("r-live-total").textContent = runTotal(fakeRun, state.missions);
+  const startTime = Date.now();
+  const answers = [];
+  function render() {
+    const m = state.missions[index];
+    openModal(`
+      <h2>${esc(run.label)}</h2>
+      <p class="empty-sub">Mission ${index+1}/${state.missions.length}</p>
+      <h3>${esc(m.name)}</h3>
+      <div class="field"><label>Result</label><p class="empty-sub">${m.type==='bool'?'Tap YES if completed, NO if not.':m.type==='number'?'Enter the completed amount.':'Choose the completed state.'}</p></div>
+      <div class="score-control-area" id="wizard-control"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="m-cancel">Cancel</button>
+        <button class="btn btn-primary" id="m-next">${index===state.missions.length-1?'Finish':'Next mission'}</button>
+      </div>`);
+    const box=document.getElementById('wizard-control');
+    if(m.type==='bool') box.innerHTML='<button class="btn btn-primary" id="yes">Yes completed</button> <button class="btn btn-ghost" id="no">No</button>';
+    else if(m.type==='number') box.innerHTML=`<input class="text-input" id="num" type="number" min="0" max="${m.max}" value="0">`;
+    else box.innerHTML=`<select class="text-input" id="choice"><option value="">Not achieved</option>${m.options.map((o,i)=>`<option value="${i}">${esc(o.label)}</option>`).join('')}</select>`;
+    document.getElementById('m-cancel').onclick=closeModal;
+    document.getElementById('m-next').onclick=async()=>{
+      if(m.type==='bool') raw[m.id]=document.getElementById('yes').dataset.on==='1';
+      if(m.type==='number') raw[m.id]=Number(document.getElementById('num').value)||0;
+      if(m.type==='choice') raw[m.id]=document.getElementById('choice').value===''?null:Number(document.getElementById('choice').value);
+      if(index===state.missions.length-1){
+        const runTime=Date.now()-startTime;
+        run.rawScores=raw; run.timeMs=runTime; run.completedAt=Date.now();
+        await dbPut('runs',run); closeModal(); await loadRuns();
+      } else { index++; render(); }
+    };
   }
-
-  document.querySelectorAll(".score-toggle").forEach((el) => {
-    el.addEventListener("click", () => {
-      const mid = Number(el.dataset.mid);
-      const on = !el.classList.contains("on");
-      el.classList.toggle("on", on);
-      raw[mid] = on;
-      recomputeTotal();
-    });
-  });
-  document.querySelectorAll('.score-control input[type="number"]').forEach((el) => {
-    el.addEventListener("input", () => {
-      const mid = Number(el.dataset.mid);
-      const m = state.missions.find((mm) => mm.id === mid);
-      let v = Number(el.value) || 0;
-      v = Math.max(0, Math.min(m.max, v));
-      raw[mid] = v;
-      recomputeTotal();
-    });
-  });
-  document.querySelectorAll('.score-control select').forEach((el) => {
-    el.addEventListener("change", () => {
-      const mid = Number(el.dataset.mid);
-      raw[mid] = el.value === "" ? null : Number(el.value);
-      recomputeTotal();
-    });
-  });
-
-  document.getElementById("m-cancel").addEventListener("click", closeModal);
-  document.getElementById("m-save").addEventListener("click", async () => {
-    run.rawScores = raw;
-    run.notes = document.getElementById("r-notes").value.trim();
-    await dbPut("runs", run);
-    closeModal();
-    await loadRuns();
-  });
+  render();
 }
 
 // ---- Export runs CSV ----

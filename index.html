@@ -52,7 +52,7 @@
       <h2>Runs</h2>
       <div class="btn-group">
         <button class="btn btn-ghost" id="btn-export-runs">Export CSV</button>
-        <button class="btn btn-amber" id="btn-add-run">+ Run</button>
+        <button class="btn btn-amber" id="btn-add-run">+ Start new practice run</button>
       </div>
     </div>
     <div id="run-stats" class="stat-strip"></div>
@@ -74,7 +74,7 @@
     </div>
     <p class="empty-sub">Configure attachments here. This list controls the order used while logging practice changes.</p>
     <div id="settings-attachment-list" class="mission-list"></div>
-    <button class="btn btn-ghost" id="btn-import-runs">Import run order CSV</button>
+    <button class="btn btn-ghost" id="btn-import-missions">Import missions CSV</button>
     <button class="btn btn-ghost" id="btn-example-csv">Download example CSV</button>
 
     <div class="section-row" style="margin-top:28px;">
@@ -111,7 +111,7 @@
   <div class="modal" id="modal-box"></div>
 </div>
 
-<input type="file" id="file-import-runs" accept=".csv,text/csv" hidden />
+<input type="file" id="file-import-missions" accept=".csv,text/csv" hidden />
 <input type="file" id="file-import-backup" accept="application/json" hidden />
 
 <script src="app.js"></script>
