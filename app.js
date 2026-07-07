@@ -9,7 +9,7 @@ if ("serviceWorker" in navigator) {
 
 // ---------- IndexedDB helper ----------
 const DB_NAME = "fll-logbook";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let dbPromise = null;
 
 function openDB() {
@@ -196,10 +196,37 @@ function runSuccessRate(run, missions) {
 // ATTACHMENTS + LOG
 // ==========================================================
 async function loadAttachments() {
-  state.attachments = (await dbGetAll("attachments")).sort((a, b) => (a.number ?? 0) - (b.number ?? 0));
+  state.attachments = (await dbGetAll("attachments")).sort((a, b) => (a.order ?? a.number ?? 0) - (b.order ?? b.number ?? 0));
+  renderSettingsAttachments();
   renderAttachmentChips();
 }
 
+function renderSettingsAttachments() {
+  const wrap = document.getElementById("settings-attachment-list");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  state.attachments.forEach((att, i) => {
+    const row = document.createElement("div");
+    row.className = "mission-card";
+    row.innerHTML = `<b>#${esc(att.number)} ${esc(att.name)}</b>
+      <div class="btn-group">
+      <button class="btn-icon" data-up="1">↑</button>
+      <button class="btn-icon" data-down="1">↓</button>
+      </div>`;
+    row.querySelector("[data-up]").onclick = () => moveAttachment(att, -1);
+    row.querySelector("[data-down]").onclick = () => moveAttachment(att, 1);
+    wrap.appendChild(row);
+  });
+}
+async function moveAttachment(att, delta) {
+  const arr = state.attachments;
+  const i = arr.findIndex(a => a.id === att.id);
+  const j = i + delta;
+  if (j < 0 || j >= arr.length) return;
+  [arr[i], arr[j]] = [arr[j], arr[i]];
+  for (let k=0;k<arr.length;k++) { arr[k].order=k; await dbPut("attachments", arr[k]); }
+  await loadAttachments();
+}
 function renderAttachmentChips() {
   const wrap = document.getElementById("attachment-chips");
   wrap.innerHTML = "";
@@ -279,7 +306,7 @@ document.getElementById("btn-add-attachment").addEventListener("click", () => {
     const number = document.getElementById("m-att-number").value.trim();
     const name = document.getElementById("m-att-name").value.trim();
     if (!name) { alert("Give this attachment a name."); return; }
-    const id = await dbPut("attachments", { number, name, createdAt: Date.now() });
+    const id = await dbPut("attachments", { number, name, order: state.attachments.length, createdAt: Date.now() });
     closeModal();
     await loadAttachments();
     selectAttachment(id);
@@ -778,6 +805,10 @@ document.getElementById("btn-export-runs").addEventListener("click", () => {
 });
 
 // ---- Import run order template CSV ----
+document.getElementById("btn-example-csv")?.addEventListener("click", () => {
+  download("example-run-order.csv", "Run,Date/Practice\\nPractice 1,Test\\nPractice 2,Test\\nPractice 3,Test", "text/csv");
+});
+
 document.getElementById("btn-import-runs").addEventListener("click", () => {
   document.getElementById("file-import-runs").click();
 });

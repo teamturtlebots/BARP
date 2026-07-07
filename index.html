@@ -18,7 +18,7 @@
   <div class="header-stamp">BARP</div>
   <div class="header-text">
     <h1 id="season-title">BARP</h1>
-    <p class="header-sub" id="header-subline">robot &amp; run notebook</p>
+    <p class="header-sub" id="header-subline">bot attachment &amp; run progress</p>
   </div>
 </header>
 
@@ -28,13 +28,13 @@
   <section class="view" id="view-log">
     <div class="section-row">
       <h2>Attachments</h2>
-      <button class="btn btn-amber" id="btn-add-attachment">+ Attachment</button>
+      
     </div>
     <div id="attachment-chips" class="chip-row"></div>
 
     <div id="log-empty-state" class="empty-state" hidden>
-      <p>No attachment selected.</p>
-      <p class="empty-sub">Add an attachment above, then log every change you make to it &mdash; a photo, a note, or a quick voice memo.</p>
+      <p>No bot attachment selected.</p>
+      <p class="empty-sub">Add an attachment above, then record every change you test on it &mdash; a photo, a note, or a quick voice memo.</p>
     </div>
 
     <div id="log-active" hidden>
@@ -51,7 +51,6 @@
     <div class="section-row">
       <h2>Runs</h2>
       <div class="btn-group">
-        <button class="btn btn-ghost" id="btn-import-runs">Import order</button>
         <button class="btn btn-ghost" id="btn-export-runs">Export CSV</button>
         <button class="btn btn-amber" id="btn-add-run">+ Run</button>
       </div>
@@ -68,6 +67,15 @@
     </div>
     <p class="empty-sub">These are the scoring rows that show up on every run sheet. Build this list once your season's mission list is released, matching point values from your official scoring rubric.</p>
     <div id="mission-list" class="mission-list"></div>
+
+    <div class="section-row" style="margin-top:28px;">
+      <h2>Bot attachments</h2>
+      <button class="btn btn-amber" id="btn-add-attachment">+ Add</button>
+    </div>
+    <p class="empty-sub">Configure attachments here. This list controls the order used while logging practice changes.</p>
+    <div id="settings-attachment-list" class="mission-list"></div>
+    <button class="btn btn-ghost" id="btn-import-runs">Import run order CSV</button>
+    <button class="btn btn-ghost" id="btn-example-csv">Download example CSV</button>
 
     <div class="section-row" style="margin-top:28px;">
       <h2>Backup</h2>
