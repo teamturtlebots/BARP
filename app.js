@@ -208,7 +208,8 @@ function renderSettingsAttachments() {
   state.attachments.forEach((att, i) => {
     const row = document.createElement("div");
     row.className = "mission-card";
-    row.innerHTML = `<b>#${esc(att.number)} ${esc(att.name)}</b>
+    const changes = (state.entries || []).filter(e => e.attachmentId === att.id).length;
+    row.innerHTML = `<b>#${esc(att.number)} ${esc(att.name)}</b><div class="empty-sub">${changes} improvement iteration${changes === 1 ? "" : "s"}</div>
       <div class="btn-group">
       <button class="btn-icon" data-up="1">↑</button>
       <button class="btn-icon" data-down="1">↓</button>
@@ -495,15 +496,16 @@ function renderMissions() {
   const list = document.getElementById("mission-list");
   list.innerHTML = "";
   if (!state.missions.length) {
-    list.innerHTML = `<p class="empty-sub">No missions yet. Add one for each scoring row on your rubric.</p>`;
+    list.innerHTML = `<p class="empty-sub">No missions yet. Add one for each scoring row on the official scoresheet.</p>`;
     return;
   }
   state.missions.forEach((m, idx) => {
     const row = document.createElement("div");
     row.className = "mission-row";
-    const sub = m.type === "bool" ? `Yes/No · ${missionMaxPoints(m)} pts`
+    const detail = m.type === "bool" ? `Yes/No · ${missionMaxPoints(m)} pts`
       : m.type === "number" ? `Count 0–${m.max} · ${m.pointsPerUnit} pt/each · max ${missionMaxPoints(m)}`
       : `Multi-state · max ${missionMaxPoints(m)} pts`;
+    const sub = (m.tasks?.length ? `${m.tasks.length} tasks · ` : "") + detail;
     row.innerHTML = `
       <div class="m-order">
         <button data-dir="up" ${idx === 0 ? "disabled" : ""}>&#9650;</button>
@@ -558,12 +560,15 @@ function openMissionModal(m) {
         <option value="choice" ${type === "choice" ? "selected" : ""}>Multiple states</option>
       </select>
     </div>
+    <div class="field"><label>Mission tasks (optional)</label><textarea class="textarea-input" id="m-tasks" placeholder="One task per line"></textarea></div>
     <div id="m-type-fields"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="m-cancel">Cancel</button>
       <button class="btn btn-primary" id="m-save">Save</button>
     </div>
   `);
+
+  document.getElementById("m-tasks").value = isEdit && m.tasks ? m.tasks.join("\n") : "";
 
   function renderTypeFields() {
     const t = document.getElementById("m-type").value;
@@ -603,6 +608,7 @@ function openMissionModal(m) {
     const record = isEdit ? m : { order: state.missions.length };
     record.name = name;
     record.type = t;
+    record.tasks = document.getElementById("m-tasks").value.split("\n").map(x => x.trim()).filter(Boolean);
     if (t === "bool") {
       record.points = Number(document.getElementById("m-bool-points").value) || 0;
       delete record.max; delete record.pointsPerUnit; delete record.options;
@@ -638,7 +644,7 @@ function renderRuns() {
   const stats = document.getElementById("run-stats");
   list.innerHTML = "";
   if (!state.runs.length) {
-    list.innerHTML = `<p class="empty-sub">No runs yet. Add one for each practice or competition attempt, in the order you'll run them.</p>`;
+    list.innerHTML = `<p class="empty-sub">No runs yet. Start a practice run to record scores, timing, and improvements.</p>`;
     stats.innerHTML = "";
     return;
   }
