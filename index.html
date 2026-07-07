@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#1B3A2F" />
+<title>FLL Field Logbook</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="app-header">
+  <div class="header-stamp">FLL</div>
+  <div class="header-text">
+    <h1 id="season-title">Field Logbook</h1>
+    <p class="header-sub" id="header-subline">robot &amp; run notebook</p>
+  </div>
+</header>
+
+<main id="view-root">
+
+  <!-- LOG VIEW -->
+  <section class="view" id="view-log">
+    <div class="section-row">
+      <h2>Attachments</h2>
+      <button class="btn btn-amber" id="btn-add-attachment">+ Attachment</button>
+    </div>
+    <div id="attachment-chips" class="chip-row"></div>
+
+    <div id="log-empty-state" class="empty-state" hidden>
+      <p>No attachment selected.</p>
+      <p class="empty-sub">Add an attachment above, then log every change you make to it &mdash; a photo, a note, or a quick voice memo.</p>
+    </div>
+
+    <div id="log-active" hidden>
+      <div class="section-row">
+        <h3 id="active-attachment-name">&nbsp;</h3>
+        <button class="btn btn-primary" id="btn-add-entry">+ Log change</button>
+      </div>
+      <div id="entry-list" class="entry-list"></div>
+    </div>
+  </section>
+
+  <!-- RUNS VIEW -->
+  <section class="view" id="view-runs" hidden>
+    <div class="section-row">
+      <h2>Runs</h2>
+      <div class="btn-group">
+        <button class="btn btn-ghost" id="btn-import-runs">Import order</button>
+        <button class="btn btn-ghost" id="btn-export-runs">Export CSV</button>
+        <button class="btn btn-amber" id="btn-add-run">+ Run</button>
+      </div>
+    </div>
+    <div id="run-stats" class="stat-strip"></div>
+    <div id="run-list" class="run-list"></div>
+  </section>
+
+  <!-- SETUP VIEW -->
+  <section class="view" id="view-setup" hidden>
+    <div class="section-row">
+      <h2>Missions</h2>
+      <button class="btn btn-amber" id="btn-add-mission">+ Mission</button>
+    </div>
+    <p class="empty-sub">These are the scoring rows that show up on every run sheet. Build this list once your season's mission list is released, matching point values from your official scoring rubric.</p>
+    <div id="mission-list" class="mission-list"></div>
+
+    <div class="section-row" style="margin-top:28px;">
+      <h2>Backup</h2>
+    </div>
+    <p class="empty-sub">Everything is stored only on this device. Back up regularly, especially before competition day.</p>
+    <div class="btn-group">
+      <button class="btn btn-ghost" id="btn-export-backup">Export full backup (.json)</button>
+      <button class="btn btn-ghost" id="btn-import-backup">Restore from backup</button>
+    </div>
+
+    <div class="section-row" style="margin-top:28px;">
+      <h2>Notebook name</h2>
+    </div>
+    <input type="text" id="input-season-name" class="text-input" placeholder="e.g. Turtlebots &mdash; BIOGLOW" />
+  </section>
+
+</main>
+
+<nav class="tab-bar">
+  <button class="tab-btn active" data-view="view-log">
+    <span class="tab-icon">&#128220;</span><span>Log</span>
+  </button>
+  <button class="tab-btn" data-view="view-runs">
+    <span class="tab-icon">&#127919;</span><span>Runs</span>
+  </button>
+  <button class="tab-btn" data-view="view-setup">
+    <span class="tab-icon">&#9881;&#65039;</span><span>Setup</span>
+  </button>
+</nav>
+
+<!-- Generic modal host -->
+<div id="modal-backdrop" class="modal-backdrop" hidden>
+  <div class="modal" id="modal-box"></div>
+</div>
+
+<input type="file" id="file-import-runs" accept=".csv,text/csv" hidden />
+<input type="file" id="file-import-backup" accept="application/json" hidden />
+
+<script src="app.js"></script>
+</body>
+</html>

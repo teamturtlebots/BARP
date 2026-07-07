@@ -1,0 +1,15 @@
+{
+  "name": "FLL Field Logbook",
+  "short_name": "FLL Logbook",
+  "description": "Attachment change log and run scoring tracker for FLL robot game",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1B3A2F",
+  "theme_color": "#1B3A2F",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
