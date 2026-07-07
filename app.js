@@ -1,4 +1,4 @@
-/* FLL Field Logbook — vanilla JS, IndexedDB-backed, offline-first PWA. */
+/* BARP — Build App for Robot Progress. vanilla JS, IndexedDB-backed, offline-first PWA. */
 
 // ---------- Service worker ----------
 if ("serviceWorker" in navigator) {
@@ -852,7 +852,7 @@ const seasonInput = document.getElementById("input-season-name");
 seasonInput.addEventListener("change", async () => {
   const val = seasonInput.value.trim();
   await dbPut("meta", { key: "seasonName", value: val });
-  document.getElementById("season-title").textContent = val || "Field Logbook";
+  document.getElementById("season-title").textContent = val || "BARP";
 });
 
 async function loadSeasonName() {

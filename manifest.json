@@ -1,6 +1,6 @@
 {
-  "name": "FLL Field Logbook",
-  "short_name": "FLL Logbook",
+  "name": "BARP - Build App for Robot Progress",
+  "short_name": "BARP",
   "description": "Attachment change log and run scoring tracker for FLL robot game",
   "start_url": "./index.html",
   "scope": "./",

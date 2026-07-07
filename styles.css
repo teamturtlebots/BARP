@@ -60,8 +60,8 @@ p { margin: 0.3em 0; }
   justify-content: center;
   font-family: var(--display);
   font-weight: 700;
-  font-size: 0.78rem;
-  letter-spacing: 0.04em;
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
   color: var(--amber);
   transform: rotate(-8deg);
 }
@@ -269,9 +269,13 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 
 /* Modal */
 .modal-backdrop {
-  position: fixed; inset: 0; background: rgba(27,58,47,0.55);
-  display: flex; align-items: flex-end; justify-content: center;
+  display: none;
+  position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: rgba(27,58,47,0.55);
+  align-items: flex-end; justify-content: center;
   z-index: 50;
+}
+.modal-backdrop:not([hidden]) {
+  display: flex;
 }
 .modal {
   background: var(--paper);
