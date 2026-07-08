@@ -1,4 +1,4 @@
-# BARP — Bot Attachment & Run Progress
+# BARP — Bobot Attachment & Run Progress
 
 An installable web app (PWA) built for practice and testing, not competition day. Two things it does:
 
