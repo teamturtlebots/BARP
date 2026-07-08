@@ -320,3 +320,52 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .type-hint { font-size: 0.75rem; color: var(--text-soft); margin-top: 4px; }
 
 ::-webkit-scrollbar { width: 0; height: 0; }
+
+/* --- Added: show-all toggle, iteration counters, larger attachment heading --- */
+.toggle-row { display: flex; align-items: center; gap: 8px; }
+.toggle-row-label { font-size: 0.78rem; color: var(--text-soft); font-family: var(--mono); }
+.iteration-total-line { font-size: 0.78rem; color: var(--text-soft); font-family: var(--mono); margin: -6px 0 12px; }
+.attachment-heading-row { align-items: flex-start; }
+.attachment-heading-lg { font-size: 1.5rem; line-height: 1.15; }
+.iteration-badge {
+  display: inline-block; margin-top: 4px; font-family: var(--mono); font-size: 0.72rem;
+  color: var(--moss); background: var(--paper-3); border-radius: 12px; padding: 3px 10px;
+}
+.entry-att-tag { color: var(--amber-dark); font-family: var(--mono); }
+.entry-field { margin-top: 6px; font-size: 0.92rem; }
+.entry-field-label {
+  display: block; font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.03em;
+  color: var(--text-soft); margin-bottom: 1px;
+}
+
+/* --- Added: mission groups with nested tasks --- */
+.mission-group { margin-bottom: 4px; }
+.mission-group-head { margin-bottom: 0; }
+.mission-expand-btn { font-size: 0.85rem; flex: none; }
+.task-list { margin: 6px 0 14px 30px; display: flex; flex-direction: column; gap: 8px; }
+.task-row {
+  background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; display: flex; align-items: center; gap: 10px;
+}
+.task-row .m-info { flex: 1; min-width: 0; }
+.task-row .m-name { font-weight: 600; font-size: 0.92rem; }
+.task-row .m-sub { font-size: 0.72rem; color: var(--text-soft); font-family: var(--mono); }
+
+/* --- Added: guided practice run screens --- */
+.btn-start-run { font-size: 1.02rem; padding: 16px; margin-bottom: 18px; }
+.guided-phase-badge {
+  display: inline-block; background: var(--ink-deep); color: var(--amber);
+  font-family: var(--mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 4px 10px; border-radius: 12px; margin-bottom: 10px;
+}
+.btn-link-cancel {
+  display: block; margin: 14px auto 0; background: none; border: none; cursor: pointer;
+  color: var(--coral); font-size: 0.8rem; text-decoration: underline; font-family: var(--body);
+}
+.run-summary-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.85rem; }
+.run-summary-table th, .run-summary-table td {
+  text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--paper-3);
+}
+.run-summary-table th { color: var(--text-soft); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.run-summary-table td:last-child, .run-summary-table th:last-child { font-family: var(--mono); text-align: right; }
+.run-card-incomplete { opacity: 0.7; border-style: dashed; }

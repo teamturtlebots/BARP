@@ -28,33 +28,42 @@
   <section class="view" id="view-log">
     <div class="section-row">
       <h2>Attachments</h2>
-      
+      <div class="toggle-row">
+        <span class="toggle-row-label">Show all</span>
+        <div class="score-toggle" id="toggle-show-all"><div class="knob"></div></div>
+      </div>
     </div>
+    <div id="iteration-total-line" class="iteration-total-line"></div>
     <div id="attachment-chips" class="chip-row"></div>
 
     <div id="log-empty-state" class="empty-state" hidden>
-      <p>No bot attachment selected.</p>
-      <p class="empty-sub">Add an attachment above, then record every change you test on it &mdash; a photo, a note, or a quick voice memo.</p>
+      <p>No attachments added yet.</p>
+      <p class="empty-sub">Go to Settings to add and manage bot attachments.</p>
     </div>
 
     <div id="log-active" hidden>
-      <div class="section-row">
-        <h3 id="active-attachment-name">&nbsp;</h3>
+      <div class="section-row attachment-heading-row">
+        <div>
+          <h3 id="active-attachment-name" class="attachment-heading-lg">&nbsp;</h3>
+          <span class="iteration-badge" id="active-attachment-iterations"></span>
+        </div>
         <button class="btn btn-primary" id="btn-add-entry">+ Log change</button>
       </div>
       <div id="entry-list" class="entry-list"></div>
+    </div>
+
+    <div id="log-all" hidden>
+      <div class="section-row">
+        <h3>All attachments &mdash; chronological</h3>
+      </div>
+      <div id="entry-list-all" class="entry-list"></div>
     </div>
   </section>
 
   <!-- RUNS VIEW -->
   <section class="view" id="view-runs" hidden>
-    <div class="section-row">
-      <h2>Runs</h2>
-      <div class="btn-group">
-        <button class="btn btn-ghost" id="btn-export-runs">Export CSV</button>
-        <button class="btn btn-amber" id="btn-add-run">+ Start new practice run</button>
-      </div>
-    </div>
+    <button class="btn btn-amber btn-full btn-start-run" id="btn-start-run">&#9654; Start New Practice Run</button>
+
     <div id="run-stats" class="stat-strip"></div>
     <div id="run-list" class="run-list"></div>
   </section>
@@ -62,25 +71,26 @@
   <!-- SETUP VIEW -->
   <section class="view" id="view-setup" hidden>
     <div class="section-row">
-      <h2>Missions</h2>
-      <button class="btn btn-amber" id="btn-add-mission">+ Mission</button>
+      <h2>Attachments</h2>
+      <button class="btn btn-amber" id="btn-add-attachment">+ Attachment</button>
     </div>
-    <p class="empty-sub">These are the scoring rows that show up on every run sheet. Build this list once your season's mission list is released, matching point values from the official scoresheet.</p>
-    <div id="mission-list" class="mission-list"></div>
+    <p class="empty-sub">Set these up once per season, then reorder or rename as your build changes. This is also where you delete one, along with everything logged under it.</p>
+    <div id="attachment-setup-list" class="mission-list"></div>
 
     <div class="section-row" style="margin-top:28px;">
-      <h2>Bot attachments</h2>
-      <button class="btn btn-amber" id="btn-add-attachment">+ Add</button>
+      <h2>Missions</h2>
+      <div class="btn-group">
+        <button class="btn btn-ghost" id="btn-import-missions">Import CSV</button>
+        <button class="btn btn-amber" id="btn-add-mission">+ Mission</button>
+      </div>
     </div>
-    <p class="empty-sub">Configure attachments here. This list controls the order used while logging practice changes.</p>
-    <div id="settings-attachment-list" class="mission-list"></div>
-    <button class="btn btn-ghost" id="btn-import-missions">Import missions CSV</button>
-    <button class="btn btn-ghost" id="btn-example-csv">Download example CSV</button>
+    <p class="empty-sub">Each mission holds one or more tasks &mdash; build this once your season's mission list is released, matching point values from the official scoresheet.</p>
+    <div id="mission-list" class="mission-list"></div>
 
     <div class="section-row" style="margin-top:28px;">
       <h2>Backup</h2>
     </div>
-    <p class="empty-sub">Everything is stored only on this device. Back up regularly, regularly.</p>
+    <p class="empty-sub">Everything is stored only on this device. Back up regularly.</p>
     <div class="btn-group">
       <button class="btn btn-ghost" id="btn-export-backup">Export full backup (.json)</button>
       <button class="btn btn-ghost" id="btn-import-backup">Restore from backup</button>
