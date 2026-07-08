@@ -8,36 +8,60 @@ if ("serviceWorker" in navigator) {
 }
 
 // ---------- IndexedDB helper ----------
-const DB_NAME = "fll-logbook";
-const DB_VERSION = 1;
+const DB_NAME = "barp-db-v1";
+const DB_VERSION = 2;
 let dbPromise = null;
+
+function createStores(db) {
+  if (!db.objectStoreNames.contains("attachments")) {
+    db.createObjectStore("attachments", { keyPath: "id", autoIncrement: true });
+  }
+  if (!db.objectStoreNames.contains("entries")) {
+    const s = db.createObjectStore("entries", { keyPath: "id", autoIncrement: true });
+    s.createIndex("byAttachment", "attachmentId");
+  }
+  if (!db.objectStoreNames.contains("missions")) {
+    db.createObjectStore("missions", { keyPath: "id", autoIncrement: true });
+  }
+  if (!db.objectStoreNames.contains("runs")) {
+    db.createObjectStore("runs", { keyPath: "id", autoIncrement: true });
+  }
+  if (!db.objectStoreNames.contains("meta")) {
+    db.createObjectStore("meta", { keyPath: "key" });
+  }
+  if (!db.objectStoreNames.contains("sessions")) {
+    db.createObjectStore("sessions", { keyPath: "id", autoIncrement: true });
+  }
+}
+
+// allowRecovery=true means: if this specific database name/version conflicts
+// with something already on the device, wipe just that stray database and
+// recreate it fresh — there's nothing to lose from a database that has never
+// successfully opened in the first place.
+function tryOpenDB(allowRecovery) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => createStores(req.result);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => {
+      const err = req.error;
+      if (allowRecovery && err && err.name === "VersionError") {
+        const delReq = indexedDB.deleteDatabase(DB_NAME);
+        delReq.onsuccess = () => { tryOpenDB(false).then(resolve, reject); };
+        delReq.onerror = () => reject(err);
+        delReq.onblocked = () => {
+          reject(new Error("Another open tab/window with this app is blocking a required database reset — close it, then reload this page."));
+        };
+      } else {
+        reject(err);
+      }
+    };
+  });
+}
 
 function openDB() {
   if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains("attachments")) {
-        db.createObjectStore("attachments", { keyPath: "id", autoIncrement: true });
-      }
-      if (!db.objectStoreNames.contains("entries")) {
-        const s = db.createObjectStore("entries", { keyPath: "id", autoIncrement: true });
-        s.createIndex("byAttachment", "attachmentId");
-      }
-      if (!db.objectStoreNames.contains("missions")) {
-        db.createObjectStore("missions", { keyPath: "id", autoIncrement: true });
-      }
-      if (!db.objectStoreNames.contains("runs")) {
-        db.createObjectStore("runs", { keyPath: "id", autoIncrement: true });
-      }
-      if (!db.objectStoreNames.contains("meta")) {
-        db.createObjectStore("meta", { keyPath: "key" });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+  dbPromise = tryOpenDB(true).catch((err) => { dbPromise = null; throw err; });
   return dbPromise;
 }
 function tx(storeNames, mode) { return openDB().then((db) => db.transaction(storeNames, mode)); }
@@ -46,10 +70,100 @@ function reqToPromise(req) {
 }
 async function dbGetAll(store) { const t = await tx([store], "readonly"); return reqToPromise(t.objectStore(store).getAll()); }
 async function dbGet(store, key) { const t = await tx([store], "readonly"); return reqToPromise(t.objectStore(store).get(key)); }
-async function dbPut(store, value) { const t = await tx([store], "readwrite"); return reqToPromise(t.objectStore(store).put(value)); }
-async function dbDelete(store, key) { const t = await tx([store], "readwrite"); return reqToPromise(t.objectStore(store).delete(key)); }
+async function dbPut(store, value) { const t = await tx([store], "readwrite"); const r = await reqToPromise(t.objectStore(store).put(value)); scheduleShadowBackup(); return r; }
+async function dbDelete(store, key) { const t = await tx([store], "readwrite"); const r = await reqToPromise(t.objectStore(store).delete(key)); scheduleShadowBackup(); return r; }
 async function dbGetByIndex(store, indexName, value) { const t = await tx([store], "readonly"); return reqToPromise(t.objectStore(store).index(indexName).getAll(value)); }
 async function dbClear(store) { const t = await tx([store], "readwrite"); return reqToPromise(t.objectStore(store).clear()); }
+
+// ---------- Auto-backup shadow database ----------
+// A second, separate IndexedDB database that mirrors a full snapshot of your
+// data. It's deliberately independent from the main database so a "Reset
+// local data" or a corrupted main database doesn't take the backup down with
+// it. Updated automatically ~1.5s after any save, debounced so a burst of
+// edits only triggers one snapshot.
+const SHADOW_DB_NAME = "barp-db-v1-shadow";
+let shadowDbPromise = null;
+function openShadowDB() {
+  if (shadowDbPromise) return shadowDbPromise;
+  shadowDbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(SHADOW_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains("snapshots")) {
+        req.result.createObjectStore("snapshots", { keyPath: "key" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => { shadowDbPromise = null; reject(req.error); };
+  });
+  return shadowDbPromise;
+}
+let shadowBackupTimer = null;
+function scheduleShadowBackup() {
+  clearTimeout(shadowBackupTimer);
+  shadowBackupTimer = setTimeout(runShadowBackup, 1500);
+}
+async function runShadowBackup() {
+  try {
+    const data = {
+      version: 2,
+      savedAt: Date.now(),
+      attachments: await dbGetAllRaw("attachments"),
+      entries: await dbGetAllRaw("entries"),
+      missions: await dbGetAllRaw("missions"),
+      runs: await dbGetAllRaw("runs"),
+      meta: await dbGetAllRaw("meta"),
+      sessions: await dbGetAllRaw("sessions"),
+    };
+    const db = await openShadowDB();
+    await new Promise((resolve, reject) => {
+      const t = db.transaction("snapshots", "readwrite");
+      t.objectStore("snapshots").put({ key: "latest", data });
+      t.oncomplete = () => { renderLastBackupTime(); resolve(); };
+      t.onerror = () => reject(t.error);
+    });
+  } catch (e) { /* best-effort background task — never surface this to the user */ }
+}
+// Raw reads that bypass the main dbGetAll/scheduleShadowBackup loop (avoids
+// the backup triggering itself, and avoids depending on openDB()'s recovery
+// path while a backup is mid-flight).
+async function dbGetAllRaw(store) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction([store], "readonly").objectStore(store).getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function getShadowBackup() {
+  const db = await openShadowDB();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction("snapshots", "readonly").objectStore("snapshots").get("latest");
+    req.onsuccess = () => resolve(req.result?.data || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function restoreFromShadowBackup() {
+  const data = await getShadowBackup();
+  if (!data) { alert("No automatic backup found yet."); return; }
+  if (!confirm(`Restore the automatic backup from ${new Date(data.savedAt).toLocaleString()}? This replaces everything currently on this device.`)) return;
+  await dbClear("attachments"); await dbClear("entries"); await dbClear("missions"); await dbClear("runs"); await dbClear("meta"); await dbClear("sessions");
+  for (const a of data.attachments || []) await dbPut("attachments", a);
+  for (const en of data.entries || []) await dbPut("entries", en);
+  for (const m of data.missions || []) await dbPut("missions", m);
+  for (const r of data.runs || []) await dbPut("runs", r);
+  for (const meta of data.meta || []) await dbPut("meta", meta);
+  for (const s of data.sessions || []) await dbPut("sessions", s);
+  await initAll();
+  alert("Automatic backup restored.");
+}
+async function renderLastBackupTime() {
+  const el = document.getElementById("last-backup-line");
+  if (!el) return;
+  try {
+    const data = await getShadowBackup();
+    el.textContent = data ? `Last automatic backup: ${new Date(data.savedAt).toLocaleString()}` : "No automatic backup yet.";
+  } catch (e) { el.textContent = "No automatic backup yet."; }
+}
 
 // ---------- App state ----------
 const state = {
@@ -59,6 +173,8 @@ const state = {
   entries: [],
   missions: [],
   runs: [],
+  sessions: [],
+  activeSessionId: null,
   expandedMissions: new Set(),
   guidedRun: null, // { run, missionIdx, phase, phaseStartTs, timerHandle }
 };
@@ -76,8 +192,15 @@ function showErrorBanner(message) {
     banner.addEventListener("click", () => { banner.hidden = true; });
     document.body.appendChild(banner);
   }
+  banner.onclick = () => { banner.hidden = true; };
   banner.textContent = "Something went wrong: " + message + " — tap to dismiss";
   banner.hidden = false;
+}
+function resetLocalDatabase() {
+  const req = indexedDB.deleteDatabase(DB_NAME);
+  req.onsuccess = () => location.reload();
+  req.onerror = () => location.reload();
+  req.onblocked = () => showErrorBanner("Close any other open tabs/windows with this app, then try again.");
 }
 window.addEventListener("error", (e) => showErrorBanner(e.message || String(e.error)));
 window.addEventListener("unhandledrejection", (e) => showErrorBanner(e.reason?.message || String(e.reason)));
@@ -91,6 +214,43 @@ modalBackdrop.addEventListener("click", (e) => {
   if (e.target === modalBackdrop && !state.guidedRun) closeModal();
 });
 
+function confirmDestructive(message, onConfirm) {
+  openModal(`
+    <h2>Are you sure?</h2>
+    <p class="empty-sub">${message}</p>
+    <div class="field"><label>Type DELETE to confirm</label><input class="text-input" id="cd-input" placeholder="DELETE" autocomplete="off"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
+      <button class="btn btn-danger" id="cd-confirm" type="button" disabled>Delete</button>
+    </div>
+  `);
+  document.getElementById("m-cancel").addEventListener("click", closeModal);
+  const input = document.getElementById("cd-input");
+  const btn = document.getElementById("cd-confirm");
+  input.addEventListener("input", () => { btn.disabled = input.value.trim().toUpperCase() !== "DELETE"; });
+  btn.addEventListener("click", () => { closeModal(); onConfirm(); });
+}
+
+let undoToastTimer = null;
+function showUndoToast(message, onUndo) {
+  let toast = document.getElementById("undo-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "undo-toast";
+    toast.className = "undo-toast";
+    document.body.appendChild(toast);
+  }
+  clearTimeout(undoToastTimer);
+  toast.innerHTML = `<span>${esc(message)}</span><button type="button" id="undo-toast-btn">Undo</button>`;
+  toast.hidden = false;
+  document.getElementById("undo-toast-btn").addEventListener("click", () => {
+    toast.hidden = true;
+    clearTimeout(undoToastTimer);
+    onUndo();
+  });
+  undoToastTimer = setTimeout(() => { toast.hidden = true; }, 8000);
+}
+
 // ---------- Tab navigation ----------
 document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -98,6 +258,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
     btn.classList.add("active");
     document.getElementById(btn.dataset.view).hidden = false;
+    if (btn.dataset.view === "view-setup") renderLastBackupTime();
   });
 });
 
@@ -193,11 +354,11 @@ async function loadAttachments() {
 
 async function iterationCount(attachmentId) {
   const entries = await dbGetByIndex("entries", "byAttachment", attachmentId);
-  return entries.length;
+  return entries.filter((e) => !e.deleted).length;
 }
 
 async function renderIterationTotal() {
-  const all = await dbGetAll("entries");
+  const all = (await dbGetAll("entries")).filter((e) => !e.deleted);
   const line = document.getElementById("iteration-total-line");
   line.textContent = all.length ? `${all.length} total engineering iteration${all.length === 1 ? "" : "s"} logged` : "";
 }
@@ -263,7 +424,7 @@ async function renderEntryList() {
 
   const attById = Object.fromEntries(state.attachments.map((a) => [a.id, a]));
   const allEntries = await dbGetAll("entries");
-  let entries = allEntries.filter((e) => state.selectedAttachmentIds.has(e.attachmentId));
+  let entries = allEntries.filter((e) => !e.deleted && state.selectedAttachmentIds.has(e.attachmentId));
 
   const sortMode = document.getElementById("sort-select").value;
   if (sortMode === "name") {
@@ -286,13 +447,23 @@ async function renderEntryList() {
     const card = document.createElement("div");
     card.className = "entry-card";
     card.innerHTML = entryCardHTML(entry, showTag ? (att ? `#${att.number} ${att.name}` : "deleted attachment") : null);
-    card.querySelector(".btn-icon").addEventListener("click", async () => {
-      if (confirm("Delete this log entry?")) {
-        await dbDelete("entries", entry.id);
+    card.querySelector(".btn-icon").addEventListener("click", () => {
+      confirmDestructive("This removes the entry from the log. You'll have a few seconds to undo right after.", async () => {
+        entry.deleted = true;
+        entry.deletedAt = Date.now();
+        await dbPut("entries", entry);
         await renderEntryList();
         await renderIterationTotal();
         renderAttachmentsSetup();
-      }
+        showUndoToast("Entry deleted.", async () => {
+          delete entry.deleted;
+          delete entry.deletedAt;
+          await dbPut("entries", entry);
+          await renderEntryList();
+          await renderIterationTotal();
+          renderAttachmentsSetup();
+        });
+      });
     });
     list.appendChild(card);
   });
@@ -368,6 +539,9 @@ function openAttachmentModal(att) {
     const number = document.getElementById("m-att-number").value.trim();
     const name = document.getElementById("m-att-name").value.trim();
     if (!name) { alert("Give this attachment a name."); return; }
+    if (!number) { alert("Give this attachment a number."); return; }
+    const duplicate = state.attachments.find((a) => String(a.number) === String(number) && (!isEdit || a.id !== att.id));
+    if (duplicate) { alert(`Attachment #${number} is already used by "${duplicate.name}". Pick a different number.`); return; }
     const record = isEdit ? att : { order: state.attachments.length };
     record.number = number; record.name = name;
     if (!isEdit) record.createdAt = Date.now();
@@ -411,7 +585,18 @@ function openRecordIterationModal() {
     <div class="field">
       <label>Photo</label>
       <div class="photo-preview-wrap" id="photo-preview-wrap"></div>
-      <input type="file" accept="image/*" capture="environment" id="ri-photo">
+      <div class="camera-view" id="camera-view" hidden>
+        <video id="camera-video" autoplay playsinline muted></video>
+        <div class="camera-controls">
+          <button type="button" class="btn btn-ghost" id="camera-cancel">Cancel</button>
+          <button type="button" class="btn btn-primary" id="camera-capture">Capture</button>
+        </div>
+      </div>
+      <div class="btn-group" id="photo-btn-group">
+        <button type="button" class="btn btn-amber" id="btn-take-photo">&#128247; Take Photo</button>
+        <button type="button" class="btn btn-ghost" id="btn-choose-photo">Choose from files</button>
+      </div>
+      <input type="file" accept="image/*" id="ri-photo" hidden>
     </div>
     <div class="field">
       <label>What changed?</label>
@@ -429,7 +614,7 @@ function openRecordIterationModal() {
       <button class="btn btn-primary" id="m-save" type="button">Save entry</button>
     </div>
   `);
-  document.getElementById("m-cancel").addEventListener("click", () => { stopRecognizer(); closeModal(); });
+  document.getElementById("m-cancel").addEventListener("click", () => { stopRecognizer(); stopCamera(); closeModal(); });
 
   document.querySelectorAll("#ri-size-picker .size-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -439,12 +624,17 @@ function openRecordIterationModal() {
     });
   });
 
+  document.getElementById("btn-choose-photo").addEventListener("click", () => document.getElementById("ri-photo").click());
   document.getElementById("ri-photo").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     pendingPhoto = await resizeImageToDataURL(file, 900, 0.72);
     document.getElementById("photo-preview-wrap").innerHTML = `<img class="photo-preview" src="${pendingPhoto}">`;
   });
+
+  document.getElementById("btn-take-photo").addEventListener("click", () => openCamera());
+  document.getElementById("camera-cancel").addEventListener("click", () => stopCamera());
+  document.getElementById("camera-capture").addEventListener("click", () => capturePhoto());
 
   if (SpeechRec) {
     document.getElementById("m-voice-btn-1").addEventListener("click", () => toggleVoiceNote(SpeechRec, "ri-what", "m-voice-status-1", "m-voice-btn-1"));
@@ -453,6 +643,7 @@ function openRecordIterationModal() {
 
   document.getElementById("m-save").addEventListener("click", async () => {
     stopRecognizer();
+    stopCamera();
     const attachmentId = Number(document.getElementById("ri-attachment").value);
     const whatChanged = document.getElementById("ri-what").value.trim();
     const whyChanged = document.getElementById("ri-why").value.trim();
@@ -465,6 +656,42 @@ function openRecordIterationModal() {
     await renderIterationTotal();
     renderAttachmentsSetup();
   });
+}
+
+let activeCameraStream = null;
+async function openCamera() {
+  try {
+    activeCameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+    const video = document.getElementById("camera-video");
+    video.srcObject = activeCameraStream;
+    document.getElementById("camera-view").hidden = false;
+    document.getElementById("photo-btn-group").hidden = true;
+  } catch (err) {
+    // Permission denied, no camera, or an insecure context — fall back to the
+    // regular file picker rather than leaving the person stuck.
+    showErrorBanner("Couldn't access the camera (" + (err.message || err.name) + ") — use Choose from files instead.");
+  }
+}
+function stopCamera() {
+  if (activeCameraStream) { activeCameraStream.getTracks().forEach((t) => t.stop()); activeCameraStream = null; }
+  const view = document.getElementById("camera-view");
+  const btnGroup = document.getElementById("photo-btn-group");
+  if (view) view.hidden = true;
+  if (btnGroup) btnGroup.hidden = false;
+}
+function capturePhoto() {
+  const video = document.getElementById("camera-video");
+  const maxDim = 900;
+  let { videoWidth: width, videoHeight: height } = video;
+  if (!width || !height) return;
+  if (width > height && width > maxDim) { height = Math.round(height * (maxDim / width)); width = maxDim; }
+  else if (height > maxDim) { width = Math.round(width * (maxDim / height)); height = maxDim; }
+  const canvas = document.createElement("canvas");
+  canvas.width = width; canvas.height = height;
+  canvas.getContext("2d").drawImage(video, 0, 0, width, height);
+  pendingPhoto = canvas.toDataURL("image/jpeg", 0.72);
+  document.getElementById("photo-preview-wrap").innerHTML = `<img class="photo-preview" src="${pendingPhoto}">`;
+  stopCamera();
 }
 
 function resizeImageToDataURL(file, maxDim, quality) {
@@ -820,6 +1047,7 @@ async function startGuidedRun() {
     date: new Date(now).toLocaleDateString(),
     startedAt: now,
     inProgress: true,
+    sessionId: state.activeSessionId,
     rawScores: {},
     missionTimings: [],
     transitionTimings: [],
@@ -837,80 +1065,146 @@ function tickGuidedTimer() {
   if (!el || !state.guidedRun) return;
   el.textContent = fmtDuration(Date.now() - state.guidedRun.phaseStartTs);
 }
-
 function stopGuidedTimer() {
   if (state.guidedRun?.timerHandle) clearInterval(state.guidedRun.timerHandle);
 }
 
-function cancelGuidedRunLink() {
-  return `<button class="btn-link-cancel" id="grn-cancel">Cancel this run</button>`;
+function openGuidedFullscreen(html) {
+  let el = document.getElementById("guided-fullscreen");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "guided-fullscreen";
+    el.className = "guided-fullscreen";
+    document.body.appendChild(el);
+  }
+  el.innerHTML = html;
+  el.hidden = false;
 }
+function closeGuidedFullscreen() {
+  const el = document.getElementById("guided-fullscreen");
+  if (el) { el.hidden = true; el.innerHTML = ""; }
+}
+
 function wireCancelLink() {
   document.getElementById("grn-cancel").addEventListener("click", async () => {
     if (!confirm("Cancel and discard this practice run?")) return;
     stopGuidedTimer();
     await dbDelete("runs", state.guidedRun.run.id);
     state.guidedRun = null;
-    closeModal();
+    closeGuidedFullscreen();
     await loadRuns();
+  });
+}
+
+// A task counts as "complete" once it has any score entered — not
+// necessarily full points — so it moves out of the way as soon as you've
+// dealt with it, letting you see at a glance what's left.
+function isTaskComplete(t, raw) {
+  const v = raw[t.id];
+  if (t.type === "bool") return !!v;
+  if (t.type === "number") return (Number(v) || 0) > 0;
+  return v !== null && v !== undefined && v !== "";
+}
+
+function taskRowHTML(t, raw) {
+  const max = taskMaxPoints(t);
+  if (t.type === "bool") {
+    const on = !!raw[t.id];
+    return `<div class="gfs-task-row" data-tid="${t.id}" data-type="bool">
+      <span class="gfs-task-name">${esc(t.name)}</span>
+      <span class="gfs-task-pts">${on ? max : 0} / ${max}</span>
+    </div>`;
+  }
+  if (t.type === "number") {
+    const val = raw[t.id] ?? 0;
+    const btns = Array.from({ length: (t.max || 0) + 1 }, (_, i) =>
+      `<button type="button" class="gfs-num-btn${val === i ? " active" : ""}" data-tid="${t.id}" data-val="${i}">${i}</button>`
+    ).join("");
+    return `<div class="gfs-task-row gfs-task-row-wrap" data-tid="${t.id}" data-type="number">
+      <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${pointsFromRawTask(t, val)} / ${max}</span></span>
+      <div class="gfs-num-strip">${btns}</div>
+    </div>`;
+  }
+  const cur = raw[t.id] ?? "";
+  const btns = [`<button type="button" class="gfs-choice-btn${cur === "" ? " active" : ""}" data-tid="${t.id}" data-val="">Not achieved</button>`]
+    .concat((t.options || []).map((o, i) => `<button type="button" class="gfs-choice-btn${String(cur) === String(i) ? " active" : ""}" data-tid="${t.id}" data-val="${i}">${esc(o.label)}</button>`))
+    .join("");
+  return `<div class="gfs-task-row gfs-task-row-wrap" data-tid="${t.id}" data-type="choice">
+    <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${pointsFromRawTask(t, cur)} / ${max}</span></span>
+    <div class="gfs-choice-strip">${btns}</div>
+  </div>`;
+}
+
+function renderTaskGroups() {
+  const { run, missionIdx } = state.guidedRun;
+  const mission = state.missions[missionIdx];
+  const raw = run.rawScores;
+  const complete = [], incomplete = [];
+  (mission.tasks || []).forEach((t) => (isTaskComplete(t, raw) ? complete : incomplete).push(t));
+  document.getElementById("gfs-complete-list").innerHTML = complete.length
+    ? complete.map((t) => taskRowHTML(t, raw)).join("")
+    : `<p class="empty-sub">Nothing yet — tap a task below as you complete it.</p>`;
+  document.getElementById("gfs-incomplete-list").innerHTML = incomplete.length
+    ? incomplete.map((t) => taskRowHTML(t, raw)).join("")
+    : `<p class="empty-sub">All tasks marked.</p>`;
+  bindTaskRowEvents();
+}
+
+function bindTaskRowEvents() {
+  document.querySelectorAll('.gfs-task-row[data-type="bool"]').forEach((row) => {
+    row.addEventListener("click", () => {
+      const tid = row.dataset.tid;
+      state.guidedRun.run.rawScores[tid] = !state.guidedRun.run.rawScores[tid];
+      renderTaskGroups();
+    });
+  });
+  document.querySelectorAll(".gfs-num-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.guidedRun.run.rawScores[btn.dataset.tid] = Number(btn.dataset.val);
+      renderTaskGroups();
+    });
+  });
+  document.querySelectorAll(".gfs-choice-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const v = btn.dataset.val;
+      state.guidedRun.run.rawScores[btn.dataset.tid] = v === "" ? null : Number(v);
+      renderTaskGroups();
+    });
   });
 }
 
 function renderGuidedMissionPhase() {
   const { run, missionIdx } = state.guidedRun;
   const mission = state.missions[missionIdx];
-  const raw = run.rawScores;
-  const rows = (mission.tasks || []).map((t) => {
-    const max = taskMaxPoints(t);
-    let control = "";
-    if (t.type === "bool") {
-      const on = !!raw[t.id];
-      control = `<div class="score-toggle ${on ? "on" : ""}" data-tid="${t.id}" data-type="bool"><div class="knob"></div></div>`;
-    } else if (t.type === "number") {
-      const val = raw[t.id] ?? 0;
-      control = `<div class="score-control"><input type="number" min="0" max="${t.max}" step="1" value="${val}" data-tid="${t.id}" data-type="number"></div>`;
-    } else {
-      const cur = raw[t.id] ?? "";
-      control = `<div class="score-control"><select data-tid="${t.id}" data-type="choice">
-        <option value="" ${cur === "" ? "selected" : ""}>Not achieved (0)</option>
-        ${t.options.map((o, i) => `<option value="${i}" ${String(cur) === String(i) ? "selected" : ""}>${esc(o.label)} (${o.points})</option>`).join("")}
-      </select></div>`;
-    }
-    return `<div class="mission-score-row"><span class="mission-score-name">${esc(t.name)} <span class="mission-score-max">/ ${max}</span></span>${control}</div>`;
-  }).join("");
-
-  openModal(`
-    <div class="guided-phase-badge">Mission ${missionIdx + 1} of ${state.missions.length}</div>
-    <h2>${esc(mission.name)}</h2>
-    <div class="run-total-bar"><span class="rt-label">Elapsed</span><span class="rt-num" id="grn-timer">0:00</span></div>
-    <div id="grn-rows">${rows || '<p class="empty-sub">This mission has no tasks yet.</p>'}</div>
-    <button class="btn btn-primary btn-full" id="grn-done" style="margin-top:16px;">Robot returned &mdash; mission done</button>
-    ${cancelGuidedRunLink()}
+  openGuidedFullscreen(`
+    <div class="gfs-header">
+      <div class="guided-phase-badge">Mission ${missionIdx + 1} of ${state.missions.length}</div>
+      <h2 class="gfs-mission-name">${esc(mission.name)}</h2>
+      <div class="gfs-timer" id="grn-timer">0:00</div>
+      <div class="gfs-timer-label">Elapsed</div>
+    </div>
+    <div class="gfs-body">
+      <div class="gfs-section">
+        <h3>Complete</h3>
+        <div id="gfs-complete-list" class="gfs-task-list"></div>
+      </div>
+      <div class="gfs-section">
+        <h3>Incomplete</h3>
+        <div id="gfs-incomplete-list" class="gfs-task-list"></div>
+      </div>
+    </div>
+    <div class="gfs-footer">
+      <button class="btn btn-primary btn-full" id="grn-done">Robot returned &mdash; mission done</button>
+      ${cancelGuidedRunLink()}
+    </div>
   `);
   wireCancelLink();
-
-  document.querySelectorAll(".score-toggle").forEach((el) => {
-    el.addEventListener("click", () => {
-      const tid = el.dataset.tid;
-      const on = !el.classList.contains("on");
-      el.classList.toggle("on", on);
-      raw[tid] = on;
-    });
-  });
-  document.querySelectorAll('.score-control input[type="number"]').forEach((el) => {
-    el.addEventListener("input", () => {
-      const tid = el.dataset.tid;
-      const task = mission.tasks.find((tt) => tt.id === tid);
-      let v = Number(el.value) || 0;
-      v = Math.max(0, Math.min(task.max, v));
-      raw[tid] = v;
-    });
-  });
-  document.querySelectorAll(".score-control select").forEach((el) => {
-    el.addEventListener("change", () => {
-      raw[el.dataset.tid] = el.value === "" ? null : Number(el.value);
-    });
-  });
+  if (!(mission.tasks || []).length) {
+    document.getElementById("gfs-complete-list").innerHTML = "";
+    document.getElementById("gfs-incomplete-list").innerHTML = `<p class="empty-sub">This mission has no tasks yet.</p>`;
+  } else {
+    renderTaskGroups();
+  }
 
   document.getElementById("grn-done").addEventListener("click", async () => {
     const now = Date.now();
@@ -921,9 +1215,8 @@ function renderGuidedMissionPhase() {
       stopGuidedTimer();
       run.finishedAt = now;
       run.totalTimeMs = now - run.startedAt;
-      run.inProgress = false;
       await dbPut("runs", run);
-      renderGuidedSummary();
+      renderGuidedOverview();
     } else {
       state.guidedRun.phase = "transition";
       state.guidedRun.phaseStartTs = now;
@@ -932,16 +1225,27 @@ function renderGuidedMissionPhase() {
   });
 }
 
+function cancelGuidedRunLink() {
+  return `<button type="button" class="btn-link-cancel" id="grn-cancel">Cancel this run</button>`;
+}
+
 function renderGuidedTransitionPhase() {
   const { missionIdx } = state.guidedRun;
   const nextMission = state.missions[missionIdx + 1];
-  openModal(`
-    <div class="guided-phase-badge">Transition</div>
-    <h2>Heading to: ${esc(nextMission.name)}</h2>
-    <div class="run-total-bar"><span class="rt-label">Transition time</span><span class="rt-num" id="grn-timer">0:00</span></div>
-    <p class="empty-sub">Tap when the robot leaves base for the next mission.</p>
-    <button class="btn btn-amber btn-full" id="grn-leave">Robot leaves for next mission</button>
-    ${cancelGuidedRunLink()}
+  openGuidedFullscreen(`
+    <div class="gfs-header">
+      <div class="guided-phase-badge">Transition</div>
+      <h2 class="gfs-mission-name">Heading to: ${esc(nextMission.name)}</h2>
+      <div class="gfs-timer" id="grn-timer">0:00</div>
+      <div class="gfs-timer-label">Transition time</div>
+    </div>
+    <div class="gfs-body gfs-center">
+      <p class="empty-sub">Tap when the robot leaves base for the next mission.</p>
+    </div>
+    <div class="gfs-footer">
+      <button class="btn btn-amber btn-full" id="grn-leave">Robot leaves for next mission</button>
+      ${cancelGuidedRunLink()}
+    </div>
   `);
   wireCancelLink();
   document.getElementById("grn-leave").addEventListener("click", () => {
@@ -955,39 +1259,180 @@ function renderGuidedTransitionPhase() {
   });
 }
 
-function renderGuidedSummary() {
+function renderGuidedOverview() {
   const { run } = state.guidedRun;
-  const total = runTotal(run, state.missions);
-  const maxTotal = runMaxPoints(state.missions);
-  const rows = run.missionTimings.map((mt) => {
-    const mission = state.missions.find((m) => m.id === mt.missionId);
-    const score = mission ? missionScoreForRun(mission, run) : 0;
-    const max = mission ? missionMaxPoints(mission) : 0;
-    return `<tr><td>${esc(mt.missionName)}</td><td>${score}/${max}</td><td>${fmtDuration(mt.durationMs)}</td></tr>`;
-  }).join("");
-  openModal(`
-    <div class="guided-phase-badge">Run complete</div>
-    <h2>${esc(run.label)}</h2>
-    <div class="run-total-bar"><span class="rt-label">Total score</span><span class="rt-num">${total} / ${maxTotal}</span></div>
-    <div class="run-total-bar"><span class="rt-label">Total time</span><span class="rt-num">${fmtDuration(run.totalTimeMs)}</span></div>
-    <table class="run-summary-table"><thead><tr><th>Mission</th><th>Score</th><th>Time</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="modal-actions"><button class="btn btn-primary btn-full" id="grn-close">Done</button></div>
+  openGuidedFullscreen(`
+    <div class="gfs-header">
+      <div class="guided-phase-badge">Final overview</div>
+      <h2 class="gfs-mission-name">${esc(run.label)}</h2>
+      <div class="gfs-timer" id="gfs-overview-total">${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}</div>
+      <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs)} total time &middot; review below or save now</div>
+      <button class="btn btn-primary btn-full" id="grn-save-top" type="button" style="margin-top:12px;">&#10003; Save &amp; Finish</button>
+    </div>
+    <div class="gfs-body" id="gfs-overview-body"></div>
+    <div class="gfs-footer">
+      <button class="btn btn-primary btn-full" id="grn-save-bottom" type="button">Save &amp; Finish</button>
+      ${cancelGuidedRunLink()}
+    </div>
   `);
-  document.getElementById("grn-close").addEventListener("click", async () => {
-    state.guidedRun = null;
-    closeModal();
-    await loadRuns();
+  renderOverviewBody();
+  wireCancelLink();
+  document.getElementById("grn-save-top").addEventListener("click", finalizeGuidedRun);
+  document.getElementById("grn-save-bottom").addEventListener("click", finalizeGuidedRun);
+}
+
+function renderOverviewBody() {
+  const { run } = state.guidedRun;
+  const body = document.getElementById("gfs-overview-body");
+  body.innerHTML = state.missions.map((m) => {
+    const score = missionScoreForRun(m, run);
+    const max = missionMaxPoints(m);
+    const timing = (run.missionTimings || []).find((t) => t.missionId === m.id);
+    const rows = (m.tasks || []).map((t) => taskRowHTML(t, run.rawScores)).join("") || `<p class="empty-sub">No tasks.</p>`;
+    return `<div class="gfs-section">
+      <h3>${esc(m.name)} <span class="gfs-task-pts">${score} / ${max}${timing ? ` &middot; ${fmtDuration(timing.durationMs)}` : ""}</span></h3>
+      <div class="gfs-task-list">${rows}</div>
+    </div>`;
+  }).join("");
+  bindOverviewEvents();
+  updateOverviewTotal();
+}
+
+function bindOverviewEvents() {
+  document.querySelectorAll('#gfs-overview-body .gfs-task-row[data-type="bool"]').forEach((row) => {
+    row.addEventListener("click", () => {
+      state.guidedRun.run.rawScores[row.dataset.tid] = !state.guidedRun.run.rawScores[row.dataset.tid];
+      renderOverviewBody();
+    });
   });
+  document.querySelectorAll("#gfs-overview-body .gfs-num-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.guidedRun.run.rawScores[btn.dataset.tid] = Number(btn.dataset.val);
+      renderOverviewBody();
+    });
+  });
+  document.querySelectorAll("#gfs-overview-body .gfs-choice-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const v = btn.dataset.val;
+      state.guidedRun.run.rawScores[btn.dataset.tid] = v === "" ? null : Number(v);
+      renderOverviewBody();
+    });
+  });
+}
+
+function updateOverviewTotal() {
+  const el = document.getElementById("gfs-overview-total");
+  if (el) el.textContent = `${runTotal(state.guidedRun.run, state.missions)} / ${runMaxPoints(state.missions)}`;
+}
+
+async function finalizeGuidedRun() {
+  const { run } = state.guidedRun;
+  run.inProgress = false;
+  await dbPut("runs", run);
+  state.guidedRun = null;
+  closeGuidedFullscreen();
+  await loadRuns();
+}
+
+// ---- Practice Sessions ----
+async function loadSessions() {
+  state.sessions = (await dbGetAll("sessions")).sort((a, b) => a.order - b.order);
+  if (!state.sessions.length) {
+    const id = await dbPut("sessions", { name: "Practice Session 1", order: 0, createdAt: Date.now() });
+    state.sessions = await dbGetAll("sessions");
+    state.activeSessionId = id;
+  }
+  const rec = await dbGet("meta", "activeSessionId");
+  if (rec?.value && state.sessions.some((s) => s.id === rec.value)) {
+    state.activeSessionId = rec.value;
+  } else if (!state.activeSessionId || !state.sessions.some((s) => s.id === state.activeSessionId)) {
+    state.activeSessionId = state.sessions[state.sessions.length - 1].id;
+  }
+  renderSessionSelect();
+  renderSessionsSetup();
+}
+
+function renderSessionSelect() {
+  const sel = document.getElementById("session-select");
+  sel.innerHTML = state.sessions.map((s) => `<option value="${s.id}" ${s.id === state.activeSessionId ? "selected" : ""}>${esc(s.name)}</option>`).join("");
+}
+
+document.getElementById("session-select").addEventListener("change", async (e) => {
+  state.activeSessionId = Number(e.target.value);
+  await dbPut("meta", { key: "activeSessionId", value: state.activeSessionId });
+});
+
+function openSessionModal(session) {
+  const isEdit = !!session;
+  openModal(`
+    <h2>${isEdit ? "Rename session" : "New practice session"}</h2>
+    <div class="field"><label>Name</label><input class="text-input" id="ses-name" value="${isEdit ? esc(session.name) : `Practice Session ${state.sessions.length + 1}`}"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
+      <button class="btn btn-primary" id="m-save" type="button">Save</button>
+    </div>
+  `);
+  document.getElementById("m-cancel").addEventListener("click", closeModal);
+  document.getElementById("m-save").addEventListener("click", async () => {
+    const name = document.getElementById("ses-name").value.trim();
+    if (!name) { alert("Name this session."); return; }
+    const record = isEdit ? session : { order: state.sessions.length, createdAt: Date.now() };
+    record.name = name;
+    const id = await dbPut("sessions", record);
+    closeModal();
+    if (!isEdit) { state.activeSessionId = id; await dbPut("meta", { key: "activeSessionId", value: id }); }
+    await loadSessions();
+  });
+}
+document.getElementById("btn-add-session").addEventListener("click", () => openSessionModal(null));
+document.getElementById("btn-add-session-settings").addEventListener("click", () => openSessionModal(null));
+
+function renderSessionsSetup() {
+  const list = document.getElementById("session-setup-list");
+  list.innerHTML = "";
+  if (!state.sessions.length) { list.innerHTML = `<p class="empty-sub">No sessions yet.</p>`; return; }
+  state.sessions.forEach((s, idx) => {
+    const row = document.createElement("div");
+    row.className = "mission-row";
+    row.innerHTML = `
+      <div class="m-order">
+        <button data-dir="up" ${idx === 0 ? "disabled" : ""}>&#9650;</button>
+        <button data-dir="down" ${idx === state.sessions.length - 1 ? "disabled" : ""}>&#9660;</button>
+      </div>
+      <div class="m-info">
+        <div class="m-name">${esc(s.name)}</div>
+        <div class="m-sub">${new Date(s.createdAt).toLocaleDateString()}</div>
+      </div>
+      <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
+      <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
+    `;
+    row.querySelector('[data-dir="up"]').addEventListener("click", () => reorderSession(idx, -1));
+    row.querySelector('[data-dir="down"]').addEventListener("click", () => reorderSession(idx, 1));
+    row.querySelector('[data-act="edit"]').addEventListener("click", () => openSessionModal(s));
+    row.querySelector('[data-act="del"]').addEventListener("click", async () => {
+      if (state.sessions.length === 1) { alert("You need at least one session — rename this one instead, or add another before deleting it."); return; }
+      if (confirm(`Delete "${s.name}"? Runs in this session become unassigned, not deleted.`)) {
+        await dbDelete("sessions", s.id);
+        await loadSessions();
+        await loadRuns();
+      }
+    });
+    list.appendChild(row);
+  });
+}
+async function reorderSession(idx, dir) {
+  const other = idx + dir;
+  if (other < 0 || other >= state.sessions.length) return;
+  const a = state.sessions[idx], b = state.sessions[other];
+  const tmp = a.order; a.order = b.order; b.order = tmp;
+  await dbPut("sessions", a); await dbPut("sessions", b);
+  await loadSessions();
 }
 
 // ---- Saved runs / analysis ----
 async function loadRuns() {
   state.runs = (await dbGetAll("runs")).sort((a, b) => a.order - b.order);
   renderRuns();
-}
-
-function flattenMissionTimings(runs) {
-  return runs.flatMap((r) => r.missionTimings || []);
 }
 
 function renderRuns() {
@@ -1007,26 +1452,11 @@ function renderRuns() {
     const totals = completed.map((r) => runTotal(r, state.missions));
     const best = Math.max(...totals);
     const avg = totals.reduce((a, b) => a + b, 0) / totals.length;
-    const allTimings = flattenMissionTimings(completed);
-    const avgMissionTime = allTimings.length ? allTimings.reduce((s, t) => s + t.durationMs, 0) / allTimings.length : 0;
-    const byMission = {};
-    allTimings.forEach((t) => { (byMission[t.missionName] ??= []).push(t.durationMs); });
-    let slowest = null;
-    for (const [name, durs] of Object.entries(byMission)) {
-      const avgD = durs.reduce((a, b) => a + b, 0) / durs.length;
-      if (!slowest || avgD > slowest.avgD) slowest = { name, avgD };
-    }
-    let improvement = "—";
-    if (completed.length >= 2) {
-      const delta = totals[totals.length - 1] - totals[totals.length - 2];
-      improvement = (delta >= 0 ? "+" : "") + delta;
-    }
+    const avgGameTime = completed.reduce((s, r) => s + (r.totalTimeMs || 0), 0) / completed.length;
     stats.innerHTML = `
       <div class="stat-box"><span class="stat-num">${best}</span><span class="stat-label">Best score</span></div>
       <div class="stat-box"><span class="stat-num">${avg.toFixed(1)}</span><span class="stat-label">Avg score</span></div>
-      <div class="stat-box"><span class="stat-num">${fmtDuration(avgMissionTime)}</span><span class="stat-label">Avg mission time</span></div>
-      <div class="stat-box"><span class="stat-num" style="font-size:0.95rem;">${slowest ? esc(slowest.name) : "—"}</span><span class="stat-label">Slowest mission</span></div>
-      <div class="stat-box"><span class="stat-num">${improvement}</span><span class="stat-label">Vs previous run</span></div>
+      <div class="stat-box"><span class="stat-num">${fmtDuration(avgGameTime)}</span><span class="stat-label">Avg game time</span></div>
     `;
   } else {
     stats.innerHTML = "";
@@ -1047,33 +1477,52 @@ function renderRuns() {
     list.appendChild(card);
   });
 
-  completed.slice().reverse().forEach((run) => {
-    const total = runTotal(run, state.missions);
-    const maxTotal = runMaxPoints(state.missions);
-    const card = document.createElement("div");
-    card.className = "run-card";
-    card.innerHTML = `
-      <div class="run-card-head">
-        <div>
-          <div class="run-title">${esc(run.label)}</div>
-          <div class="run-date">${esc(run.date || "")}</div>
+  const sessionsById = Object.fromEntries(state.sessions.map((s) => [s.id, s]));
+  const groups = {};
+  completed.forEach((r) => { const key = r.sessionId ?? "unassigned"; (groups[key] ??= []).push(r); });
+  const orderedKeys = [...state.sessions].sort((a, b) => b.order - a.order).map((s) => s.id);
+  if (groups.unassigned) orderedKeys.push("unassigned");
+
+  orderedKeys.forEach((key) => {
+    const runsInGroup = (groups[key] || []).slice().reverse();
+    if (!runsInGroup.length) return;
+    const session = sessionsById[key];
+    const label = session ? session.name : "Unassigned";
+    const groupAvg = runsInGroup.reduce((s, r) => s + runTotal(r, state.missions), 0) / runsInGroup.length;
+
+    const header = document.createElement("div");
+    header.className = "session-group-header";
+    header.innerHTML = `<h3>${esc(label)}</h3><span class="session-group-meta">${runsInGroup.length} run${runsInGroup.length === 1 ? "" : "s"} &middot; avg ${groupAvg.toFixed(1)}</span>`;
+    list.appendChild(header);
+
+    runsInGroup.forEach((run) => {
+      const total = runTotal(run, state.missions);
+      const maxTotal = runMaxPoints(state.missions);
+      const card = document.createElement("div");
+      card.className = "run-card";
+      card.innerHTML = `
+        <div class="run-card-head">
+          <div>
+            <div class="run-title">${esc(run.label)}</div>
+            <div class="run-date">${esc(run.date || "")}</div>
+          </div>
+          <div class="run-stamp"><span class="rs-score">${total}</span><span class="rs-label">/ ${maxTotal}</span></div>
         </div>
-        <div class="run-stamp"><span class="rs-score">${total}</span><span class="rs-label">/ ${maxTotal}</span></div>
-      </div>
-      <div class="run-meta-row">
-        <span>${fmtDuration(run.totalTimeMs || 0)} total</span>
-        <span>${(run.missionTimings || []).length} missions run</span>
-      </div>
-      <div class="run-card-actions">
-        <button class="btn btn-ghost" data-act="view">View breakdown</button>
-        <button class="btn btn-danger" data-act="del">Delete</button>
-      </div>
-    `;
-    card.querySelector('[data-act="view"]').addEventListener("click", () => viewRunBreakdown(run));
-    card.querySelector('[data-act="del"]').addEventListener("click", async () => {
-      if (confirm(`Delete "${run.label}"?`)) { await dbDelete("runs", run.id); await loadRuns(); }
+        <div class="run-meta-row">
+          <span>${fmtDuration(run.totalTimeMs || 0)} total</span>
+          <span>${(run.missionTimings || []).length} missions run</span>
+        </div>
+        <div class="run-card-actions">
+          <button class="btn btn-ghost" data-act="view">View breakdown</button>
+          <button class="btn btn-danger" data-act="del">Delete</button>
+        </div>
+      `;
+      card.querySelector('[data-act="view"]').addEventListener("click", () => viewRunBreakdown(run));
+      card.querySelector('[data-act="del"]').addEventListener("click", async () => {
+        if (confirm(`Delete "${run.label}"?`)) { await dbDelete("runs", run.id); await loadRuns(); }
+      });
+      list.appendChild(card);
     });
-    list.appendChild(card);
   });
 }
 
@@ -1108,11 +1557,18 @@ document.getElementById("btn-export-backup").addEventListener("click", async () 
     missions: await dbGetAll("missions"),
     runs: await dbGetAll("runs"),
     meta: await dbGetAll("meta"),
+    sessions: await dbGetAll("sessions"),
   };
   download(`barp-backup-${Date.now()}.json`, JSON.stringify(data, null, 2), "application/json");
 });
 
 document.getElementById("btn-import-backup").addEventListener("click", () => document.getElementById("file-import-backup").click());
+document.getElementById("btn-restore-shadow").addEventListener("click", () => restoreFromShadowBackup());
+document.getElementById("btn-reset-db").addEventListener("click", () => {
+  if (confirm("This permanently erases every attachment, entry, mission, and run stored on this device. This can't be undone. Continue?")) {
+    resetLocalDatabase();
+  }
+});
 document.getElementById("file-import-backup").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   e.target.value = "";
@@ -1120,12 +1576,13 @@ document.getElementById("file-import-backup").addEventListener("change", async (
   if (!confirm("This replaces everything currently stored on this device with the backup file. Continue?")) return;
   try {
     const data = JSON.parse(await file.text());
-    await dbClear("attachments"); await dbClear("entries"); await dbClear("missions"); await dbClear("runs"); await dbClear("meta");
+    await dbClear("attachments"); await dbClear("entries"); await dbClear("missions"); await dbClear("runs"); await dbClear("meta"); await dbClear("sessions");
     for (const a of data.attachments || []) await dbPut("attachments", a);
     for (const en of data.entries || []) await dbPut("entries", en);
     for (const m of data.missions || []) await dbPut("missions", m);
     for (const r of data.runs || []) await dbPut("runs", r);
     for (const meta of data.meta || []) await dbPut("meta", meta);
+    for (const s of data.sessions || []) await dbPut("sessions", s);
     await initAll();
     alert("Backup restored.");
   } catch (err) {
@@ -1146,11 +1603,22 @@ async function loadSeasonName() {
 }
 
 // ---------- Init ----------
+async function purgeOldTrash() {
+  const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+  const all = await dbGetAll("entries");
+  const cutoff = Date.now() - THIRTY_DAYS;
+  for (const e of all) {
+    if (e.deleted && e.deletedAt && e.deletedAt < cutoff) await dbDelete("entries", e.id);
+  }
+}
 async function initAll() {
+  await purgeOldTrash();
   await loadAttachments();
   await loadMissions();
+  await loadSessions();
   await loadRuns();
   await loadSeasonName();
+  await renderLastBackupTime();
   document.getElementById("log-empty-state").hidden = state.attachments.length === 0 ? false : true;
 }
 initAll();
