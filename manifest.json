@@ -1,5 +1,5 @@
 {
-  "name": "BARP - Build App for Robot Progress",
+  "name": "BARP - Bobot Attachment and Run Progress",
   "short_name": "BARP",
   "description": "Attachment change log and run scoring tracker for FLL robot game",
   "start_url": "./index.html",

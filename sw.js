@@ -1,5 +1,5 @@
 // Bump this when you change any cached file so phones pick up the update.
-const CACHE_NAME = "barp-v10";
+const CACHE_NAME = "barp-v14";
 const ASSETS = [
   "./",
   "./index.html",
@@ -7,7 +7,10 @@ const ASSETS = [
   "./app.js",
   "./manifest.json",
   "./icons/icon-192.png",
-  "./icons/icon-512.png"
+  "./icons/icon-512.png",
+  "./sounds/start-horn.mp3",
+  "./sounds/thirty-seconds.mp3",
+  "./sounds/buzzer.mp3"
 ];
 
 self.addEventListener("install", (event) => {

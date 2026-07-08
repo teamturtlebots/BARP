@@ -28,18 +28,23 @@ Each install has its own separate storage — use the backup export/import in Se
 ## 3. Using it
 
 ### Settings — set this up first
-- **Attachments**: add one per swappable part on the bot. Reorder, rename, or delete from here — this list won't change often, so it lives in Settings rather than cluttering the Log tab.
-- **Missions**: add a mission, then expand it to add its tasks. Each task scores as Yes/No, a counted number of objects, or a multiple-choice state — matching however that row is scored on the official scoresheet. **Import CSV** bulk-adds missions/tasks from a spreadsheet (there's a "download example CSV" button in that dialog showing the exact format).
-- **Backup**: export a full `.json` backup any time; restore replaces everything currently on the device.
+- **Attachments**: add one per swappable part on the bot. Tap **Edit order** to drag them into a new order, then **Save order** to lock it in — this list won't change often, so it lives in Settings rather than cluttering the Log tab.
+- **Missions**: add a mission, then expand it to add its tasks. Each task scores as Yes/No, a counted number of objects, or a multiple-choice state — matching however that row is scored on the official scoresheet. Missions and tasks each get their own **Edit order** drag mode too. **Import CSV** bulk-adds missions/tasks from a spreadsheet (there's a "download example CSV" button in that dialog showing the exact format).
+- **Match Settings**: how many precision tokens you start each run with.
+- **Backup**: an automatic backup runs quietly in the background, kept in a separate database from your main data — restore from it if something goes wrong. You can also export/import a full `.json` backup manually. **Every deletion anywhere in the app also saves its own snapshot** from right before it happened (last 20 kept) — find those under **Undo a deletion** to put back exactly what you removed, even if the automatic backup already moved past it.
 
 ### Log tab
-- Pick an attachment, then **+ Log change** for every iteration: a photo, what you changed, why you changed it (type or dictate via the mic button), all timestamped automatically.
-- Each attachment shows its iteration count. Flip **Show all** to see every attachment's changes merged into one chronological feed instead of one attachment at a time.
+- **+ Record Iteration** logs a change: pick which attachment, how big the change was (small bug fix / moderate change / major strategy change), a photo (live in-app camera, or choose an existing one), and what/why changed (type or dictate via the mic button) — all timestamped automatically.
+- Attachment chips filter the feed below — tap one, several, or **All**. Sort by date or by attachment name.
 
 ### Runs tab
-- **Start New Practice Run** walks you through your mission list in order: score each task as it happens, tap **Robot returned** when the mission's done, tap **Robot leaves** when you're heading to the next one. It's timing the mission itself and the transition between missions the whole way through.
-- Finishing the last mission shows a run summary (score, total time, per-mission breakdown), then saves it.
-- The analysis strip above your saved runs shows best score, average score, average mission time, your slowest mission, and how the latest run compares to the one before it. Tap **View breakdown** on any saved run for its full per-mission score/time table.
+- **Start New Practice Run** → tap to begin a 3-2-1 countdown → the match clock starts and the start horn plays (if you've added sound files — see `sounds/README.md`).
+- Tasks come one at a time, full-screen: bool tasks are a big green **Complete** / red **Incomplete** tap; counted or multi-state tasks show their options as big buttons. Tapping any of them commits it and jumps to the next task automatically. A back arrow (top-left) revisits the previous task in the current mission.
+- Once every task in a mission is marked, that screen is replaced by a single **Robot returned** button; tap it, then **Robot leaves for next mission** on the transition screen.
+- The match clock runs continuously through the whole run (not per-mission) — turns red and buzzes at 2:30, with a warning sound at 2:00, same as a real match.
+- A small precision-token counter floats on every guided-run screen; tap it to spend one.
+- After the last mission, you land on a **Final Overview**: every mission and task, still tap-to-edit, with **Save & Finish** right at the top so you can skip straight past reviewing if you want, or fix something first.
+- The stats strip shows best score, average score, and average total game time. Tap **View breakdown** on any saved run for its per-mission score/time table. **Export scoresheet CSV** builds a spreadsheet (one row per task, one column per run you pick, with a success-rate column) — matching the classic mission-tracker spreadsheet format.
 
 ## Ideas for what to put in "What changed" / "Why changed"
 - **What changed**: the specific part, dimension, gear ratio, angle, material, or print setting you touched

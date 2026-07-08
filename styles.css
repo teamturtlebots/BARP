@@ -492,11 +492,82 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 }
 .gfs-footer .btn-link-cancel { margin-top: 12px; }
 
-/* --- Added: practice session grouping in the runs list --- */
-.session-group-header {
-  display: flex; align-items: baseline; justify-content: space-between;
-  margin: 18px 0 8px; padding-bottom: 4px; border-bottom: 2px solid var(--line);
+/* --- Added: session checklist (CSV export picker) --- */
+.checkbox-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 4px; border-bottom: 1px solid var(--paper-3);
+  font-size: 0.92rem; cursor: pointer;
 }
-.session-group-header:first-child { margin-top: 0; }
-.session-group-header h3 { font-size: 1rem; }
-.session-group-meta { font-family: var(--mono); font-size: 0.72rem; color: var(--text-soft); }
+.checkbox-row:last-child { border-bottom: none; }
+.checkbox-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--moss); flex: none; }
+
+/* --- Added: redesigned one-task-at-a-time guided run screen --- */
+.gfs-back-btn {
+  position: absolute; top: calc(14px + env(safe-area-inset-top)); left: 14px;
+  width: 38px; height: 38px; border-radius: 50%;
+  background: rgba(255,255,255,0.14); border: none; color: var(--paper);
+  font-size: 1.2rem; cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.gfs-back-btn:disabled { opacity: 0.25; cursor: not-allowed; }
+.gfs-header { position: relative; }
+
+.precision-token-btn {
+  position: fixed; z-index: 75;
+  bottom: calc(90px + env(safe-area-inset-bottom)); right: 16px;
+  background: var(--amber); color: var(--ink-deep); border: none; border-radius: 24px;
+  padding: 10px 16px; font-family: var(--mono); font-weight: 700; font-size: 0.95rem;
+  cursor: pointer; box-shadow: 0 3px 10px rgba(0,0,0,0.3);
+  display: flex; align-items: center; gap: 6px;
+}
+.precision-token-btn:active { transform: scale(0.95); }
+
+.gfs-timer.timer-danger { color: var(--coral); }
+
+.gfs-task-prompt { font-family: var(--display); font-size: 1.25rem; font-weight: 700; color: var(--ink-deep); margin-bottom: 20px; }
+.gfs-task-prompt .gfs-task-pts { font-family: var(--mono); font-size: 0.85rem; font-weight: 400; color: var(--text-soft); display: block; margin-top: 4px; }
+
+.gfs-big-choice {
+  display: block; width: 100%; max-width: 420px;
+  padding: 30px 16px; margin: 0 auto 14px; border-radius: 14px; border: none;
+  font-family: var(--display); font-size: 1.5rem; font-weight: 700; color: #fff; cursor: pointer;
+}
+.gfs-big-complete { background: var(--moss); }
+.gfs-big-incomplete { background: var(--coral); }
+.gfs-big-choice:active { transform: scale(0.98); }
+
+.gfs-num-strip-big, .gfs-choice-strip-big {
+  display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; max-width: 460px; margin: 0 auto;
+}
+.gfs-num-btn-big {
+  min-width: 62px; height: 62px; border-radius: 12px; border: 1.5px solid var(--line);
+  background: var(--paper-2); font-family: var(--mono); font-weight: 700; font-size: 1.3rem; cursor: pointer;
+}
+.gfs-num-btn-big.active { background: var(--moss); border-color: var(--moss); color: var(--paper); }
+.gfs-choice-btn-big {
+  padding: 16px 18px; border-radius: 12px; border: 1.5px solid var(--line);
+  background: var(--paper-2); font-size: 1rem; font-weight: 600; cursor: pointer;
+}
+.gfs-choice-btn-big.active { background: var(--moss); border-color: var(--moss); color: var(--paper); }
+
+.gfs-big-action { font-size: 1.1rem; padding: 20px; }
+
+.gfs-countdown-num {
+  font-family: var(--mono); font-weight: 700; font-size: 7rem; color: var(--ink-deep); line-height: 1;
+}
+.gfs-countdown-go { color: var(--moss); font-size: 4.5rem; }
+
+/* --- Added: drag-to-reorder edit mode (Attachments, Missions, Tasks) --- */
+.reorder-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
+.reorder-toolbar .btn { flex: 1; }
+.drag-row {
+  display: flex; align-items: center; gap: 12px;
+  touch-action: none; user-select: none;
+  background: var(--paper-2); border: 1.5px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 8px;
+}
+.drag-row.dragging { z-index: 30; box-shadow: 0 4px 14px rgba(0,0,0,0.25); border-color: var(--moss); background: #fff; }
+.drag-handle {
+  font-size: 1.3rem; color: var(--text-soft); cursor: grab; flex: none;
+  padding: 4px 8px; touch-action: none;
+}
+.drag-row .m-info { flex: 1; min-width: 0; }

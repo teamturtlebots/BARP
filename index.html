@@ -18,7 +18,7 @@
   <div class="header-stamp">BARP</div>
   <div class="header-text">
     <h1 id="season-title">BARP</h1>
-    <p class="header-sub" id="header-subline">bot attachment &amp; run progress</p>
+    <p class="header-sub" id="header-subline">bobot attachment &amp; run progress</p>
   </div>
 </header>
 
@@ -54,14 +54,8 @@
 
   <!-- RUNS VIEW -->
   <section class="view" id="view-runs" hidden>
-    <div class="section-row">
-      <h2>Session</h2>
-      <div class="btn-group">
-        <select id="session-select" class="sort-select"></select>
-        <button class="btn btn-ghost" id="btn-add-session">+ New</button>
-      </div>
-    </div>
     <button class="btn btn-amber btn-full btn-start-run" id="btn-start-run">&#9654; Start New Practice Run</button>
+    <button class="btn btn-ghost btn-full" id="btn-export-runs-csv" style="margin-bottom:16px;">Export scoresheet CSV</button>
 
     <div id="run-stats" class="stat-strip"></div>
     <div id="run-list" class="run-list"></div>
@@ -75,13 +69,6 @@
     </div>
     <p class="empty-sub">Set these up once per season, then reorder or rename as your build changes. This is also where you delete one, along with everything logged under it.</p>
     <div id="attachment-setup-list" class="mission-list"></div>
-
-    <div class="section-row" style="margin-top:28px;">
-      <h2>Practice Sessions</h2>
-      <button class="btn btn-amber" id="btn-add-session-settings">+ Session</button>
-    </div>
-    <p class="empty-sub">Runs are grouped by the session you had selected on the Runs tab when you started them. Rename, reorder, or delete sessions here.</p>
-    <div id="session-setup-list" class="mission-list"></div>
 
     <div class="section-row" style="margin-top:28px;">
       <h2>Missions</h2>
@@ -105,6 +92,18 @@
     </div>
     <button class="btn btn-danger btn-full" id="btn-reset-db" style="margin-top:10px;">Reset local data</button>
     <p class="empty-sub">Only use this if the app is stuck (e.g. a database error banner). This permanently erases everything stored on this device (except the automatic backup) — export a manual backup first if you can.</p>
+
+    <div class="section-row" style="margin-top:28px;">
+      <h2>Undo a deletion</h2>
+    </div>
+    <p class="empty-sub">Every time you delete something, a full snapshot is saved from right before it happened — restoring one puts everything back to that exact moment (the last 20 deletions are kept).</p>
+    <div id="deletion-snapshot-list" class="mission-list"></div>
+
+    <div class="section-row" style="margin-top:28px;">
+      <h2>Match Settings</h2>
+    </div>
+    <div class="field"><label>Precision tokens per run</label><input type="number" id="input-precision-tokens" class="text-input" min="0" value="2"></div>
+    <p class="empty-sub">Sound effects (start horn, 30-seconds warning, end buzzer) play automatically during a guided run if you've added the files yourself — see the README for exact filenames and where to find them. Without those files, the run still works fine, just silently.</p>
 
     <div class="section-row" style="margin-top:28px;">
       <h2>Notebook name</h2>
