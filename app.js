@@ -54,8 +54,8 @@ async function dbClear(store) { const t = await tx([store], "readwrite"); return
 // ---------- App state ----------
 const state = {
   attachments: [],
-  activeAttachmentId: null,
-  showAll: false,
+  selectedAttachmentIds: new Set(),
+  filterInitialized: false,
   entries: [],
   missions: [],
   runs: [],
@@ -160,9 +160,16 @@ function runTotal(run, missions) { return missions.reduce((sum, m) => sum + miss
 // ==========================================================
 async function loadAttachments() {
   state.attachments = (await dbGetAll("attachments")).sort((a, b) => (a.order ?? a.number ?? 0) - (b.order ?? b.number ?? 0));
+  if (!state.filterInitialized) {
+    state.selectedAttachmentIds = new Set(state.attachments.map((a) => a.id));
+    state.filterInitialized = true;
+  } else {
+    state.selectedAttachmentIds = new Set([...state.selectedAttachmentIds].filter((id) => state.attachments.some((a) => a.id === id)));
+  }
   renderAttachmentChips();
   renderAttachmentsSetup();
   await renderIterationTotal();
+  await renderEntryList();
 }
 
 async function iterationCount(attachmentId) {
@@ -179,52 +186,47 @@ async function renderIterationTotal() {
 function renderAttachmentChips() {
   const wrap = document.getElementById("attachment-chips");
   wrap.innerHTML = "";
+  document.getElementById("log-empty-state").hidden = state.attachments.length > 0;
+  document.querySelector(".filter-row").hidden = state.attachments.length === 0;
+  if (!state.attachments.length) { document.getElementById("entry-list").innerHTML = ""; document.getElementById("log-select-prompt").hidden = true; return; }
+
+  const allBtn = document.createElement("button");
+  const allSelected = state.selectedAttachmentIds.size === state.attachments.length;
+  allBtn.className = "chip chip-all" + (allSelected ? " active" : "");
+  allBtn.textContent = "All";
+  allBtn.addEventListener("click", async () => {
+    state.selectedAttachmentIds = allSelected ? new Set() : new Set(state.attachments.map((a) => a.id));
+    renderAttachmentChips();
+    await renderEntryList();
+  });
+  wrap.appendChild(allBtn);
+
   state.attachments.forEach((att) => {
     const chip = document.createElement("button");
-    chip.className = "chip" + (att.id === state.activeAttachmentId && !state.showAll ? " active" : "");
+    chip.className = "chip" + (state.selectedAttachmentIds.has(att.id) ? " active" : "");
     chip.innerHTML = `<span class="chip-num">#${esc(att.number)}</span>${esc(att.name)}`;
-    chip.addEventListener("click", () => selectAttachment(att.id));
+    chip.addEventListener("click", async () => {
+      if (state.selectedAttachmentIds.has(att.id)) state.selectedAttachmentIds.delete(att.id);
+      else state.selectedAttachmentIds.add(att.id);
+      renderAttachmentChips();
+      await renderEntryList();
+    });
     wrap.appendChild(chip);
   });
-  document.getElementById("log-empty-state").hidden = state.attachments.length > 0;
-  wrap.hidden = state.showAll;
 }
 
-document.getElementById("toggle-show-all").addEventListener("click", async (e) => {
-  state.showAll = !e.currentTarget.classList.contains("on");
-  e.currentTarget.classList.toggle("on", state.showAll);
-  document.getElementById("attachment-chips").hidden = state.showAll;
-  document.getElementById("log-active").hidden = state.showAll || !state.activeAttachmentId;
-  document.getElementById("log-all").hidden = !state.showAll;
-  if (state.showAll) await renderAllEntries();
-});
-
-async function selectAttachment(id) {
-  state.activeAttachmentId = id;
-  state.showAll = false;
-  document.getElementById("toggle-show-all").classList.remove("on");
-  document.getElementById("log-all").hidden = true;
-  renderAttachmentChips();
-  const att = state.attachments.find((a) => a.id === id);
-  document.getElementById("log-empty-state").hidden = true;
-  document.getElementById("log-active").hidden = false;
-  document.getElementById("active-attachment-name").textContent = `#${att.number} ${att.name}`;
-  await loadEntries(id);
-}
-
-async function loadEntries(attachmentId) {
-  const entries = await dbGetByIndex("entries", "byAttachment", attachmentId);
-  state.entries = entries.sort((a, b) => b.timestamp - a.timestamp);
-  document.getElementById("active-attachment-iterations").textContent =
-    `Iteration ${state.entries.length}${state.entries.length === 1 ? "" : "s"} logged`;
-  renderEntries();
-}
+document.getElementById("sort-select").addEventListener("change", renderEntryList);
 
 function entryCardHTML(entry, attachmentLabel) {
+  const sizeLabel = { small: "Small — bug fix", moderate: "Moderate change", major: "Major — strategy change" }[entry.size] || "";
   return `
     ${entry.photo ? `<img src="${entry.photo}" alt="">` : ""}
     <div class="entry-body">
-      <div class="entry-time">${fmtDate(entry.timestamp)}${attachmentLabel ? ` &middot; <span class="entry-att-tag">${esc(attachmentLabel)}</span>` : ""}</div>
+      <div class="entry-time">
+        ${fmtDate(entry.timestamp)}
+        ${attachmentLabel ? ` &middot; <span class="entry-att-tag">${esc(attachmentLabel)}</span>` : ""}
+        ${sizeLabel ? ` &middot; <span class="size-badge size-${entry.size}">${esc(sizeLabel)}</span>` : ""}
+      </div>
       <div class="entry-field"><span class="entry-field-label">What changed</span>${esc(entry.whatChanged) || "<em>&mdash;</em>"}</div>
       <div class="entry-field"><span class="entry-field-label">Why changed</span>${esc(entry.whyChanged) || "<em>&mdash;</em>"}</div>
       <div class="entry-actions">
@@ -233,49 +235,44 @@ function entryCardHTML(entry, attachmentLabel) {
     </div>`;
 }
 
-function renderEntries() {
+async function renderEntryList() {
   const list = document.getElementById("entry-list");
-  list.innerHTML = "";
-  if (!state.entries.length) {
-    list.innerHTML = `<p class="empty-sub">No changes logged yet for this attachment.</p>`;
-    return;
-  }
-  state.entries.forEach((entry) => {
-    const card = document.createElement("div");
-    card.className = "entry-card";
-    card.innerHTML = entryCardHTML(entry, null);
-    card.querySelector(".btn-icon").addEventListener("click", async () => {
-      if (confirm("Delete this log entry?")) {
-        await dbDelete("entries", entry.id);
-        await loadEntries(state.activeAttachmentId);
-        await renderIterationTotal();
-      }
-    });
-    list.appendChild(card);
-  });
-}
+  const prompt = document.getElementById("log-select-prompt");
+  if (!state.attachments.length) { list.innerHTML = ""; prompt.hidden = true; return; }
+  if (!state.selectedAttachmentIds.size) { list.innerHTML = ""; prompt.hidden = false; return; }
+  prompt.hidden = true;
 
-async function renderAllEntries() {
-  const [entries, attachments] = [await dbGetAll("entries"), state.attachments];
-  const attById = Object.fromEntries(attachments.map((a) => [a.id, a]));
-  entries.sort((a, b) => b.timestamp - a.timestamp);
-  const list = document.getElementById("entry-list-all");
+  const attById = Object.fromEntries(state.attachments.map((a) => [a.id, a]));
+  const allEntries = await dbGetAll("entries");
+  let entries = allEntries.filter((e) => state.selectedAttachmentIds.has(e.attachmentId));
+
+  const sortMode = document.getElementById("sort-select").value;
+  if (sortMode === "name") {
+    entries.sort((a, b) => {
+      const an = attById[a.attachmentId]?.name || "", bn = attById[b.attachmentId]?.name || "";
+      return an.localeCompare(bn) || b.timestamp - a.timestamp;
+    });
+  } else {
+    entries.sort((a, b) => b.timestamp - a.timestamp);
+  }
+
   list.innerHTML = "";
   if (!entries.length) {
-    list.innerHTML = `<p class="empty-sub">Nothing logged yet across any attachment.</p>`;
+    list.innerHTML = `<p class="empty-sub">No changes logged yet for the selected attachment${state.selectedAttachmentIds.size === 1 ? "" : "s"}.</p>`;
     return;
   }
+  const showTag = state.selectedAttachmentIds.size > 1 || state.attachments.length > 1;
   entries.forEach((entry) => {
     const att = attById[entry.attachmentId];
     const card = document.createElement("div");
     card.className = "entry-card";
-    card.innerHTML = entryCardHTML(entry, att ? `#${att.number} ${att.name}` : "deleted attachment");
+    card.innerHTML = entryCardHTML(entry, showTag ? (att ? `#${att.number} ${att.name}` : "deleted attachment") : null);
     card.querySelector(".btn-icon").addEventListener("click", async () => {
       if (confirm("Delete this log entry?")) {
         await dbDelete("entries", entry.id);
-        await renderAllEntries();
+        await renderEntryList();
         await renderIterationTotal();
-        if (state.activeAttachmentId === entry.attachmentId) await loadEntries(state.activeAttachmentId);
+        renderAttachmentsSetup();
       }
     });
     list.appendChild(card);
@@ -284,11 +281,10 @@ async function renderAllEntries() {
 
 // ---- Attachment management (Setup tab) ----
 document.getElementById("btn-add-attachment").addEventListener("click", () => openAttachmentModal(null));
-document.getElementById("btn-add-entry").addEventListener("click", () => openEntryModal());
+document.getElementById("btn-record-iteration").addEventListener("click", () => openRecordIterationModal());
 
 function renderAttachmentsSetup() {
   const list = document.getElementById("attachment-setup-list");
-  list.innerHTML = `<p class="empty-sub" id="att-setup-loading">Loading&hellip;</p>`;
   (async () => {
     list.innerHTML = "";
     if (!state.attachments.length) {
@@ -319,11 +315,6 @@ function renderAttachmentsSetup() {
           const entries = await dbGetByIndex("entries", "byAttachment", att.id);
           for (const en of entries) await dbDelete("entries", en.id);
           await dbDelete("attachments", att.id);
-          if (state.activeAttachmentId === att.id) {
-            state.activeAttachmentId = null;
-            document.getElementById("log-active").hidden = true;
-            document.getElementById("log-empty-state").hidden = false;
-          }
           await loadAttachments();
         }
       });
@@ -347,10 +338,10 @@ function openAttachmentModal(att) {
   openModal(`
     <h2>${isEdit ? "Edit attachment" : "New attachment"}</h2>
     <div class="field"><label>Number</label><input class="text-input" id="m-att-number" type="text" value="${esc(nextNum)}"></div>
-    <div class="field"><label>Name</label><input class="text-input" id="m-att-name" type="text" value="${isEdit ? esc(att.name) : ""}" placeholder="e.g. Coral claw" autofocus></div>
+    <div class="field"><label>Name</label><input class="text-input" id="m-att-name" type="text" value="${isEdit ? esc(att.name) : ""}" placeholder="e.g. Coral claw"></div>
     <div class="modal-actions">
-      <button class="btn btn-ghost" id="m-cancel">Cancel</button>
-      <button class="btn btn-primary" id="m-save">Save</button>
+      <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
+      <button class="btn btn-primary" id="m-save" type="button">Save</button>
     </div>
   `);
   document.getElementById("m-cancel").addEventListener("click", closeModal);
@@ -362,46 +353,74 @@ function openAttachmentModal(att) {
     record.number = number; record.name = name;
     if (!isEdit) record.createdAt = Date.now();
     const id = await dbPut("attachments", record);
+    if (!isEdit) state.selectedAttachmentIds.add(id);
     closeModal();
     await loadAttachments();
-    if (!isEdit) selectAttachment(id);
-    else if (state.activeAttachmentId === att.id) selectAttachment(att.id);
   });
 }
 
-// ---- Entry modal (photo + what/why + voice-to-text) ----
+// ---- Record Iteration modal (attachment picker + size + what/why + photo + voice-to-text) ----
 let pendingPhoto = null;
+let pendingSize = "small";
 let recognizer = null;
 
-function openEntryModal() {
+function openRecordIterationModal() {
+  if (!state.attachments.length) {
+    openModal(`<h2>No attachments yet</h2><p class="empty-sub">Go to Settings to add a bot attachment first.</p>
+      <div class="modal-actions"><button class="btn btn-primary" id="m-close" type="button">Got it</button></div>`);
+    document.getElementById("m-close").addEventListener("click", closeModal);
+    return;
+  }
   pendingPhoto = null;
+  pendingSize = "small";
+  const defaultAttId = state.selectedAttachmentIds.size === 1 ? [...state.selectedAttachmentIds][0] : state.attachments[0].id;
   const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
   openModal(`
-    <h2>Log a change</h2>
+    <h2>Record Iteration</h2>
+    <div class="field"><label>Attachment</label>
+      <select class="text-input" id="ri-attachment">
+        ${state.attachments.map((a) => `<option value="${a.id}" ${a.id === defaultAttId ? "selected" : ""}>#${esc(a.number)} ${esc(a.name)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="field"><label>Size of this iteration</label>
+      <div class="size-picker" id="ri-size-picker">
+        <button type="button" class="size-btn active" data-size="small">Small<span>bug fix</span></button>
+        <button type="button" class="size-btn" data-size="moderate">Moderate<span>a real change</span></button>
+        <button type="button" class="size-btn" data-size="major">Major<span>strategy change</span></button>
+      </div>
+    </div>
     <div class="field">
       <label>Photo</label>
       <div class="photo-preview-wrap" id="photo-preview-wrap"></div>
-      <input type="file" accept="image/*" capture="environment" id="m-entry-photo">
+      <input type="file" accept="image/*" capture="environment" id="ri-photo">
     </div>
     <div class="field">
       <label>What changed?</label>
       ${SpeechRec ? `<div class="voice-row"><button class="btn btn-ghost" id="m-voice-btn-1" type="button">&#127908; Dictate</button><span class="voice-status" id="m-voice-status-1"></span></div>` : ""}
-      <textarea class="textarea-input" id="m-entry-what" placeholder="e.g. Swapped the claw's gear ratio from 1:1 to 3:1"></textarea>
+      <textarea class="textarea-input" id="ri-what" placeholder="e.g. Swapped the claw's gear ratio from 1:1 to 3:1"></textarea>
     </div>
     <div class="field">
       <label>Why changed?</label>
       ${SpeechRec ? `<div class="voice-row"><button class="btn btn-ghost" id="m-voice-btn-2" type="button">&#127908; Dictate</button><span class="voice-status" id="m-voice-status-2"></span></div>` : ""}
-      <textarea class="textarea-input" id="m-entry-why" placeholder="e.g. It was stalling under load on the last run"></textarea>
+      <textarea class="textarea-input" id="ri-why" placeholder="e.g. It was stalling under load on the last run"></textarea>
     </div>
     ${SpeechRec ? "" : `<p class="type-hint">Voice-to-text isn't supported in this browser &mdash; try Chrome on Android.</p>`}
     <div class="modal-actions">
-      <button class="btn btn-ghost" id="m-cancel">Cancel</button>
-      <button class="btn btn-primary" id="m-save">Save entry</button>
+      <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
+      <button class="btn btn-primary" id="m-save" type="button">Save entry</button>
     </div>
   `);
   document.getElementById("m-cancel").addEventListener("click", () => { stopRecognizer(); closeModal(); });
 
-  document.getElementById("m-entry-photo").addEventListener("change", async (e) => {
+  document.querySelectorAll("#ri-size-picker .size-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#ri-size-picker .size-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      pendingSize = btn.dataset.size;
+    });
+  });
+
+  document.getElementById("ri-photo").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     pendingPhoto = await resizeImageToDataURL(file, 900, 0.72);
@@ -409,18 +428,21 @@ function openEntryModal() {
   });
 
   if (SpeechRec) {
-    document.getElementById("m-voice-btn-1").addEventListener("click", () => toggleVoiceNote(SpeechRec, "m-entry-what", "m-voice-status-1", "m-voice-btn-1"));
-    document.getElementById("m-voice-btn-2").addEventListener("click", () => toggleVoiceNote(SpeechRec, "m-entry-why", "m-voice-status-2", "m-voice-btn-2"));
+    document.getElementById("m-voice-btn-1").addEventListener("click", () => toggleVoiceNote(SpeechRec, "ri-what", "m-voice-status-1", "m-voice-btn-1"));
+    document.getElementById("m-voice-btn-2").addEventListener("click", () => toggleVoiceNote(SpeechRec, "ri-why", "m-voice-status-2", "m-voice-btn-2"));
   }
 
   document.getElementById("m-save").addEventListener("click", async () => {
     stopRecognizer();
-    const whatChanged = document.getElementById("m-entry-what").value.trim();
-    const whyChanged = document.getElementById("m-entry-why").value.trim();
+    const attachmentId = Number(document.getElementById("ri-attachment").value);
+    const whatChanged = document.getElementById("ri-what").value.trim();
+    const whyChanged = document.getElementById("ri-why").value.trim();
     if (!whatChanged && !whyChanged && !pendingPhoto) { alert("Add a photo or a note first."); return; }
-    await dbPut("entries", { attachmentId: state.activeAttachmentId, timestamp: Date.now(), photo: pendingPhoto, whatChanged, whyChanged });
+    await dbPut("entries", { attachmentId, timestamp: Date.now(), photo: pendingPhoto, whatChanged, whyChanged, size: pendingSize });
+    state.selectedAttachmentIds.add(attachmentId);
     closeModal();
-    await loadEntries(state.activeAttachmentId);
+    renderAttachmentChips();
+    await renderEntryList();
     await renderIterationTotal();
     renderAttachmentsSetup();
   });
@@ -591,7 +613,7 @@ function openMissionNameModal(m) {
   const isEdit = !!m;
   openModal(`
     <h2>${isEdit ? "Edit mission" : "New mission"}</h2>
-    <div class="field"><label>Mission name</label><input class="text-input" id="m-mission-name" value="${isEdit ? esc(m.name) : ""}" placeholder="e.g. M07 — Coral nursery" autofocus></div>
+    <div class="field"><label>Mission name</label><input class="text-input" id="m-mission-name" value="${isEdit ? esc(m.name) : ""}" placeholder="e.g. M07 — Coral nursery"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="m-cancel">Cancel</button>
       <button class="btn btn-primary" id="m-save">Save</button>
@@ -625,7 +647,7 @@ function openTaskModal(mission, t) {
   openModal(`
     <h2>${isEdit ? "Edit task" : "New task"}</h2>
     <p class="empty-sub">Mission: ${esc(mission.name)}</p>
-    <div class="field"><label>Task name</label><input class="text-input" id="t-name" value="${isEdit ? esc(t.name) : ""}" placeholder="e.g. Sample in habitat" autofocus></div>
+    <div class="field"><label>Task name</label><input class="text-input" id="t-name" value="${isEdit ? esc(t.name) : ""}" placeholder="e.g. Sample in habitat"></div>
     <div class="field"><label>Scoring type</label>
       <select class="text-input" id="t-type">
         <option value="bool" ${type === "bool" ? "selected" : ""}>Yes / No</option>
@@ -1110,11 +1132,6 @@ async function initAll() {
   await loadMissions();
   await loadRuns();
   await loadSeasonName();
-  state.activeAttachmentId = null;
-  state.showAll = false;
-  document.getElementById("toggle-show-all").classList.remove("on");
-  document.getElementById("log-active").hidden = true;
-  document.getElementById("log-all").hidden = true;
   document.getElementById("log-empty-state").hidden = state.attachments.length === 0 ? false : true;
 }
 initAll();

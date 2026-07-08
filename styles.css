@@ -282,6 +282,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   width: 100%;
   max-width: 640px;
   max-height: 88vh;
+  max-height: 85dvh;
   overflow-y: auto;
   border-radius: 16px 16px 0 0;
   padding: 20px 18px calc(24px + env(safe-area-inset-bottom));
@@ -369,3 +370,30 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .run-summary-table th { color: var(--text-soft); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.03em; }
 .run-summary-table td:last-child, .run-summary-table th:last-child { font-family: var(--mono); text-align: right; }
 .run-card-incomplete { opacity: 0.7; border-style: dashed; }
+
+/* --- Added: multi-select attachment filter + sort --- */
+.filter-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.filter-row .chip-row { margin-bottom: 0; flex: 1; }
+.sort-select {
+  font-family: var(--mono); font-size: 0.78rem; padding: 7px 10px; border-radius: 8px;
+  border: 1.5px solid var(--line); background: var(--paper-2); color: var(--text); flex: none;
+}
+.chip-all { font-weight: 700; }
+
+/* --- Added: iteration size picker + badges --- */
+.size-picker { display: flex; gap: 8px; }
+.size-btn {
+  flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 10px 6px; border-radius: 8px; border: 1.5px solid var(--line);
+  background: var(--paper); color: var(--text); font-family: var(--body); font-weight: 600; font-size: 0.85rem; cursor: pointer;
+}
+.size-btn span { font-weight: 400; font-size: 0.68rem; color: var(--text-soft); }
+.size-btn.active { border-color: var(--moss); background: var(--moss); color: var(--paper); }
+.size-btn.active span { color: var(--moss-light); }
+
+.size-badge {
+  font-family: var(--mono); font-size: 0.68rem; padding: 1px 8px; border-radius: 10px;
+}
+.size-badge.size-small { background: #DCE7DF; color: var(--moss); }
+.size-badge.size-moderate { background: #F3E4C4; color: var(--amber-dark); }
+.size-badge.size-major { background: #F0D6D0; color: var(--coral); }
