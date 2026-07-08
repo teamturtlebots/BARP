@@ -397,3 +397,13 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .size-badge.size-small { background: #DCE7DF; color: var(--moss); }
 .size-badge.size-moderate { background: #F3E4C4; color: var(--amber-dark); }
 .size-badge.size-major { background: #F0D6D0; color: var(--coral); }
+
+/* --- Added: visible error banner (so silent JS failures aren't invisible) --- */
+.error-banner {
+  position: fixed; top: 0; left: 0; right: 0;
+  background: var(--coral); color: #fff;
+  font-family: var(--body); font-size: 0.85rem; font-weight: 600;
+  padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
+  text-align: center; cursor: pointer;
+  z-index: 100;
+}

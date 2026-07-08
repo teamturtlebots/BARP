@@ -63,6 +63,25 @@ const state = {
   guidedRun: null, // { run, missionIdx, phase, phaseStartTs, timerHandle }
 };
 
+// ---------- Visible error reporting ----------
+// If a click handler throws, buttons can look "dead" (the CSS :active press
+// still fires since that's pure CSS, but nothing else happens). This surfaces
+// the real error on screen instead of it vanishing into the console.
+function showErrorBanner(message) {
+  let banner = document.getElementById("error-banner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "error-banner";
+    banner.className = "error-banner";
+    banner.addEventListener("click", () => { banner.hidden = true; });
+    document.body.appendChild(banner);
+  }
+  banner.textContent = "Something went wrong: " + message + " — tap to dismiss";
+  banner.hidden = false;
+}
+window.addEventListener("error", (e) => showErrorBanner(e.message || String(e.error)));
+window.addEventListener("unhandledrejection", (e) => showErrorBanner(e.reason?.message || String(e.reason)));
+
 // ---------- Modal helpers ----------
 const modalBackdrop = document.getElementById("modal-backdrop");
 const modalBox = document.getElementById("modal-box");
@@ -258,7 +277,7 @@ async function renderEntryList() {
 
   list.innerHTML = "";
   if (!entries.length) {
-    list.innerHTML = `<p class="empty-sub">No changes logged yet for the selected attachment${state.selectedAttachmentIds.size === 1 ? "" : "s"}.</p>`;
+    list.innerHTML = `<p class="empty-sub">No iterations recorded yet for the selected attachment${state.selectedAttachmentIds.size === 1 ? "" : "s"}. Tap + Record Iteration above to log your first change.</p>`;
     return;
   }
   const showTag = state.selectedAttachmentIds.size > 1 || state.attachments.length > 1;
