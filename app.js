@@ -145,10 +145,7 @@ async function getShadowBackup() {
     req.onerror = () => reject(req.error);
   });
 }
-async function restoreFromShadowBackup() {
-  const data = await getShadowBackup();
-  if (!data) { alert("No automatic backup found yet."); return; }
-  if (!confirm(`Restore the automatic backup from ${new Date(data.savedAt).toLocaleString()}? This replaces everything currently on this device.`)) return;
+async function restoreFullData(data) {
   await dbClear("attachments"); await dbClear("entries"); await dbClear("missions"); await dbClear("runs"); await dbClear("meta");
   for (const a of data.attachments || []) await dbPut("attachments", a);
   for (const en of data.entries || []) await dbPut("entries", en);
@@ -156,8 +153,20 @@ async function restoreFromShadowBackup() {
   for (const r of data.runs || []) await dbPut("runs", r);
   for (const meta of data.meta || []) await dbPut("meta", meta);
   await initAll();
-  alert("Automatic backup restored.");
 }
+async function snapshotCurrentData() {
+  return {
+    attachments: await dbGetAllRaw("attachments"),
+    entries: await dbGetAllRaw("entries"),
+    missions: await dbGetAllRaw("missions"),
+    runs: await dbGetAllRaw("runs"),
+    meta: await dbGetAllRaw("meta"),
+  };
+}
+// Not persisted to disk — just enough to undo your last restore within this
+// session, so it doesn't need to be very persistent.
+let lastPreRestoreSnapshot = null;
+
 async function renderLastBackupTime() {
   const el = document.getElementById("last-backup-line");
   if (!el) return;
@@ -176,14 +185,7 @@ async function renderLastBackupTime() {
 const MAX_DELETION_SNAPSHOTS = 20;
 async function snapshotBeforeDelete(label) {
   try {
-    const data = {
-      version: 1,
-      attachments: await dbGetAllRaw("attachments"),
-      entries: await dbGetAllRaw("entries"),
-      missions: await dbGetAllRaw("missions"),
-      runs: await dbGetAllRaw("runs"),
-      meta: await dbGetAllRaw("meta"),
-    };
+    const data = await snapshotCurrentData();
     await dbPut("deletionSnapshots", { takenAt: Date.now(), label, data });
     const all = await dbGetAll("deletionSnapshots");
     if (all.length > MAX_DELETION_SNAPSHOTS) {
@@ -193,34 +195,53 @@ async function snapshotBeforeDelete(label) {
   } catch (e) { /* best-effort — never block the actual delete on this */ }
 }
 
-async function renderDeletionSnapshots() {
-  const list = document.getElementById("deletion-snapshot-list");
-  if (!list) return;
-  const all = (await dbGetAll("deletionSnapshots")).sort((a, b) => b.takenAt - a.takenAt);
-  if (!all.length) { list.innerHTML = `<p class="empty-sub">Nothing deleted yet — this list fills in automatically.</p>`; return; }
-  list.innerHTML = "";
-  all.forEach((snap) => {
+async function openBackupMenu() {
+  const shadow = await getShadowBackup();
+  const delSnaps = await dbGetAll("deletionSnapshots");
+  const items = [];
+  if (shadow) items.push({ label: "Automatic backup", takenAt: shadow.savedAt, data: shadow });
+  delSnaps.forEach((s) => items.push({ label: s.label, takenAt: s.takenAt, data: s.data }));
+  items.sort((a, b) => b.takenAt - a.takenAt);
+
+  openModal(`
+    <h2>Restore a backup</h2>
+    ${lastPreRestoreSnapshot ? `<button type="button" class="btn btn-amber btn-full" id="btn-redo-restore" style="margin-bottom:14px;">&#8635; Redo (undo the last restore)</button>` : ""}
+    <p class="empty-sub">Pick a point in time to restore everything back to. This includes the automatic background backup and a snapshot from right before every deletion.</p>
+    <div id="backup-menu-list" class="mission-list">
+      ${items.length ? "" : `<p class="empty-sub">Nothing to restore yet.</p>`}
+    </div>
+    <div class="modal-actions"><button class="btn btn-ghost btn-full" id="m-close" type="button">Close</button></div>
+  `);
+  document.getElementById("m-close").addEventListener("click", closeModal);
+  const list = document.getElementById("backup-menu-list");
+  items.forEach((item) => {
     const row = document.createElement("div");
     row.className = "mission-row";
     row.innerHTML = `
       <div class="m-info">
-        <div class="m-name">${esc(snap.label)}</div>
-        <div class="m-sub">${new Date(snap.takenAt).toLocaleString()}</div>
+        <div class="m-name">${esc(item.label)}</div>
+        <div class="m-sub">${new Date(item.takenAt).toLocaleString()}</div>
       </div>
       <button class="btn btn-ghost" data-act="restore">Restore</button>
     `;
     row.querySelector('[data-act="restore"]').addEventListener("click", async () => {
-      if (!confirm(`Restore everything to how it was right before "${snap.label}"? This replaces everything currently on this device.`)) return;
-      await dbClear("attachments"); await dbClear("entries"); await dbClear("missions"); await dbClear("runs"); await dbClear("meta");
-      for (const a of snap.data.attachments || []) await dbPut("attachments", a);
-      for (const en of snap.data.entries || []) await dbPut("entries", en);
-      for (const m of snap.data.missions || []) await dbPut("missions", m);
-      for (const r of snap.data.runs || []) await dbPut("runs", r);
-      for (const meta of snap.data.meta || []) await dbPut("meta", meta);
-      await initAll();
+      if (!confirm(`Restore everything to "${item.label}" (${new Date(item.takenAt).toLocaleString()})? This replaces everything currently on this device.`)) return;
+      lastPreRestoreSnapshot = { label: `Before restoring "${item.label}"`, data: await snapshotCurrentData() };
+      await restoreFullData(item.data);
+      closeModal();
       alert("Restored.");
     });
     list.appendChild(row);
+  });
+  const redoBtn = document.getElementById("btn-redo-restore");
+  if (redoBtn) redoBtn.addEventListener("click", async () => {
+    if (!lastPreRestoreSnapshot) return;
+    if (!confirm("Undo that restore and bring back what was there right before it?")) return;
+    const snap = lastPreRestoreSnapshot;
+    lastPreRestoreSnapshot = null;
+    await restoreFullData(snap.data);
+    closeModal();
+    alert("Redone.");
   });
 }
 
@@ -386,7 +407,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
     btn.classList.add("active");
     document.getElementById(btn.dataset.view).hidden = false;
-    if (btn.dataset.view === "view-setup") { renderLastBackupTime(); renderDeletionSnapshots(); }
+    if (btn.dataset.view === "view-setup") { renderLastBackupTime(); }
   });
 });
 
@@ -460,8 +481,16 @@ function missionMaxPoints(m) { return (m.tasks || []).reduce((sum, t) => sum + t
 function missionScoreForRun(m, run) {
   return (m.tasks || []).reduce((sum, t) => sum + pointsFromRawTask(t, (run.rawScores || {})[t.id]), 0);
 }
-function runMaxPoints(missions) { return missions.reduce((sum, m) => sum + missionMaxPoints(m), 0); }
-function runTotal(run, missions) { return missions.reduce((sum, m) => sum + missionScoreForRun(m, run), 0); }
+// Bonus points awarded for unused precision tokens at the end of a run —
+// every run starts with 6, and how many are left over scores extra.
+const PRECISION_TOKEN_BONUS = { 0: 0, 1: 10, 2: 15, 3: 25, 4: 35, 5: 50, 6: 50 };
+function precisionTokenBonus(remaining) { return PRECISION_TOKEN_BONUS[remaining] ?? 0; }
+const PRECISION_TOKENS_START = 6;
+
+function runMaxPoints(missions) { return missions.reduce((sum, m) => sum + missionMaxPoints(m), 0) + 50; }
+function runTotal(run, missions) {
+  return missions.reduce((sum, m) => sum + missionScoreForRun(m, run), 0) + precisionTokenBonus(run.precisionTokensRemaining ?? 0);
+}
 
 // ==========================================================
 // ATTACHMENTS + LOG
@@ -608,7 +637,7 @@ function renderAttachmentsSetup() {
   (async () => {
     list.innerHTML = reorderToolbarHTML(editing, "attachments");
     if (!state.attachments.length) {
-      list.insertAdjacentHTML("beforeend", `<p class="empty-sub">No attachments yet. Add one for each swappable part on the bot.</p>`);
+      list.insertAdjacentHTML("beforeend", `<p class="empty-sub">No attachments yet. Add one for each swappable part on the robot.</p>`);
       wireAttachmentOrderToolbar();
       return;
     }
@@ -627,6 +656,7 @@ function renderAttachmentsSetup() {
         const count = await iterationCount(att.id);
         row.className = "mission-row";
         row.innerHTML = `
+          ${att.photo ? `<img class="att-thumb" src="${att.photo}" alt="">` : ""}
           <div class="m-info">
             <div class="m-name">#${esc(att.number)} ${esc(att.name)}</div>
             <div class="m-sub">${count} iteration${count === 1 ? "" : "s"} logged</div>
@@ -641,6 +671,8 @@ function renderAttachmentsSetup() {
             const entries = await dbGetByIndex("entries", "byAttachment", att.id);
             for (const en of entries) await dbDelete("entries", en.id);
             await dbDelete("attachments", att.id);
+            const remaining = (await dbGetAll("attachments")).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+            for (const [i, a] of remaining.entries()) { a.order = i; a.number = i + 1; await dbPut("attachments", a); }
             await loadAttachments();
           }
         });
@@ -662,7 +694,7 @@ function wireAttachmentOrderToolbar() {
   });
   const saveBtn = document.getElementById("btn-save-order-attachments");
   if (saveBtn) saveBtn.addEventListener("click", async () => {
-    for (const [idx, att] of state.attachments.entries()) { att.order = idx; await dbPut("attachments", att); }
+    for (const [idx, att] of state.attachments.entries()) { att.order = idx; att.number = idx + 1; await dbPut("attachments", att); }
     state.editingAttachmentOrder = false;
     await loadAttachments();
   });
@@ -670,26 +702,33 @@ function wireAttachmentOrderToolbar() {
 
 function openAttachmentModal(att) {
   const isEdit = !!att;
-  const nextNum = isEdit ? att.number : (state.attachments.length ? Math.max(...state.attachments.map((a) => Number(a.number) || 0)) + 1 : 1);
+  let pendingAttPhoto = isEdit ? (att.photo || null) : null;
   openModal(`
     <h2>${isEdit ? "Edit attachment" : "New attachment"}</h2>
-    <div class="field"><label>Number</label><input class="text-input" id="m-att-number" type="text" value="${esc(nextNum)}"></div>
     <div class="field"><label>Name</label><input class="text-input" id="m-att-name" type="text" value="${isEdit ? esc(att.name) : ""}" placeholder="e.g. Coral claw"></div>
+    <div class="field">
+      <label>Picture (optional)</label>
+      <div class="photo-preview-wrap" id="att-photo-preview-wrap">${pendingAttPhoto ? `<img class="photo-preview" src="${pendingAttPhoto}">` : ""}</div>
+      <input type="file" accept="image/*" id="m-att-photo">
+    </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
       <button class="btn btn-primary" id="m-save" type="button">Save</button>
     </div>
   `);
   document.getElementById("m-cancel").addEventListener("click", closeModal);
+  document.getElementById("m-att-photo").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    pendingAttPhoto = await resizeImageToDataURL(file, 900, 0.72);
+    document.getElementById("att-photo-preview-wrap").innerHTML = `<img class="photo-preview" src="${pendingAttPhoto}">`;
+  });
   document.getElementById("m-save").addEventListener("click", async () => {
-    const number = document.getElementById("m-att-number").value.trim();
     const name = document.getElementById("m-att-name").value.trim();
     if (!name) { alert("Give this attachment a name."); return; }
-    if (!number) { alert("Give this attachment a number."); return; }
-    const duplicate = state.attachments.find((a) => String(a.number) === String(number) && (!isEdit || a.id !== att.id));
-    if (duplicate) { alert(`Attachment #${number} is already used by "${duplicate.name}". Pick a different number.`); return; }
-    const record = isEdit ? att : { order: state.attachments.length };
-    record.number = number; record.name = name;
+    const record = isEdit ? att : { order: state.attachments.length, number: state.attachments.length + 1 };
+    record.name = name;
+    record.photo = pendingAttPhoto;
     if (!isEdit) record.createdAt = Date.now();
     const id = await dbPut("attachments", record);
     if (!isEdit) state.selectedAttachmentIds.add(id);
@@ -705,7 +744,7 @@ let recognizer = null;
 
 function openRecordIterationModal() {
   if (!state.attachments.length) {
-    openModal(`<h2>No attachments yet</h2><p class="empty-sub">Go to Settings to add a bot attachment first.</p>
+    openModal(`<h2>No attachments yet</h2><p class="empty-sub">Go to Settings to add a robot attachment first.</p>
       <div class="modal-actions"><button class="btn btn-primary" id="m-close" type="button">Got it</button></div>`);
     document.getElementById("m-close").addEventListener("click", closeModal);
     return;
@@ -913,12 +952,10 @@ function renderMissions() {
     group.dataset.idx = idx;
 
     if (editing) {
-      group.classList.add("drag-row");
+      group.className = "mission-group drag-row";
       group.innerHTML = `
-        <div class="mission-row mission-group-head">
-          <span class="drag-handle">&#9776;</span>
-          <div class="m-info"><div class="m-name">${esc(m.name)}</div></div>
-        </div>
+        <span class="drag-handle">&#9776;</span>
+        <div class="m-info"><div class="m-name">${esc(m.name)}</div></div>
       `;
       list.appendChild(group);
       attachRowDrag(group, list, state.missions);
@@ -927,18 +964,19 @@ function renderMissions() {
 
     const expanded = state.expandedMissions.has(m.id);
     group.innerHTML = `
-      <div class="mission-row mission-group-head">
-        <button class="btn-icon mission-expand-btn" data-act="expand">${expanded ? "&#9660;" : "&#9654;"}</button>
+      <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
+        <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
           <div class="m-name">${esc(m.name)}</div>
-          <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts</div>
+          <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts &middot; tap to ${expanded ? "collapse" : "view tasks"}</div>
         </div>
         <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
         <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
-    group.querySelector('[data-act="expand"]').addEventListener("click", () => {
+    group.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
+      if (e.target.closest('[data-act="edit"], [data-act="del"]')) return;
       if (expanded) state.expandedMissions.delete(m.id); else state.expandedMissions.add(m.id);
       renderMissions();
     });
@@ -1220,30 +1258,53 @@ document.getElementById("file-import-missions").addEventListener("change", async
 document.getElementById("btn-start-run").addEventListener("click", startGuidedRun);
 
 // ---- Sound effects ----
-// Official FLL match audio is copyrighted by FIRST, so no audio files ship
-// with this app. Drop your own MP3s in a `sounds/` folder next to index.html
-// with these exact names and they'll play automatically; if a file is
-// missing, playback just silently no-ops.
+// Official FLL match audio is copyrighted by FIRST, so these files aren't
+// included by default — drop your own MP3s in a `sounds/` folder next to
+// index.html with these exact names and they'll play automatically; if a
+// file is missing, playback just silently no-ops.
 const SOUND_FILES = {
   start: "sounds/start-horn.mp3",
   thirty: "sounds/thirty-seconds.mp3",
   buzzer: "sounds/buzzer.mp3",
 };
+// Reuse one Audio element per sound rather than creating a new one on every
+// play — and "unlock" them all with a real (silent) play/pause the instant
+// the person taps to start, since that's the only point in the countdown
+// flow that's a direct, synchronous user gesture. The 30-second and buzzer
+// sounds fire later from a timer, which browsers don't treat as user-
+// initiated, so without this unlock step they'd get silently blocked.
+const soundElements = {};
+function getSoundElement(key) {
+  if (!soundElements[key]) {
+    try { soundElements[key] = new Audio(SOUND_FILES[key]); } catch (e) { return null; }
+  }
+  return soundElements[key];
+}
+function unlockAllSounds() {
+  Object.keys(SOUND_FILES).forEach((key) => {
+    const el = getSoundElement(key);
+    if (!el) return;
+    const prevVolume = el.volume;
+    el.volume = 0;
+    const p = el.play();
+    if (p && p.catch) {
+      p.then(() => { el.pause(); el.currentTime = 0; el.volume = prevVolume; }).catch(() => { el.volume = prevVolume; });
+    }
+  });
+}
 function playSound(key) {
+  const el = getSoundElement(key);
+  if (!el) return;
   try {
-    const audio = new Audio(SOUND_FILES[key]);
-    audio.play().catch(() => {});
+    el.currentTime = 0;
+    el.play().catch(() => {});
   } catch (e) { /* no Audio support / no file — fine, just silent */ }
 }
 
 // ---- Precision tokens ----
-async function getPrecisionTokensDefault() {
-  const rec = await dbGet("meta", "precisionTokensDefault");
-  return rec?.value ?? 2;
-}
 function precisionTokenWidgetHTML() {
   const remaining = state.guidedRun?.run?.precisionTokensRemaining ?? 0;
-  return `<button type="button" class="precision-token-btn" id="grn-token-btn">&#129689; <span id="grn-token-count">${remaining}</span></button>`;
+  return `<button type="button" class="precision-token-btn" id="grn-token-btn">&#129689; Precision Tokens: <span id="grn-token-count">${remaining}</span></button>`;
 }
 function wirePrecisionTokenButton() {
   const btn = document.getElementById("grn-token-btn");
@@ -1276,14 +1337,17 @@ function renderPreRunScreen() {
       <h2 class="gfs-mission-name">New Practice Run</h2>
     </div>
     <div class="gfs-body gfs-center">
-      <button type="button" class="btn btn-amber btn-full gfs-big-action" id="grn-start-countdown">Tap to start countdown</button>
+      <button type="button" class="btn btn-amber btn-full gfs-big-action gfs-huge-action" id="grn-start-countdown">Tap to start countdown</button>
     </div>
     <div class="gfs-footer">
       <button type="button" class="btn-link-cancel" id="grn-cancel-pre">Cancel</button>
     </div>
   `);
   document.getElementById("grn-cancel-pre").addEventListener("click", closeGuidedFullscreen);
-  document.getElementById("grn-start-countdown").addEventListener("click", runCountdown);
+  document.getElementById("grn-start-countdown").addEventListener("click", () => {
+    unlockAllSounds(); // must happen synchronously, right here, to count as a user gesture
+    runCountdown();
+  });
 }
 
 async function runCountdown() {
@@ -1308,7 +1372,7 @@ async function actuallyStartRun() {
     date: new Date(now).toLocaleDateString(),
     startedAt: now,
     inProgress: true,
-    precisionTokensRemaining: await getPrecisionTokensDefault(),
+    precisionTokensRemaining: PRECISION_TOKENS_START,
     rawScores: {},
     missionTimings: [],
     transitionTimings: [],
@@ -1368,7 +1432,7 @@ function closeGuidedFullscreen() {
 }
 
 function cancelGuidedRunLink() {
-  return `<button type="button" class="btn-link-cancel" id="grn-cancel">Cancel this run</button>`;
+  return `<button type="button" class="gfs-cancel-x" id="grn-cancel" title="Cancel this run">&#10005;</button>`;
 }
 function wireCancelLink() {
   document.getElementById("grn-cancel").addEventListener("click", async () => {
@@ -1396,9 +1460,12 @@ function taskRowHTML(t, raw) {
   const max = taskMaxPoints(t);
   if (t.type === "bool") {
     const on = !!raw[t.id];
-    return `<div class="gfs-task-row" data-tid="${t.id}" data-type="bool">
-      <span class="gfs-task-name">${esc(t.name)}</span>
-      <span class="gfs-task-pts">${on ? max : 0} / ${max}</span>
+    return `<div class="gfs-task-row gfs-task-row-wrap" data-tid="${t.id}" data-type="bool">
+      <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${on ? max : 0} / ${max}</span></span>
+      <div class="gfs-choice-strip">
+        <button type="button" class="gfs-choice-btn${on ? " active" : ""}" data-tid="${t.id}" data-val="yes">Yes</button>
+        <button type="button" class="gfs-choice-btn${!on ? " active" : ""}" data-tid="${t.id}" data-val="no">No</button>
+      </div>
     </div>`;
   }
   if (t.type === "number") {
@@ -1447,12 +1514,13 @@ function renderCurrentTaskScreen() {
     const cur = raw[task.id] ?? "";
     controlHTML = `<div class="gfs-choice-strip gfs-choice-strip-big">
       <button type="button" class="gfs-choice-btn gfs-choice-btn-big${cur === "" ? " active" : ""}" data-val="">Not achieved</button>
-      ${(task.options || []).map((o, i) => `<button type="button" class="gfs-choice-btn gfs-choice-btn-big${String(cur) === String(i) ? " active" : ""}" data-val="${i}">${esc(o.label)} (${o.points})</button>`).join("")}
+      ${(task.options || []).map((o, i) => `<button type="button" class="gfs-choice-btn gfs-choice-btn-big${String(cur) === String(i) ? " active" : ""}" data-val="${i}">${esc(o.label)}</button>`).join("")}
     </div>`;
   }
 
   openGuidedFullscreen(`
     <div class="gfs-header">
+      ${cancelGuidedRunLink()}
       <button type="button" class="gfs-back-btn" id="grn-back" ${taskIdx === 0 ? "disabled" : ""}>&#8592;</button>
       ${precisionTokenWidgetHTML()}
       <div class="guided-phase-badge">Mission ${missionIdx + 1} of ${state.missions.length} &middot; Task ${taskIdx + 1} of ${tasks.length}</div>
@@ -1463,7 +1531,7 @@ function renderCurrentTaskScreen() {
       <p class="gfs-task-prompt">${esc(task.name)} <span class="gfs-task-pts">/ ${taskMaxPoints(task)} pts</span></p>
       ${controlHTML}
     </div>
-    <div class="gfs-footer">${cancelGuidedRunLink()}</div>
+    <div class="gfs-footer"></div>
   `);
   wireCancelLink();
   wirePrecisionTokenButton();
@@ -1498,6 +1566,7 @@ function renderRobotReturnedScreen() {
   const mission = state.missions[missionIdx];
   openGuidedFullscreen(`
     <div class="gfs-header">
+      ${cancelGuidedRunLink()}
       <button type="button" class="gfs-back-btn" id="grn-back">&#8592;</button>
       ${precisionTokenWidgetHTML()}
       <div class="guided-phase-badge">Mission ${missionIdx + 1} of ${state.missions.length}</div>
@@ -1506,9 +1575,9 @@ function renderRobotReturnedScreen() {
     </div>
     <div class="gfs-body gfs-center">
       <p class="empty-sub">All tasks marked for this mission.</p>
-      <button type="button" class="btn btn-primary btn-full gfs-big-action" id="grn-done">Robot returned</button>
+      <button type="button" class="btn btn-primary btn-full gfs-big-action gfs-huge-action" id="grn-done">Robot returned</button>
     </div>
-    <div class="gfs-footer">${cancelGuidedRunLink()}</div>
+    <div class="gfs-footer"></div>
   `);
   wireCancelLink();
   wirePrecisionTokenButton();
@@ -1542,6 +1611,7 @@ function renderGuidedTransitionPhase() {
   const nextMission = state.missions[missionIdx];
   openGuidedFullscreen(`
     <div class="gfs-header">
+      ${cancelGuidedRunLink()}
       ${precisionTokenWidgetHTML()}
       <div class="guided-phase-badge">Transition</div>
       <h2 class="gfs-mission-name">Heading to: ${esc(nextMission.name)}</h2>
@@ -1549,9 +1619,9 @@ function renderGuidedTransitionPhase() {
     </div>
     <div class="gfs-body gfs-center">
       <p class="empty-sub">Tap when the robot leaves base for the next mission.</p>
-      <button type="button" class="btn btn-amber btn-full gfs-big-action" id="grn-leave">Robot leaves for next mission</button>
+      <button type="button" class="btn btn-amber btn-full gfs-big-action gfs-huge-action" id="grn-leave">Robot leaves for next mission</button>
     </div>
-    <div class="gfs-footer">${cancelGuidedRunLink()}</div>
+    <div class="gfs-footer"></div>
   `);
   wireCancelLink();
   wirePrecisionTokenButton();
@@ -1568,6 +1638,7 @@ function renderGuidedOverview() {
   const { run } = state.guidedRun;
   openGuidedFullscreen(`
     <div class="gfs-header">
+      ${cancelGuidedRunLink()}
       ${precisionTokenWidgetHTML()}
       <div class="guided-phase-badge">Final overview</div>
       <h2 class="gfs-mission-name">${esc(run.label)}</h2>
@@ -1578,7 +1649,6 @@ function renderGuidedOverview() {
     <div class="gfs-body" id="gfs-overview-body"></div>
     <div class="gfs-footer">
       <button class="btn btn-primary btn-full" id="grn-save-bottom" type="button">Save &amp; Finish</button>
-      ${cancelGuidedRunLink()}
     </div>
   `);
   renderOverviewBody();
@@ -1605,9 +1675,9 @@ function renderOverviewBody() {
 }
 
 function bindOverviewEvents() {
-  document.querySelectorAll('#gfs-overview-body .gfs-task-row[data-type="bool"]').forEach((row) => {
-    row.addEventListener("click", () => {
-      state.guidedRun.run.rawScores[row.dataset.tid] = !state.guidedRun.run.rawScores[row.dataset.tid];
+  document.querySelectorAll('#gfs-overview-body [data-type="bool"] .gfs-choice-btn').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.guidedRun.run.rawScores[btn.dataset.tid] = btn.dataset.val === "yes";
       renderOverviewBody();
     });
   });
@@ -1617,7 +1687,7 @@ function bindOverviewEvents() {
       renderOverviewBody();
     });
   });
-  document.querySelectorAll("#gfs-overview-body .gfs-choice-btn").forEach((btn) => {
+  document.querySelectorAll('#gfs-overview-body [data-type="choice"] .gfs-choice-btn').forEach((btn) => {
     btn.addEventListener("click", () => {
       const v = btn.dataset.val;
       state.guidedRun.run.rawScores[btn.dataset.tid] = v === "" ? null : Number(v);
@@ -1734,12 +1804,17 @@ function viewRunBreakdown(run) {
     const max = mission ? missionMaxPoints(mission) : 0;
     return `<tr><td>${esc(mt.missionName)}</td><td>${score}/${max}</td><td>${fmtDuration(mt.durationMs)}</td></tr>`;
   }).join("");
-  const transRows = (run.transitionTimings || []).map((tt, i) => `<tr><td colspan="2">Transition ${i + 1}</td><td>${fmtDuration(tt.durationMs)}</td></tr>`).join("");
+  const transitions = run.transitionTimings || [];
+  const transRows = transitions.map((tt, i) => `<tr><td colspan="2">Transition ${i + 1}</td><td>${fmtDuration(tt.durationMs)}</td></tr>`).join("");
+  const avgOpTime = transitions.length ? transitions.reduce((s, t) => s + t.durationMs, 0) / transitions.length : 0;
+  const tokensLeft = run.precisionTokensRemaining ?? 0;
   openModal(`
     <h2>${esc(run.label)}</h2>
     <p class="empty-sub">${esc(run.date || "")}</p>
     <div class="run-total-bar"><span class="rt-label">Total score</span><span class="rt-num">${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}</span></div>
     <div class="run-total-bar"><span class="rt-label">Total time</span><span class="rt-num">${fmtDuration(run.totalTimeMs || 0)}</span></div>
+    <div class="run-total-bar"><span class="rt-label">Avg operation time</span><span class="rt-num">${transitions.length ? fmtDuration(avgOpTime) : "—"}</span></div>
+    <p class="empty-sub">Precision tokens: ${tokensLeft} left &middot; +${precisionTokenBonus(tokensLeft)} bonus pts</p>
     <table class="run-summary-table"><thead><tr><th>Mission</th><th>Score</th><th>Time</th></tr></thead><tbody>${rows}${transRows}</tbody></table>
     <div class="modal-actions"><button class="btn btn-ghost btn-full" id="m-close">Close</button></div>
   `);
@@ -1759,7 +1834,7 @@ function buildScoresheetCSV(runs) {
     (mission.tasks || []).forEach((task) => taskRows.push({ mission, task, mNum }));
   });
 
-  const header = ["M#", "Official Name", "Notes", "Pts", ...runs.map((r) => r.label), "Success Rate", "", "Run #", "Score"];
+  const header = ["M#", "Official Name", "Notes", "Pts", ...runs.map((r) => r.label), "Success Rate", "", "Date/Time", "Score"];
   const lines = [header.map(csvEscape).join(",")];
 
   taskRows.forEach((row, i) => {
@@ -1767,7 +1842,7 @@ function buildScoresheetCSV(runs) {
     const flags = runs.map((r) => (isTaskComplete(task, r.rawScores || {}) ? "1" : ""));
     const successCount = flags.filter((f) => f === "1").length;
     const successRate = runs.length ? Math.round((successCount / runs.length) * 100) : 0;
-    const sideTable = i < runs.length ? [String(i + 1), String(runTotal(runs[i], state.missions))] : ["", ""];
+    const sideTable = i < runs.length ? [new Date(runs[i].startedAt || runs[i].finishedAt || 0).toLocaleString(), String(runTotal(runs[i], state.missions))] : ["", ""];
     const rowVals = [mNum, mission.name, task.name, taskMaxPoints(task), ...flags, `${successRate}%`, "", ...sideTable];
     lines.push(rowVals.map(csvEscape).join(","));
   });
@@ -1776,24 +1851,44 @@ function buildScoresheetCSV(runs) {
 }
 
 document.getElementById("btn-export-runs-csv").addEventListener("click", () => {
-  const completedRuns = state.runs.filter((r) => !r.inProgress).sort((a, b) => a.order - b.order);
+  const completedRuns = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   if (!completedRuns.length) { alert("No completed runs yet."); return; }
+  const toLocalInput = (ts) => {
+    const d = new Date(ts);
+    d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+    return d.toISOString().slice(0, 16);
+  };
+  const earliest = completedRuns[0].startedAt || Date.now();
+  const latest = completedRuns[completedRuns.length - 1].startedAt || Date.now();
   openModal(`
     <h2>Export scoresheet CSV</h2>
-    <p class="empty-sub">Choose which runs to include — each becomes one column, one row per scoring task.</p>
-    <div class="field" id="export-run-checks">
-      ${completedRuns.map((r) => `<label class="checkbox-row"><input type="checkbox" value="${r.id}" checked> ${esc(r.label)} <span class="entry-att-tag">${esc(r.date || "")}</span></label>`).join("")}
-    </div>
+    <p class="empty-sub">Choose a date/time range — every completed run started in that window becomes one column.</p>
+    <div class="field"><label>From</label><input type="datetime-local" id="export-from" class="text-input" value="${toLocalInput(earliest)}"></div>
+    <div class="field"><label>To</label><input type="datetime-local" id="export-to" class="text-input" value="${toLocalInput(latest)}"></div>
+    <p class="empty-sub" id="export-run-count"></p>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
       <button class="btn btn-primary" id="m-export" type="button">Export</button>
     </div>
   `);
+  function inRangeRuns() {
+    const fromVal = document.getElementById("export-from").value;
+    const toVal = document.getElementById("export-to").value;
+    const from = fromVal ? new Date(fromVal).getTime() : -Infinity;
+    const to = toVal ? new Date(toVal).getTime() : Infinity;
+    return completedRuns.filter((r) => { const t = r.startedAt || 0; return t >= from && t <= to; });
+  }
+  function updateCount() {
+    const n = inRangeRuns().length;
+    document.getElementById("export-run-count").textContent = `${n} run${n === 1 ? "" : "s"} in this range.`;
+  }
+  document.getElementById("export-from").addEventListener("change", updateCount);
+  document.getElementById("export-to").addEventListener("change", updateCount);
+  updateCount();
   document.getElementById("m-cancel").addEventListener("click", closeModal);
   document.getElementById("m-export").addEventListener("click", () => {
-    const checked = new Set(Array.from(document.querySelectorAll("#export-run-checks input:checked")).map((el) => Number(el.value)));
-    if (!checked.size) { alert("Pick at least one run."); return; }
-    const runs = completedRuns.filter((r) => checked.has(r.id));
+    const runs = inRangeRuns();
+    if (!runs.length) { alert("No runs in that range."); return; }
     if (!state.missions.some((m) => (m.tasks || []).length)) { alert("Add missions and tasks in Setup first."); return; }
     const csv = buildScoresheetCSV(runs);
     closeModal();
@@ -1818,7 +1913,7 @@ document.getElementById("btn-export-backup").addEventListener("click", async () 
 });
 
 document.getElementById("btn-import-backup").addEventListener("click", () => document.getElementById("file-import-backup").click());
-document.getElementById("btn-restore-shadow").addEventListener("click", () => restoreFromShadowBackup());
+document.getElementById("btn-restore-shadow").addEventListener("click", () => openBackupMenu());
 document.getElementById("btn-reset-db").addEventListener("click", () => {
   if (confirm("This permanently erases every attachment, entry, mission, and run stored on this device. This can't be undone. Continue?")) {
     resetLocalDatabase();
@@ -1856,17 +1951,6 @@ async function loadSeasonName() {
   if (rec?.value) { seasonInput.value = rec.value; document.getElementById("season-title").textContent = rec.value; }
 }
 
-// ---------- Match settings ----------
-const precisionTokensInput = document.getElementById("input-precision-tokens");
-precisionTokensInput.addEventListener("change", async () => {
-  const val = Math.max(0, Number(precisionTokensInput.value) || 0);
-  precisionTokensInput.value = val;
-  await dbPut("meta", { key: "precisionTokensDefault", value: val });
-});
-async function loadPrecisionTokensSetting() {
-  precisionTokensInput.value = await getPrecisionTokensDefault();
-}
-
 // ---------- Init ----------
 async function purgeOldTrash() {
   const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
@@ -1882,9 +1966,7 @@ async function initAll() {
   await loadMissions();
   await loadRuns();
   await loadSeasonName();
-  await loadPrecisionTokensSetting();
   await renderLastBackupTime();
-  await renderDeletionSnapshots();
   document.getElementById("log-empty-state").hidden = state.attachments.length === 0 ? false : true;
 }
 initAll();

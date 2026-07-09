@@ -28,7 +28,7 @@ Each install has its own separate storage — use the backup export/import in Se
 ## 3. Using it
 
 ### Settings — set this up first
-- **Attachments**: add one per swappable part on the bot. Tap **Edit order** to drag them into a new order, then **Save order** to lock it in — this list won't change often, so it lives in Settings rather than cluttering the Log tab.
+- **Attachments**: add one per swappable part on the robot. Tap **Edit order** to drag them into a new order, then **Save order** to lock it in — this list won't change often, so it lives in Settings rather than cluttering the Log tab.
 - **Missions**: add a mission, then expand it to add its tasks. Each task scores as Yes/No, a counted number of objects, or a multiple-choice state — matching however that row is scored on the official scoresheet. Missions and tasks each get their own **Edit order** drag mode too. **Import CSV** bulk-adds missions/tasks from a spreadsheet (there's a "download example CSV" button in that dialog showing the exact format).
 - **Match Settings**: how many precision tokens you start each run with.
 - **Backup**: an automatic backup runs quietly in the background, kept in a separate database from your main data — restore from it if something goes wrong. You can also export/import a full `.json` backup manually. **Every deletion anywhere in the app also saves its own snapshot** from right before it happened (last 20 kept) — find those under **Undo a deletion** to put back exactly what you removed, even if the automatic backup already moved past it.

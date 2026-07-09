@@ -42,7 +42,7 @@
 
     <div id="log-empty-state" class="empty-state" hidden>
       <p>No attachments added yet.</p>
-      <p class="empty-sub">Go to Settings to add and manage bot attachments.</p>
+      <p class="empty-sub">Go to Settings to add and manage robot attachments.</p>
     </div>
 
     <div id="log-select-prompt" class="empty-state" hidden>
@@ -83,27 +83,20 @@
     <div class="section-row" style="margin-top:28px;">
       <h2>Backup</h2>
     </div>
-    <p class="empty-sub">Everything is stored only on this device. An automatic backup runs quietly in the background too, kept completely separate from your main data.</p>
+    <p class="empty-sub">Everything is stored only on this device. An automatic backup runs quietly in the background, and every deletion anywhere in the app also saves its own snapshot from right before it happened — both show up together when restoring.</p>
     <p class="iteration-total-line" id="last-backup-line"></p>
     <div class="btn-group">
       <button class="btn btn-ghost" id="btn-export-backup">Export full backup (.json)</button>
-      <button class="btn btn-ghost" id="btn-import-backup">Restore from backup</button>
-      <button class="btn btn-ghost" id="btn-restore-shadow">Restore from automatic backup</button>
+      <button class="btn btn-ghost" id="btn-import-backup">Restore from backup file</button>
+      <button class="btn btn-ghost" id="btn-restore-shadow">Restore a backup&hellip;</button>
     </div>
     <button class="btn btn-danger btn-full" id="btn-reset-db" style="margin-top:10px;">Reset local data</button>
-    <p class="empty-sub">Only use this if the app is stuck (e.g. a database error banner). This permanently erases everything stored on this device (except the automatic backup) — export a manual backup first if you can.</p>
-
-    <div class="section-row" style="margin-top:28px;">
-      <h2>Undo a deletion</h2>
-    </div>
-    <p class="empty-sub">Every time you delete something, a full snapshot is saved from right before it happened — restoring one puts everything back to that exact moment (the last 20 deletions are kept).</p>
-    <div id="deletion-snapshot-list" class="mission-list"></div>
+    <p class="empty-sub">Only use this if the app is stuck (e.g. a database error banner). This permanently erases everything stored on this device (except backups) — export a manual backup first if you can.</p>
 
     <div class="section-row" style="margin-top:28px;">
       <h2>Match Settings</h2>
     </div>
-    <div class="field"><label>Precision tokens per run</label><input type="number" id="input-precision-tokens" class="text-input" min="0" value="2"></div>
-    <p class="empty-sub">Sound effects (start horn, 30-seconds warning, end buzzer) play automatically during a guided run if you've added the files yourself — see the README for exact filenames and where to find them. Without those files, the run still works fine, just silently.</p>
+    <p class="empty-sub">Every run starts with 6 precision tokens. Sound effects (start horn, 30-seconds warning, end buzzer) play automatically during a guided run — see the README for details.</p>
 
     <div class="section-row" style="margin-top:28px;">
       <h2>Notebook name</h2>
