@@ -266,9 +266,7 @@ const state = {
   expandedMissions: new Set(),
   expandedRunGroups: new Set(),
   editingAttachmentOrder: false,
-  editingRunGroupOrder: false,
-  editingMissionsForGroupId: null,
-  editingTasksForMissionId: null,
+  editingAllOrder: false,
   guidedRun: null, // { run, legIdx, missionIdxInLeg, taskIdx, matchStartTs, ... }
 };
 
@@ -973,12 +971,16 @@ function stopRecognizer() { if (recognizer) { try { recognizer.stop(); } catch (
 // ==========================================================
 async function loadRunGroups() {
   state.runGroups = (await dbGetAll("runGroups")).sort((a, b) => a.order - b.order);
-  if (!state.runGroups.length) {
+  renderRunGroups();
+}
+// Only for genuinely first-ever use — NOT called by loadRunGroups() itself,
+// so deleting your last remaining Run doesn't silently bring one back.
+async function ensureDefaultRunGroup() {
+  const existing = await dbGetAll("runGroups");
+  if (!existing.length) {
     const id = await dbPut("runGroups", { name: "Run 1", order: 0 });
-    state.runGroups = await dbGetAll("runGroups");
     state.expandedRunGroups.add(id);
   }
-  renderRunGroups();
 }
 
 // Missions carry a global .order spanning every run group, so guided-run
@@ -1011,49 +1013,94 @@ function taskSubLabel(t) {
 // ---- Runs (leave-and-return trips), each holding several missions ----
 document.getElementById("btn-add-rungroup").addEventListener("click", () => openRunGroupModal(null));
 
+function renderOrderToolbarTop() {
+  const el = document.getElementById("order-toolbar-top");
+  if (state.editingAllOrder) {
+    el.innerHTML = `<button type="button" class="btn btn-primary" id="btn-save-order-all">Save order</button><button type="button" class="btn btn-ghost" id="btn-cancel-order-all">Cancel</button>`;
+    document.getElementById("btn-save-order-all").addEventListener("click", saveAllOrder);
+    document.getElementById("btn-cancel-order-all").addEventListener("click", async () => {
+      state.editingAllOrder = false;
+      await loadMissions();
+      await loadRunGroups();
+    });
+  } else {
+    el.innerHTML = `<button type="button" class="btn btn-ghost" id="btn-edit-order-all">&#8645; Reorder runs, missions &amp; tasks</button>`;
+    document.getElementById("btn-edit-order-all").addEventListener("click", () => { state.editingAllOrder = true; renderRunGroups(); });
+  }
+}
+
+// Reads whatever order rows currently sit in, in the DOM — robust regardless
+// of how many nested levels were actually expanded/dragged this session.
+async function saveAllOrder() {
+  const groupEls = [...document.querySelectorAll("#rungroup-list > [data-gid]")];
+  groupEls.forEach((el, idx) => {
+    const g = state.runGroups.find((x) => x.id === Number(el.dataset.gid));
+    if (g) g.order = idx;
+  });
+  for (const g of state.runGroups) await dbPut("runGroups", g);
+
+  groupEls.forEach((groupEl) => {
+    const missionEls = [...groupEl.querySelectorAll(":scope > .task-list > [data-mid]")];
+    missionEls.forEach((mEl, idx) => {
+      const m = state.missions.find((x) => x.id === Number(mEl.dataset.mid));
+      if (m) m.order = idx;
+    });
+  });
+
+  const allMissionEls = [...document.querySelectorAll("[data-mid]")];
+  for (const mEl of allMissionEls) {
+    const m = state.missions.find((x) => x.id === Number(mEl.dataset.mid));
+    if (!m) continue;
+    const taskEls = [...mEl.querySelectorAll(":scope > .task-list > [data-tid]")];
+    if (!taskEls.length) continue;
+    const reordered = taskEls.map((te) => m.tasks.find((t) => t.id === te.dataset.tid)).filter(Boolean);
+    if (reordered.length === m.tasks.length) m.tasks = reordered;
+  }
+  for (const m of state.missions) await dbPut("missions", m);
+
+  await recomputeGlobalMissionOrder();
+  state.editingAllOrder = false;
+  await loadMissions();
+  await loadRunGroups();
+  await runShadowBackup();
+}
+
 function renderRunGroups() {
+  renderOrderToolbarTop();
   const list = document.getElementById("rungroup-list");
-  const editing = state.editingRunGroupOrder;
+  const editing = state.editingAllOrder;
   list.innerHTML = "";
   if (!state.runGroups.length) {
     list.innerHTML = `<p class="empty-sub">No runs yet. Add one, then add the missions it covers.</p>`;
-    list.insertAdjacentHTML("beforeend", reorderToolbarHTML(editing, "rungroups"));
-    wireRunGroupOrderToolbar();
-    return;
   }
-  state.runGroups.forEach((g, idx) => {
+  state.runGroups.forEach((g) => {
     const wrap = document.createElement("div");
-    wrap.dataset.idx = idx;
-    if (editing) {
-      wrap.className = "mission-group drag-row";
-      wrap.innerHTML = `<span class="drag-handle">&#9776;</span><div class="m-info"><div class="m-name">${esc(g.name)}</div></div>`;
-      list.appendChild(wrap);
-      attachRowDrag(wrap, list, state.runGroups);
-      return;
-    }
+    wrap.dataset.gid = g.id;
     wrap.className = "mission-group";
     const expanded = state.expandedRunGroups.has(g.id);
     const groupMissions = state.missions.filter((m) => m.runGroupId === g.id);
     wrap.innerHTML = `
       <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
+        ${editing ? `<span class="drag-handle">&#9776;</span>` : ""}
         <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
           <div class="m-name">${esc(g.name)}</div>
           <div class="m-sub">${groupMissions.length} mission${groupMissions.length === 1 ? "" : "s"} &middot; tap to ${expanded ? "collapse" : "view missions"}</div>
         </div>
-        <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
-        <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
+        ${editing ? "" : `<button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>`}
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
     wrap.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
-      if (e.target.closest('[data-act="edit"], [data-act="del"]')) return;
+      if (e.target.closest('[data-act="edit"], [data-act="del"], .drag-handle')) return;
       if (expanded) state.expandedRunGroups.delete(g.id); else state.expandedRunGroups.add(g.id);
       renderRunGroups();
     });
-    wrap.querySelector('[data-act="edit"]').addEventListener("click", () => openRunGroupModal(g));
-    wrap.querySelector('[data-act="del"]').addEventListener("click", async () => {
-      if (confirm(`Delete "${g.name}"? Its missions become unassigned, not deleted.`)) {
+    const editBtn = wrap.querySelector('[data-act="edit"]');
+    if (editBtn) editBtn.addEventListener("click", () => openRunGroupModal(g));
+    const delBtn = wrap.querySelector('[data-act="del"]');
+    if (delBtn) delBtn.addEventListener("click", async () => {
+      if (confirm(`Delete "${g.name}"? Its missions move to "Unassigned" rather than being deleted.`)) {
         await snapshotBeforeDelete(`Before deleting run "${g.name}"`);
         await dbDelete("runGroups", g.id);
         await loadRunGroups();
@@ -1061,35 +1108,80 @@ function renderRunGroups() {
         renderRunGroups();
       }
     });
+    if (editing) attachRowDrag(wrap, list, state.runGroups);
     if (expanded) {
       const container = wrap.querySelector(".task-list");
       renderMissionsForGroup(container, g);
     }
     list.appendChild(wrap);
   });
-  list.insertAdjacentHTML("beforeend", reorderToolbarHTML(editing, "rungroups"));
-  wireRunGroupOrderToolbar();
+
+  const orphans = state.missions.filter((m) => !state.runGroups.some((g) => g.id === m.runGroupId));
+  if (orphans.length) {
+    const wrap = document.createElement("div");
+    wrap.className = "mission-group unassigned-group";
+    const expanded = state.expandedRunGroups.has("unassigned");
+    wrap.innerHTML = `
+      <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
+        <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
+        <div class="m-info">
+          <div class="m-name">Unassigned</div>
+          <div class="m-sub">${orphans.length} mission${orphans.length === 1 ? "" : "s"} without a run &mdash; tap to ${expanded ? "collapse" : "view &amp; reassign"}</div>
+        </div>
+      </div>
+      <div class="task-list" ${expanded ? "" : "hidden"}></div>
+    `;
+    wrap.querySelector('[data-act="expand"]').addEventListener("click", () => {
+      if (expanded) state.expandedRunGroups.delete("unassigned"); else state.expandedRunGroups.add("unassigned");
+      renderRunGroups();
+    });
+    if (expanded) {
+      const container = wrap.querySelector(".task-list");
+      renderOrphanMissions(container, orphans);
+    }
+    list.appendChild(wrap);
+  }
 }
 
-function wireRunGroupOrderToolbar() {
-  const editBtn = document.getElementById("btn-edit-order-rungroups");
-  if (editBtn) editBtn.addEventListener("click", () => { state.editingRunGroupOrder = true; renderRunGroups(); });
-  const cancelBtn = document.getElementById("btn-cancel-order-rungroups");
-  if (cancelBtn) cancelBtn.addEventListener("click", async () => {
-    state.editingRunGroupOrder = false;
-    state.runGroups = (await dbGetAll("runGroups")).sort((a, b) => a.order - b.order);
-    renderRunGroups();
-  });
-  const saveBtn = document.getElementById("btn-save-order-rungroups");
-  if (saveBtn) saveBtn.addEventListener("click", async () => {
-    for (const [idx, g] of state.runGroups.entries()) { g.order = idx; await dbPut("runGroups", g); }
-    state.editingRunGroupOrder = false;
-    await recomputeGlobalMissionOrder();
-    await loadMissions();
-    await loadRunGroups();
-    await runShadowBackup();
+function renderOrphanMissions(container, orphans) {
+  container.innerHTML = "";
+  orphans.forEach((m) => {
+    const expanded = state.expandedMissions.has(m.id);
+    const row = document.createElement("div");
+    row.className = "mission-group";
+    row.dataset.mid = m.id;
+    row.innerHTML = `
+      <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
+        <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
+        <div class="m-info">
+          <div class="m-name">${esc(m.name)}</div>
+          <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts</div>
+        </div>
+        <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
+        <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
+      </div>
+      <div class="task-list" ${expanded ? "" : "hidden"}></div>
+    `;
+    row.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
+      if (e.target.closest('[data-act="edit"], [data-act="del"]')) return;
+      if (expanded) state.expandedMissions.delete(m.id); else state.expandedMissions.add(m.id);
+      renderRunGroups();
+    });
+    row.querySelector('[data-act="edit"]').addEventListener("click", () => openMissionNameModal(m, null));
+    row.querySelector('[data-act="del"]').addEventListener("click", async () => {
+      if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
+        await snapshotBeforeDelete(`Before deleting mission "${m.name}"`);
+        await dbDelete("missions", m.id);
+        await loadMissions();
+        renderRunGroups();
+      }
+    });
+    if (expanded) renderTaskList(row.querySelector(".task-list"), m);
+    container.appendChild(row);
   });
 }
+
+function wireRunGroupOrderToolbar() { /* kept as no-op: unified into renderOrderToolbarTop() */ }
 
 function openRunGroupModal(g) {
   const isEdit = !!g;
@@ -1117,60 +1209,54 @@ function openRunGroupModal(g) {
 
 // ---- Missions nested within a run ----
 function renderMissionsForGroup(container, group) {
-  const editing = state.editingMissionsForGroupId === group.id;
-  const prefix = `missions-${group.id}`;
+  const editing = state.editingAllOrder;
   container.innerHTML = "";
   const groupMissions = state.missions.filter((m) => m.runGroupId === group.id).sort((a, b) => a.order - b.order);
 
-  if (editing) {
-    groupMissions.forEach((m, idx) => {
-      const row = document.createElement("div");
-      row.dataset.idx = idx;
-      row.className = "mission-row drag-row";
-      row.innerHTML = `<span class="drag-handle">&#9776;</span><div class="m-info"><div class="m-name">${esc(m.name)}</div></div>`;
-      container.appendChild(row);
-      attachRowDrag(row, container, groupMissions);
-    });
-  } else {
-    if (!groupMissions.length) {
-      container.insertAdjacentHTML("beforeend", `<p class="empty-sub">No missions in this run yet.</p>`);
-    }
-    groupMissions.forEach((m) => {
-      const expanded = state.expandedMissions.has(m.id);
-      const row = document.createElement("div");
-      row.className = "mission-group";
-      row.innerHTML = `
-        <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
-          <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
-          <div class="m-info">
-            <div class="m-name">${esc(m.name)}</div>
-            <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts &middot; tap to ${expanded ? "collapse" : "view tasks"}</div>
-          </div>
-          <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
-          <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
+  if (!groupMissions.length) {
+    container.insertAdjacentHTML("beforeend", `<p class="empty-sub">No missions in this run yet.</p>`);
+  }
+  groupMissions.forEach((m) => {
+    const expanded = state.expandedMissions.has(m.id);
+    const row = document.createElement("div");
+    row.className = "mission-group";
+    row.dataset.mid = m.id;
+    row.innerHTML = `
+      <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
+        ${editing ? `<span class="drag-handle">&#9776;</span>` : ""}
+        <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
+        <div class="m-info">
+          <div class="m-name">${esc(m.name)}</div>
+          <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts &middot; tap to ${expanded ? "collapse" : "view tasks"}</div>
         </div>
-        <div class="task-list" ${expanded ? "" : "hidden"}></div>
-      `;
-      row.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
-        if (e.target.closest('[data-act="edit"], [data-act="del"]')) return;
-        if (expanded) state.expandedMissions.delete(m.id); else state.expandedMissions.add(m.id);
-        renderRunGroups();
-      });
-      row.querySelector('[data-act="edit"]').addEventListener("click", () => openMissionNameModal(m, group));
-      row.querySelector('[data-act="del"]').addEventListener("click", async () => {
-        if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
-          await snapshotBeforeDelete(`Before deleting mission "${m.name}"`);
-          await dbDelete("missions", m.id);
-          await loadMissions();
-          renderRunGroups();
-        }
-      });
-      if (expanded) {
-        const taskListEl = row.querySelector(".task-list");
-        renderTaskList(taskListEl, m);
-      }
-      container.appendChild(row);
+        ${editing ? "" : `<button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>`}
+      </div>
+      <div class="task-list" ${expanded ? "" : "hidden"}></div>
+    `;
+    row.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
+      if (e.target.closest('[data-act="edit"], [data-act="del"], .drag-handle')) return;
+      if (expanded) state.expandedMissions.delete(m.id); else state.expandedMissions.add(m.id);
+      renderRunGroups();
     });
+    const editBtn = row.querySelector('[data-act="edit"]');
+    if (editBtn) editBtn.addEventListener("click", () => openMissionNameModal(m, group));
+    const delBtn = row.querySelector('[data-act="del"]');
+    if (delBtn) delBtn.addEventListener("click", async () => {
+      if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
+        await snapshotBeforeDelete(`Before deleting mission "${m.name}"`);
+        await dbDelete("missions", m.id);
+        await loadMissions();
+        renderRunGroups();
+      }
+    });
+    if (editing) attachRowDrag(row, container, groupMissions);
+    if (expanded) {
+      const taskListEl = row.querySelector(".task-list");
+      renderTaskList(taskListEl, m);
+    }
+    container.appendChild(row);
+  });
+  if (!editing) {
     const addBtn = document.createElement("button");
     addBtn.className = "btn btn-ghost btn-full";
     addBtn.style.marginTop = "6px";
@@ -1178,34 +1264,56 @@ function renderMissionsForGroup(container, group) {
     addBtn.addEventListener("click", () => openMissionNameModal(null, group));
     container.appendChild(addBtn);
   }
+}
 
-  container.insertAdjacentHTML("beforeend", reorderToolbarHTML(editing, prefix));
-  const editBtn = document.getElementById(`btn-edit-order-${prefix}`);
-  if (editBtn) editBtn.addEventListener("click", () => { state.editingMissionsForGroupId = group.id; renderRunGroups(); });
-  const cancelBtn = document.getElementById(`btn-cancel-order-${prefix}`);
-  if (cancelBtn) cancelBtn.addEventListener("click", async () => {
-    state.editingMissionsForGroupId = null;
-    await loadMissions();
-    renderRunGroups();
-  });
-  const saveBtn = document.getElementById(`btn-save-order-${prefix}`);
-  if (saveBtn) saveBtn.addEventListener("click", async () => {
-    for (const [idx, m] of groupMissions.entries()) { m.order = idx; await dbPut("missions", m); }
-    state.editingMissionsForGroupId = null;
+function openMissionNameModal(m, group) {
+  const isEdit = !!m;
+  const currentGroupId = isEdit ? m.runGroupId : group?.id;
+  openModal(`
+    <h2>${isEdit ? "Edit mission" : "New mission"}</h2>
+    <div class="field"><label>Mission name</label><input class="text-input" id="m-mission-name" value="${isEdit ? esc(m.name) : ""}" placeholder="e.g. M07 — Coral nursery"></div>
+    <div class="field"><label>Run</label>
+      <select class="text-input" id="m-mission-run">
+        ${state.runGroups.map((g) => `<option value="${g.id}" ${g.id === currentGroupId ? "selected" : ""}>${esc(g.name)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
+      <button class="btn btn-primary" id="m-save" type="button">Save</button>
+    </div>
+  `);
+  document.getElementById("m-cancel").addEventListener("click", closeModal);
+  document.getElementById("m-save").addEventListener("click", async () => {
+    const name = document.getElementById("m-mission-name").value.trim();
+    if (!name) { alert("Name this mission."); return; }
+    const newGroupId = Number(document.getElementById("m-mission-run").value);
+    const record = isEdit ? m : { order: 9999, tasks: [], taskSeq: 0 };
+    record.name = name;
+    record.runGroupId = newGroupId;
+    const id = await dbPut("missions", record);
+    closeModal();
+    if (!isEdit) state.expandedMissions.add(id);
+    state.expandedRunGroups.add(newGroupId);
     await recomputeGlobalMissionOrder();
     await loadMissions();
     renderRunGroups();
-    await runShadowBackup();
   });
 }
 
+function optionRowHtml(label = "", points = 0) {
+  return `<div class="option-row">
+    <input class="text-input" placeholder="Option label" value="${esc(label)}" data-f="label">
+    <input type="number" placeholder="pts" value="${points}" data-f="points">
+    <button class="btn-icon" data-act="rm-option">&#10005;</button>
+  </div>`;
+}
+
 function renderTaskList(container, mission) {
-  const editing = state.editingTasksForMissionId === mission.id;
-  const prefix = `tasks-${mission.id}`;
+  const editing = state.editingAllOrder;
   container.innerHTML = "";
-  (mission.tasks || []).forEach((t, tIdx) => {
+  (mission.tasks || []).forEach((t) => {
     const row = document.createElement("div");
-    row.dataset.idx = tIdx;
+    row.dataset.tid = t.id;
     if (editing) {
       row.className = "task-row drag-row";
       row.innerHTML = `
@@ -1245,59 +1353,6 @@ function renderTaskList(container, mission) {
     addBtn.addEventListener("click", () => openTaskModal(mission, null));
     container.appendChild(addBtn);
   }
-  container.insertAdjacentHTML("beforeend", reorderToolbarHTML(editing, prefix));
-
-  const editBtn = document.getElementById(`btn-edit-order-${prefix}`);
-  if (editBtn) editBtn.addEventListener("click", () => { state.editingTasksForMissionId = mission.id; renderRunGroups(); });
-  const cancelBtn = document.getElementById(`btn-cancel-order-${prefix}`);
-  if (cancelBtn) cancelBtn.addEventListener("click", async () => {
-    state.editingTasksForMissionId = null;
-    const fresh = (await dbGetAll("missions")).find((mm) => mm.id === mission.id);
-    if (fresh) mission.tasks = fresh.tasks;
-    renderRunGroups();
-  });
-  const saveBtn = document.getElementById(`btn-save-order-${prefix}`);
-  if (saveBtn) saveBtn.addEventListener("click", async () => {
-    await dbPut("missions", mission);
-    state.editingTasksForMissionId = null;
-    await loadMissions();
-    renderRunGroups();
-    await runShadowBackup();
-  });
-}
-
-function openMissionNameModal(m, group) {
-  const isEdit = !!m;
-  openModal(`
-    <h2>${isEdit ? "Edit mission" : "New mission"}</h2>
-    <p class="empty-sub">Run: ${esc(isEdit ? (state.runGroups.find((g) => g.id === m.runGroupId)?.name || "Unassigned") : group.name)}</p>
-    <div class="field"><label>Mission name</label><input class="text-input" id="m-mission-name" value="${isEdit ? esc(m.name) : ""}" placeholder="e.g. M07 — Coral nursery"></div>
-    <div class="modal-actions">
-      <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
-      <button class="btn btn-primary" id="m-save" type="button">Save</button>
-    </div>
-  `);
-  document.getElementById("m-cancel").addEventListener("click", closeModal);
-  document.getElementById("m-save").addEventListener("click", async () => {
-    const name = document.getElementById("m-mission-name").value.trim();
-    if (!name) { alert("Name this mission."); return; }
-    const record = isEdit ? m : { order: 9999, tasks: [], taskSeq: 0, runGroupId: group.id };
-    record.name = name;
-    const id = await dbPut("missions", record);
-    closeModal();
-    if (!isEdit) state.expandedMissions.add(id);
-    await recomputeGlobalMissionOrder();
-    await loadMissions();
-    renderRunGroups();
-  });
-}
-
-function optionRowHtml(label = "", points = 0) {
-  return `<div class="option-row">
-    <input class="text-input" placeholder="Option label" value="${esc(label)}" data-f="label">
-    <input type="number" placeholder="pts" value="${points}" data-f="points">
-    <button class="btn-icon" data-act="rm-option">&#10005;</button>
-  </div>`;
 }
 
 function openTaskModal(mission, t) {
@@ -1529,6 +1584,10 @@ async function usePrecisionToken() {
   await dbPut("runs", run);
   const el = document.getElementById("grn-token-count");
   if (el) el.textContent = run.precisionTokensRemaining;
+  const overviewLabel = document.querySelector(".gfs-timer-label");
+  if (overviewLabel && overviewLabel.textContent.includes("tokens left")) {
+    overviewLabel.textContent = `${fmtDuration(run.totalTimeMs)} total time · ${run.precisionTokensRemaining} tokens left · review below or save now`;
+  }
 }
 
 // ---- Helpers for navigating Run groups (legs) and their missions ----
@@ -1918,6 +1977,7 @@ function renderGuidedOverview() {
   `);
   renderOverviewBody();
   wireCancelLink();
+  wirePrecisionTokenButton();
   document.getElementById("grn-save-top").addEventListener("click", finalizeGuidedRun);
   document.getElementById("grn-save-bottom").addEventListener("click", finalizeGuidedRun);
 }
@@ -2117,32 +2177,34 @@ function viewRunBreakdown(run) {
 }
 
 // ---- Scoresheet-style CSV export ----
-function parseLeadingMissionNumber(name, fallback) {
-  const m = /^M?\s*0*([0-9]+)/i.exec(String(name || "").trim());
-  return m ? Number(m[1]) : fallback;
-}
-
 function buildScoresheetCSV(runs) {
+  const sortedGroups = state.runGroups.slice().sort((a, b) => a.order - b.order);
+  const groupNumberById = Object.fromEntries(sortedGroups.map((g, i) => [g.id, i + 1]));
+  const groupsById = Object.fromEntries(sortedGroups.map((g) => [g.id, g]));
+
   const taskRows = [];
-  const groupsById = Object.fromEntries(state.runGroups.map((g) => [g.id, g]));
-  state.missions.forEach((mission, mIdx) => {
-    const mNum = parseLeadingMissionNumber(mission.name, mIdx + 1);
-    const runName = groupsById[mission.runGroupId]?.name || "";
-    (mission.tasks || []).forEach((task) => taskRows.push({ mission, task, mNum, runName }));
+  state.missions.forEach((mission) => {
+    const group = groupsById[mission.runGroupId];
+    const runName = group ? group.name : "Unassigned";
+    const runNum = group ? groupNumberById[group.id] : "";
+    (mission.tasks || []).forEach((task) => taskRows.push({ mission, task, runName, runNum }));
   });
 
-  const header = ["Run", "M#", "Official Name", "Notes", "Pts", ...runs.map((r) => r.label), "Success Rate", "", "Date/Time", "Score"];
+  const header = ["Official Name", "Notes", "Pts", "Name", "#", ...runs.map((r) => r.label), "Success Rate", "", "Run #", "Score"];
   const lines = [header.map(csvEscape).join(",")];
 
   taskRows.forEach((row, i) => {
-    const { mission, task, mNum, runName } = row;
+    const { mission, task, runName, runNum } = row;
     const flags = runs.map((r) => (isTaskComplete(task, r.rawScores || {}) ? "1" : ""));
     const successCount = flags.filter((f) => f === "1").length;
     const successRate = runs.length ? Math.round((successCount / runs.length) * 100) : 0;
-    const sideTable = i < runs.length ? [new Date(runs[i].startedAt || runs[i].finishedAt || 0).toLocaleString(), String(runTotal(runs[i], state.missions))] : ["", ""];
-    const rowVals = [runName, mNum, mission.name, task.name, taskMaxPoints(task), ...flags, `${successRate}%`, "", ...sideTable];
+    const sideTable = i < runs.length ? [String(i + 1), String(runTotal(runs[i], state.missions))] : ["", ""];
+    const rowVals = [mission.name, task.name, taskMaxPoints(task), runName, runNum, ...flags, `${successRate}%`, "", ...sideTable];
     lines.push(rowVals.map(csvEscape).join(","));
   });
+
+  const tokenRow = ["", "", "Precision Tokens Left", "", "", ...runs.map((r) => String(r.precisionTokensRemaining ?? "")), "", "", "", ""];
+  lines.push(tokenRow.map(csvEscape).join(","));
 
   return lines.join("\n");
 }
@@ -2263,6 +2325,7 @@ async function initAll() {
   await purgeOldTrash();
   await loadAttachments();
   await loadMissions();
+  await ensureDefaultRunGroup();
   await loadRunGroups();
   await loadRuns();
   await loadSeasonName();

@@ -555,13 +555,13 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   background: var(--paper-2); font-family: var(--mono); font-weight: 700; font-size: 1.3rem; cursor: pointer;
 }
 .gfs-num-btn-big.active { background: var(--moss); border-color: var(--moss); color: var(--paper); }
-.gfs-num-btn-big.active-zero { background: var(--ink-deep); border-color: var(--ink-deep); color: var(--paper); }
+.gfs-num-btn-big.active-zero { background: var(--paper-2); border-color: var(--line); color: var(--text); }
 .gfs-choice-btn-big {
   padding: 16px 18px; border-radius: 12px; border: 1.5px solid var(--line);
   background: var(--paper-2); font-size: 1rem; font-weight: 600; cursor: pointer;
 }
 .gfs-choice-btn-big.active { background: var(--moss); border-color: var(--moss); color: var(--paper); }
-.gfs-choice-btn-big.active-zero { background: var(--ink-deep); border-color: var(--ink-deep); color: var(--paper); }
+.gfs-choice-btn-big.active-zero { background: var(--paper-2); border-color: var(--line); color: var(--text); }
 
 .gfs-big-action { font-size: 1.1rem; padding: 20px; }
 .gfs-huge-action { font-size: 1.35rem; padding: 30px; font-weight: 700; }
@@ -602,3 +602,11 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .run-filter-row { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
 .run-filter-row .text-input { flex: 1; font-size: 0.85rem; padding: 8px 10px; }
 .run-filter-to-label { color: var(--text-soft); font-size: 0.8rem; flex: none; }
+
+/* --- Added: unified top-positioned reorder toolbar for Runs/Missions/Tasks --- */
+.order-toolbar-top { display: flex; gap: 8px; margin-bottom: 14px; }
+.order-toolbar-top .btn { flex: 1; }
+.order-toolbar-top .btn-ghost#btn-edit-order-all { flex: none; font-size: 0.8rem; padding: 8px 12px; }
+
+/* --- Added: unassigned missions bucket (shown after deleting a run) --- */
+.unassigned-group .mission-group-head { border-color: var(--coral); border-style: dashed; }

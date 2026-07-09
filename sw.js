@@ -1,5 +1,5 @@
 // Bump this when you change any cached file so phones pick up the update.
-const CACHE_NAME = "barp-v19";
+const CACHE_NAME = "barp-v20";
 const ASSETS = [
   "./",
   "./index.html",
@@ -7,10 +7,7 @@ const ASSETS = [
   "./app.js",
   "./manifest.json",
   "./icons/icon-192.png",
-  "./icons/icon-512.png",
-  "./sounds/start-horn.mp3",
-  "./sounds/thirty-seconds.mp3",
-  "./sounds/buzzer.mp3"
+  "./icons/icon-512.png"
 ];
 
 self.addEventListener("install", (event) => {
@@ -30,6 +27,13 @@ self.addEventListener("activate", (event) => {
 // Cache-first for app shell, network-first fallback for everything else.
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
+  // Audio elements frequently issue byte-range requests (Range header) to
+  // support seeking. A simple full-response cache like this one doesn't
+  // return proper 206 Partial Content semantics for those, which can make
+  // the browser reject playback entirely ("no supported sources") even
+  // though the file itself is fine. Let sound files go straight to the
+  // network/browser cache, untouched by this service worker.
+  if (event.request.url.includes("/sounds/")) return;
   event.respondWith(
     caches.match(event.request).then((cached) => {
       if (cached) return cached;
