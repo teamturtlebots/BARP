@@ -175,7 +175,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 }
 .run-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
 .run-title { font-family: var(--display); font-weight: 700; font-size: 1.02rem; }
-.run-date { font-family: var(--mono); font-size: 0.72rem; color: var(--text-soft); }
+.run-date { font-family: var(--mono); font-size: 0.85rem; color: var(--text-soft); font-weight: 600; }
 .run-stamp {
   flex: none;
   width: 54px; height: 54px;
@@ -375,6 +375,8 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 }
 .run-summary-table th { color: var(--text-soft); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.03em; }
 .run-summary-table td:last-child, .run-summary-table th:last-child { font-family: var(--mono); text-align: right; }
+.run-summary-table .row-mission td { font-weight: 700; }
+.run-summary-table .row-transition td { font-weight: 400; color: var(--text-soft); font-style: italic; }
 .run-card-incomplete { opacity: 0.7; border-style: dashed; }
 
 /* --- Added: multi-select attachment filter + sort --- */
@@ -464,7 +466,9 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .gfs-body { flex: 1; overflow-y: auto; padding: 16px; }
 .gfs-body.gfs-center { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px; }
 .gfs-section { margin-bottom: 22px; }
-.gfs-section h3 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-soft); margin-bottom: 8px; }
+.gfs-section h3 { font-size: 0.95rem; text-transform: none; letter-spacing: normal; color: var(--ink-deep); font-family: var(--display); font-weight: 700; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 2px solid var(--amber); }
+.gfs-subsection { margin-bottom: 16px; margin-left: 4px; }
+.gfs-subsection h4 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-soft); margin: 0 0 6px; }
 .gfs-task-list { display: flex; flex-direction: column; gap: 8px; }
 
 .gfs-task-row {
@@ -551,11 +555,13 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   background: var(--paper-2); font-family: var(--mono); font-weight: 700; font-size: 1.3rem; cursor: pointer;
 }
 .gfs-num-btn-big.active { background: var(--moss); border-color: var(--moss); color: var(--paper); }
+.gfs-num-btn-big.active-zero { background: var(--ink-deep); border-color: var(--ink-deep); color: var(--paper); }
 .gfs-choice-btn-big {
   padding: 16px 18px; border-radius: 12px; border: 1.5px solid var(--line);
   background: var(--paper-2); font-size: 1rem; font-weight: 600; cursor: pointer;
 }
 .gfs-choice-btn-big.active { background: var(--moss); border-color: var(--moss); color: var(--paper); }
+.gfs-choice-btn-big.active-zero { background: var(--ink-deep); border-color: var(--ink-deep); color: var(--paper); }
 
 .gfs-big-action { font-size: 1.1rem; padding: 20px; }
 .gfs-huge-action { font-size: 1.35rem; padding: 30px; font-weight: 700; }
@@ -566,8 +572,13 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .gfs-countdown-go { color: var(--moss); font-size: 4.5rem; }
 
 /* --- Added: drag-to-reorder edit mode (Attachments, Missions, Tasks) --- */
-.reorder-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
-.reorder-toolbar .btn { flex: 1; }
+.reorder-toolbar-small { display: flex; justify-content: flex-end; gap: 14px; margin-top: 4px; }
+.btn-small-link {
+  background: none; border: none; cursor: pointer;
+  color: var(--text-soft); font-size: 0.78rem; font-family: var(--body);
+  padding: 4px 2px;
+}
+.btn-small-link:active { color: var(--moss); }
 .drag-row {
   display: flex; align-items: center; gap: 12px;
   touch-action: none; user-select: none;
@@ -583,3 +594,11 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 
 /* --- Added: attachment picture thumbnail --- */
 .att-thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); flex: none; }
+
+/* --- Added: live-updating position number during attachment reorder --- */
+.drag-num { font-family: var(--mono); font-weight: 700; color: var(--amber-dark); flex: none; min-width: 26px; }
+
+/* --- Added: run date-range filter --- */
+.run-filter-row { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
+.run-filter-row .text-input { flex: 1; font-size: 0.85rem; padding: 8px 10px; }
+.run-filter-to-label { color: var(--text-soft); font-size: 0.8rem; flex: none; }

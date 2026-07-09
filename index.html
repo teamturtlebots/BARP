@@ -54,10 +54,21 @@
 
   <!-- RUNS VIEW -->
   <section class="view" id="view-runs" hidden>
-    <button class="btn btn-amber btn-full btn-start-run" id="btn-start-run">&#9654; Start New Practice Run</button>
+    <button class="btn btn-amber btn-full btn-start-run" id="btn-start-run">&#9654; Start New Practice Game Run</button>
     <button class="btn btn-ghost btn-full" id="btn-export-runs-csv" style="margin-bottom:16px;">Export scoresheet CSV</button>
 
     <div id="run-stats" class="stat-strip"></div>
+
+    <div class="section-row">
+      <h3 style="font-size:0.92rem;">Filter by date</h3>
+      <button class="btn-small-link" id="btn-clear-run-filter">Clear</button>
+    </div>
+    <div class="run-filter-row">
+      <input type="datetime-local" id="run-filter-from" class="text-input">
+      <span class="run-filter-to-label">to</span>
+      <input type="datetime-local" id="run-filter-to" class="text-input">
+    </div>
+
     <div id="run-list" class="run-list"></div>
   </section>
 
@@ -71,14 +82,14 @@
     <div id="attachment-setup-list" class="mission-list"></div>
 
     <div class="section-row" style="margin-top:28px;">
-      <h2>Missions</h2>
+      <h2>Runs</h2>
       <div class="btn-group">
         <button class="btn btn-ghost" id="btn-import-missions">Import CSV</button>
-        <button class="btn btn-amber" id="btn-add-mission">+ Mission</button>
+        <button class="btn btn-amber" id="btn-add-rungroup">+ Run</button>
       </div>
     </div>
-    <p class="empty-sub">Each mission holds one or more tasks &mdash; build this once your season's mission list is released, matching point values from the official scoresheet.</p>
-    <div id="mission-list" class="mission-list"></div>
+    <p class="empty-sub">A Run is one leave-and-return trip &mdash; group the missions it covers here, then expand a mission to add its tasks. Build this once your season's mission list is released, matching point values from the official scoresheet.</p>
+    <div id="rungroup-list" class="mission-list"></div>
 
     <div class="section-row" style="margin-top:28px;">
       <h2>Backup</h2>
@@ -88,7 +99,7 @@
     <div class="btn-group">
       <button class="btn btn-ghost" id="btn-export-backup">Export full backup (.json)</button>
       <button class="btn btn-ghost" id="btn-import-backup">Restore from backup file</button>
-      <button class="btn btn-ghost" id="btn-restore-shadow">Restore a backup&hellip;</button>
+      <button class="btn btn-ghost" id="btn-restore-shadow">Restore from automatic backup</button>
     </div>
     <button class="btn btn-danger btn-full" id="btn-reset-db" style="margin-top:10px;">Reset local data</button>
     <p class="empty-sub">Only use this if the app is stuck (e.g. a database error banner). This permanently erases everything stored on this device (except backups) — export a manual backup first if you can.</p>
@@ -111,7 +122,7 @@
     <span class="tab-icon">&#128220;</span><span>Log</span>
   </button>
   <button class="tab-btn" data-view="view-runs">
-    <span class="tab-icon">&#127919;</span><span>Runs</span>
+    <span class="tab-icon">&#127919;</span><span>Game Runs</span>
   </button>
   <button class="tab-btn" data-view="view-setup">
     <span class="tab-icon">&#9881;&#65039;</span><span>Setup</span>

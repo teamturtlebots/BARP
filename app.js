@@ -9,7 +9,7 @@ if ("serviceWorker" in navigator) {
 
 // ---------- IndexedDB helper ----------
 const DB_NAME = "barp-db-v1";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 let dbPromise = null;
 
 function createStores(db) {
@@ -22,6 +22,12 @@ function createStores(db) {
   }
   if (!db.objectStoreNames.contains("missions")) {
     db.createObjectStore("missions", { keyPath: "id", autoIncrement: true });
+  }
+  // "runGroups" = the "Run" concept in FLL terms: one leave-and-return trip,
+  // containing several missions. Not to be confused with the "runs" store
+  // below, which is a whole ~2:30 Game Run (the thing with the scoreboard).
+  if (!db.objectStoreNames.contains("runGroups")) {
+    db.createObjectStore("runGroups", { keyPath: "id", autoIncrement: true });
   }
   if (!db.objectStoreNames.contains("runs")) {
     db.createObjectStore("runs", { keyPath: "id", autoIncrement: true });
@@ -116,6 +122,7 @@ async function runShadowBackup() {
       missions: await dbGetAllRaw("missions"),
       runs: await dbGetAllRaw("runs"),
       meta: await dbGetAllRaw("meta"),
+      runGroups: await dbGetAllRaw("runGroups"),
     };
     const db = await openShadowDB();
     await new Promise((resolve, reject) => {
@@ -146,12 +153,13 @@ async function getShadowBackup() {
   });
 }
 async function restoreFullData(data) {
-  await dbClear("attachments"); await dbClear("entries"); await dbClear("missions"); await dbClear("runs"); await dbClear("meta");
+  await dbClear("attachments"); await dbClear("entries"); await dbClear("missions"); await dbClear("runs"); await dbClear("meta"); await dbClear("runGroups");
   for (const a of data.attachments || []) await dbPut("attachments", a);
   for (const en of data.entries || []) await dbPut("entries", en);
   for (const m of data.missions || []) await dbPut("missions", m);
   for (const r of data.runs || []) await dbPut("runs", r);
   for (const meta of data.meta || []) await dbPut("meta", meta);
+  for (const g of data.runGroups || []) await dbPut("runGroups", g);
   await initAll();
 }
 async function snapshotCurrentData() {
@@ -161,6 +169,7 @@ async function snapshotCurrentData() {
     missions: await dbGetAllRaw("missions"),
     runs: await dbGetAllRaw("runs"),
     meta: await dbGetAllRaw("meta"),
+    runGroups: await dbGetAllRaw("runGroups"),
   };
 }
 // Not persisted to disk — just enough to undo your last restore within this
@@ -252,12 +261,15 @@ const state = {
   filterInitialized: false,
   entries: [],
   missions: [],
+  runGroups: [], // "Run" = one leave-and-return trip, grouping several missions
   runs: [],
   expandedMissions: new Set(),
+  expandedRunGroups: new Set(),
   editingAttachmentOrder: false,
-  editingMissionOrder: false,
+  editingRunGroupOrder: false,
+  editingMissionsForGroupId: null,
   editingTasksForMissionId: null,
-  guidedRun: null, // { run, missionIdx, phase, phaseStartTs, timerHandle }
+  guidedRun: null, // { run, legIdx, missionIdxInLeg, taskIdx, matchStartTs, ... }
 };
 
 // ---------- Visible error reporting ----------
@@ -292,7 +304,7 @@ window.addEventListener("unhandledrejection", (e) => showErrorBanner(e.reason?.m
 // `container` is the row's parent. Rows keep their real DOM nodes throughout
 // the drag (swapped via insertBefore, never recreated), so pointer capture on
 // the handle stays valid for the whole gesture.
-function attachRowDrag(row, container, itemsArray) {
+function attachRowDrag(row, container, itemsArray, onSwap) {
   const handle = row.querySelector(".drag-handle");
   if (!handle) return;
   handle.addEventListener("pointerdown", (e) => {
@@ -308,6 +320,7 @@ function attachRowDrag(row, container, itemsArray) {
       itemsArray[idxB] = tmp;
       rowA.dataset.idx = idxB;
       rowB.dataset.idx = idxA;
+      if (onSwap) onSwap();
     }
 
     function onMove(ev) {
@@ -350,8 +363,8 @@ function attachRowDrag(row, container, itemsArray) {
 }
 function reorderToolbarHTML(editing, prefix) {
   return editing
-    ? `<div class="reorder-toolbar"><button type="button" class="btn btn-primary" id="btn-save-order-${prefix}">Save order</button><button type="button" class="btn btn-ghost" id="btn-cancel-order-${prefix}">Cancel</button></div>`
-    : `<div class="reorder-toolbar"><button type="button" class="btn btn-ghost" id="btn-edit-order-${prefix}">Edit order</button></div>`;
+    ? `<div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-save-order-${prefix}">Save order</button><button type="button" class="btn-small-link" id="btn-cancel-order-${prefix}">Cancel</button></div>`
+    : `<div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-edit-order-${prefix}">&#8645; Reorder</button></div>`;
 }
 
 // ---------- Modal helpers ----------
@@ -635,9 +648,10 @@ function renderAttachmentsSetup() {
   const list = document.getElementById("attachment-setup-list");
   const editing = state.editingAttachmentOrder;
   (async () => {
-    list.innerHTML = reorderToolbarHTML(editing, "attachments");
+    list.innerHTML = "";
     if (!state.attachments.length) {
-      list.insertAdjacentHTML("beforeend", `<p class="empty-sub">No attachments yet. Add one for each swappable part on the robot.</p>`);
+      list.innerHTML = `<p class="empty-sub">No attachments yet. Add one for each swappable part on the robot.</p>`;
+      list.insertAdjacentHTML("beforeend", reorderToolbarHTML(editing, "attachments"));
       wireAttachmentOrderToolbar();
       return;
     }
@@ -648,10 +662,13 @@ function renderAttachmentsSetup() {
         row.className = "mission-row drag-row";
         row.innerHTML = `
           <span class="drag-handle">&#9776;</span>
-          <div class="m-info"><div class="m-name">#${esc(att.number)} ${esc(att.name)}</div></div>
+          <span class="drag-num">#${idx + 1}</span>
+          <div class="m-info"><div class="m-name">${esc(att.name)}</div></div>
         `;
         list.appendChild(row);
-        attachRowDrag(row, list, state.attachments);
+        attachRowDrag(row, list, state.attachments, () => {
+          [...list.querySelectorAll(".drag-row .drag-num")].forEach((el, i) => { el.textContent = `#${i + 1}`; });
+        });
       } else {
         const count = await iterationCount(att.id);
         row.className = "mission-row";
@@ -679,6 +696,7 @@ function renderAttachmentsSetup() {
         list.appendChild(row);
       }
     }
+    list.insertAdjacentHTML("beforeend", reorderToolbarHTML(editing, "attachments"));
     wireAttachmentOrderToolbar();
   })();
 }
@@ -697,6 +715,7 @@ function wireAttachmentOrderToolbar() {
     for (const [idx, att] of state.attachments.entries()) { att.order = idx; att.number = idx + 1; await dbPut("attachments", att); }
     state.editingAttachmentOrder = false;
     await loadAttachments();
+    await runShadowBackup();
   });
 }
 
@@ -709,14 +728,30 @@ function openAttachmentModal(att) {
     <div class="field">
       <label>Picture (optional)</label>
       <div class="photo-preview-wrap" id="att-photo-preview-wrap">${pendingAttPhoto ? `<img class="photo-preview" src="${pendingAttPhoto}">` : ""}</div>
-      <input type="file" accept="image/*" id="m-att-photo">
+      <div class="camera-view" id="att-camera-view" hidden>
+        <video id="att-camera-video" autoplay playsinline muted></video>
+        <div class="camera-controls">
+          <button type="button" class="btn btn-ghost" id="att-camera-cancel">Cancel</button>
+          <button type="button" class="btn btn-primary" id="att-camera-capture">Capture</button>
+        </div>
+      </div>
+      <div class="btn-group" id="att-photo-btn-group">
+        <button type="button" class="btn btn-amber" id="att-btn-take-photo">&#128247; Take Photo</button>
+        <button type="button" class="btn btn-ghost" id="att-btn-choose-photo">Choose from files</button>
+      </div>
+      <input type="file" accept="image/*" id="m-att-photo" hidden>
     </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
       <button class="btn btn-primary" id="m-save" type="button">Save</button>
     </div>
   `);
-  document.getElementById("m-cancel").addEventListener("click", closeModal);
+  const attCameraIds = { view: "att-camera-view", video: "att-camera-video", btnGroup: "att-photo-btn-group", previewWrap: "att-photo-preview-wrap" };
+  document.getElementById("m-cancel").addEventListener("click", () => { stopCamera(); closeModal(); });
+  document.getElementById("att-btn-choose-photo").addEventListener("click", () => document.getElementById("m-att-photo").click());
+  document.getElementById("att-btn-take-photo").addEventListener("click", () => openCamera(attCameraIds, (dataUrl) => { pendingAttPhoto = dataUrl; }));
+  document.getElementById("att-camera-cancel").addEventListener("click", () => stopCamera());
+  document.getElementById("att-camera-capture").addEventListener("click", () => capturePhoto());
   document.getElementById("m-att-photo").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -724,6 +759,7 @@ function openAttachmentModal(att) {
     document.getElementById("att-photo-preview-wrap").innerHTML = `<img class="photo-preview" src="${pendingAttPhoto}">`;
   });
   document.getElementById("m-save").addEventListener("click", async () => {
+    stopCamera();
     const name = document.getElementById("m-att-name").value.trim();
     if (!name) { alert("Give this attachment a name."); return; }
     const record = isEdit ? att : { order: state.attachments.length, number: state.attachments.length + 1 };
@@ -817,7 +853,8 @@ function openRecordIterationModal() {
     document.getElementById("photo-preview-wrap").innerHTML = `<img class="photo-preview" src="${pendingPhoto}">`;
   });
 
-  document.getElementById("btn-take-photo").addEventListener("click", () => openCamera());
+  const riCameraIds = { view: "camera-view", video: "camera-video", btnGroup: "photo-btn-group", previewWrap: "photo-preview-wrap" };
+  document.getElementById("btn-take-photo").addEventListener("click", () => openCamera(riCameraIds, (dataUrl) => { pendingPhoto = dataUrl; }));
   document.getElementById("camera-cancel").addEventListener("click", () => stopCamera());
   document.getElementById("camera-capture").addEventListener("click", () => capturePhoto());
 
@@ -844,13 +881,17 @@ function openRecordIterationModal() {
 }
 
 let activeCameraStream = null;
-async function openCamera() {
+let activeCameraIds = null;
+let activeCameraCallback = null;
+async function openCamera(ids, onCapture) {
+  activeCameraIds = ids;
+  activeCameraCallback = onCapture;
   try {
     activeCameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
-    const video = document.getElementById("camera-video");
+    const video = document.getElementById(ids.video);
     video.srcObject = activeCameraStream;
-    document.getElementById("camera-view").hidden = false;
-    document.getElementById("photo-btn-group").hidden = true;
+    document.getElementById(ids.view).hidden = false;
+    document.getElementById(ids.btnGroup).hidden = true;
   } catch (err) {
     // Permission denied, no camera, or an insecure context — fall back to the
     // regular file picker rather than leaving the person stuck.
@@ -859,13 +900,16 @@ async function openCamera() {
 }
 function stopCamera() {
   if (activeCameraStream) { activeCameraStream.getTracks().forEach((t) => t.stop()); activeCameraStream = null; }
-  const view = document.getElementById("camera-view");
-  const btnGroup = document.getElementById("photo-btn-group");
-  if (view) view.hidden = true;
-  if (btnGroup) btnGroup.hidden = false;
+  if (activeCameraIds) {
+    const view = document.getElementById(activeCameraIds.view);
+    const btnGroup = document.getElementById(activeCameraIds.btnGroup);
+    if (view) view.hidden = true;
+    if (btnGroup) btnGroup.hidden = false;
+  }
 }
 function capturePhoto() {
-  const video = document.getElementById("camera-video");
+  if (!activeCameraIds) return;
+  const video = document.getElementById(activeCameraIds.video);
   const maxDim = 900;
   let { videoWidth: width, videoHeight: height } = video;
   if (!width || !height) return;
@@ -874,8 +918,10 @@ function capturePhoto() {
   const canvas = document.createElement("canvas");
   canvas.width = width; canvas.height = height;
   canvas.getContext("2d").drawImage(video, 0, 0, width, height);
-  pendingPhoto = canvas.toDataURL("image/jpeg", 0.72);
-  document.getElementById("photo-preview-wrap").innerHTML = `<img class="photo-preview" src="${pendingPhoto}">`;
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.72);
+  const wrap = document.getElementById(activeCameraIds.previewWrap);
+  if (wrap) wrap.innerHTML = `<img class="photo-preview" src="${dataUrl}">`;
+  if (activeCameraCallback) activeCameraCallback(dataUrl);
   stopCamera();
 }
 
@@ -925,10 +971,35 @@ function stopRecognizer() { if (recognizer) { try { recognizer.stop(); } catch (
 // ==========================================================
 // MISSIONS + TASKS (Setup tab)
 // ==========================================================
+async function loadRunGroups() {
+  state.runGroups = (await dbGetAll("runGroups")).sort((a, b) => a.order - b.order);
+  if (!state.runGroups.length) {
+    const id = await dbPut("runGroups", { name: "Run 1", order: 0 });
+    state.runGroups = await dbGetAll("runGroups");
+    state.expandedRunGroups.add(id);
+  }
+  renderRunGroups();
+}
+
+// Missions carry a global .order spanning every run group, so guided-run
+// traversal and CSV export can just sort state.missions and get the right
+// sequence. This recomputes it from (run-group order, mission's order within
+// that group) any time the grouping structure changes.
+async function recomputeGlobalMissionOrder() {
+  const groups = (await dbGetAll("runGroups")).sort((a, b) => a.order - b.order);
+  const allMissions = await dbGetAll("missions");
+  let globalIdx = 0;
+  for (const g of groups) {
+    const groupMissions = allMissions.filter((m) => m.runGroupId === g.id).sort((a, b) => a.order - b.order);
+    for (const m of groupMissions) { m.order = globalIdx++; await dbPut("missions", m); }
+  }
+  const orphans = allMissions.filter((m) => !groups.some((g) => g.id === m.runGroupId)).sort((a, b) => a.order - b.order);
+  for (const m of orphans) { m.order = globalIdx++; await dbPut("missions", m); }
+}
+
 async function loadMissions() {
   state.missions = (await dbGetAll("missions")).sort((a, b) => a.order - b.order);
   state.missions.forEach((m) => { if (!m.tasks) m.tasks = []; if (m.taskSeq === undefined) m.taskSeq = 0; });
-  renderMissions();
 }
 
 function taskSubLabel(t) {
@@ -937,87 +1008,201 @@ function taskSubLabel(t) {
   return `Multi-state · max ${taskMaxPoints(t)} pts`;
 }
 
-function renderMissions() {
-  const list = document.getElementById("mission-list");
-  const editing = state.editingMissionOrder;
-  list.innerHTML = reorderToolbarHTML(editing, "missions");
-  if (!state.missions.length) {
-    list.insertAdjacentHTML("beforeend", `<p class="empty-sub">No missions yet. Add one, then add its tasks.</p>`);
-    wireMissionOrderToolbar();
+// ---- Runs (leave-and-return trips), each holding several missions ----
+document.getElementById("btn-add-rungroup").addEventListener("click", () => openRunGroupModal(null));
+
+function renderRunGroups() {
+  const list = document.getElementById("rungroup-list");
+  const editing = state.editingRunGroupOrder;
+  list.innerHTML = "";
+  if (!state.runGroups.length) {
+    list.innerHTML = `<p class="empty-sub">No runs yet. Add one, then add the missions it covers.</p>`;
+    list.insertAdjacentHTML("beforeend", reorderToolbarHTML(editing, "rungroups"));
+    wireRunGroupOrderToolbar();
     return;
   }
-  state.missions.forEach((m, idx) => {
-    const group = document.createElement("div");
-    group.className = "mission-group";
-    group.dataset.idx = idx;
-
+  state.runGroups.forEach((g, idx) => {
+    const wrap = document.createElement("div");
+    wrap.dataset.idx = idx;
     if (editing) {
-      group.className = "mission-group drag-row";
-      group.innerHTML = `
-        <span class="drag-handle">&#9776;</span>
-        <div class="m-info"><div class="m-name">${esc(m.name)}</div></div>
-      `;
-      list.appendChild(group);
-      attachRowDrag(group, list, state.missions);
+      wrap.className = "mission-group drag-row";
+      wrap.innerHTML = `<span class="drag-handle">&#9776;</span><div class="m-info"><div class="m-name">${esc(g.name)}</div></div>`;
+      list.appendChild(wrap);
+      attachRowDrag(wrap, list, state.runGroups);
       return;
     }
-
-    const expanded = state.expandedMissions.has(m.id);
-    group.innerHTML = `
+    wrap.className = "mission-group";
+    const expanded = state.expandedRunGroups.has(g.id);
+    const groupMissions = state.missions.filter((m) => m.runGroupId === g.id);
+    wrap.innerHTML = `
       <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
         <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
-          <div class="m-name">${esc(m.name)}</div>
-          <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts &middot; tap to ${expanded ? "collapse" : "view tasks"}</div>
+          <div class="m-name">${esc(g.name)}</div>
+          <div class="m-sub">${groupMissions.length} mission${groupMissions.length === 1 ? "" : "s"} &middot; tap to ${expanded ? "collapse" : "view missions"}</div>
         </div>
         <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
         <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
-    group.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
+    wrap.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
       if (e.target.closest('[data-act="edit"], [data-act="del"]')) return;
-      if (expanded) state.expandedMissions.delete(m.id); else state.expandedMissions.add(m.id);
-      renderMissions();
+      if (expanded) state.expandedRunGroups.delete(g.id); else state.expandedRunGroups.add(g.id);
+      renderRunGroups();
     });
-    group.querySelector('[data-act="edit"]').addEventListener("click", () => openMissionNameModal(m));
-    group.querySelector('[data-act="del"]').addEventListener("click", async () => {
-      if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
-        await snapshotBeforeDelete(`Before deleting mission "${m.name}"`);
-        await dbDelete("missions", m.id);
+    wrap.querySelector('[data-act="edit"]').addEventListener("click", () => openRunGroupModal(g));
+    wrap.querySelector('[data-act="del"]').addEventListener("click", async () => {
+      if (confirm(`Delete "${g.name}"? Its missions become unassigned, not deleted.`)) {
+        await snapshotBeforeDelete(`Before deleting run "${g.name}"`);
+        await dbDelete("runGroups", g.id);
+        await loadRunGroups();
         await loadMissions();
+        renderRunGroups();
       }
     });
     if (expanded) {
-      const taskListEl = group.querySelector(".task-list");
-      renderTaskList(taskListEl, m);
+      const container = wrap.querySelector(".task-list");
+      renderMissionsForGroup(container, g);
     }
-    list.appendChild(group);
+    list.appendChild(wrap);
   });
-  wireMissionOrderToolbar();
+  list.insertAdjacentHTML("beforeend", reorderToolbarHTML(editing, "rungroups"));
+  wireRunGroupOrderToolbar();
 }
 
-function wireMissionOrderToolbar() {
-  const editBtn = document.getElementById("btn-edit-order-missions");
-  if (editBtn) editBtn.addEventListener("click", () => { state.editingMissionOrder = true; renderMissions(); });
-  const cancelBtn = document.getElementById("btn-cancel-order-missions");
+function wireRunGroupOrderToolbar() {
+  const editBtn = document.getElementById("btn-edit-order-rungroups");
+  if (editBtn) editBtn.addEventListener("click", () => { state.editingRunGroupOrder = true; renderRunGroups(); });
+  const cancelBtn = document.getElementById("btn-cancel-order-rungroups");
   if (cancelBtn) cancelBtn.addEventListener("click", async () => {
-    state.editingMissionOrder = false;
-    state.missions = (await dbGetAll("missions")).sort((a, b) => a.order - b.order);
-    renderMissions();
+    state.editingRunGroupOrder = false;
+    state.runGroups = (await dbGetAll("runGroups")).sort((a, b) => a.order - b.order);
+    renderRunGroups();
   });
-  const saveBtn = document.getElementById("btn-save-order-missions");
+  const saveBtn = document.getElementById("btn-save-order-rungroups");
   if (saveBtn) saveBtn.addEventListener("click", async () => {
-    for (const [idx, m] of state.missions.entries()) { m.order = idx; await dbPut("missions", m); }
-    state.editingMissionOrder = false;
+    for (const [idx, g] of state.runGroups.entries()) { g.order = idx; await dbPut("runGroups", g); }
+    state.editingRunGroupOrder = false;
+    await recomputeGlobalMissionOrder();
     await loadMissions();
+    await loadRunGroups();
+    await runShadowBackup();
+  });
+}
+
+function openRunGroupModal(g) {
+  const isEdit = !!g;
+  openModal(`
+    <h2>${isEdit ? "Rename run" : "New run"}</h2>
+    <p class="empty-sub">One trip out and back — group the missions the robot tackles in this trip.</p>
+    <div class="field"><label>Name</label><input class="text-input" id="rg-name" value="${isEdit ? esc(g.name) : `Run ${state.runGroups.length + 1}`}"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
+      <button class="btn btn-primary" id="m-save" type="button">Save</button>
+    </div>
+  `);
+  document.getElementById("m-cancel").addEventListener("click", closeModal);
+  document.getElementById("m-save").addEventListener("click", async () => {
+    const name = document.getElementById("rg-name").value.trim();
+    if (!name) { alert("Name this run."); return; }
+    const record = isEdit ? g : { order: state.runGroups.length };
+    record.name = name;
+    const id = await dbPut("runGroups", record);
+    closeModal();
+    if (!isEdit) state.expandedRunGroups.add(id);
+    await loadRunGroups();
+  });
+}
+
+// ---- Missions nested within a run ----
+function renderMissionsForGroup(container, group) {
+  const editing = state.editingMissionsForGroupId === group.id;
+  const prefix = `missions-${group.id}`;
+  container.innerHTML = "";
+  const groupMissions = state.missions.filter((m) => m.runGroupId === group.id).sort((a, b) => a.order - b.order);
+
+  if (editing) {
+    groupMissions.forEach((m, idx) => {
+      const row = document.createElement("div");
+      row.dataset.idx = idx;
+      row.className = "mission-row drag-row";
+      row.innerHTML = `<span class="drag-handle">&#9776;</span><div class="m-info"><div class="m-name">${esc(m.name)}</div></div>`;
+      container.appendChild(row);
+      attachRowDrag(row, container, groupMissions);
+    });
+  } else {
+    if (!groupMissions.length) {
+      container.insertAdjacentHTML("beforeend", `<p class="empty-sub">No missions in this run yet.</p>`);
+    }
+    groupMissions.forEach((m) => {
+      const expanded = state.expandedMissions.has(m.id);
+      const row = document.createElement("div");
+      row.className = "mission-group";
+      row.innerHTML = `
+        <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
+          <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
+          <div class="m-info">
+            <div class="m-name">${esc(m.name)}</div>
+            <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts &middot; tap to ${expanded ? "collapse" : "view tasks"}</div>
+          </div>
+          <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
+          <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
+        </div>
+        <div class="task-list" ${expanded ? "" : "hidden"}></div>
+      `;
+      row.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
+        if (e.target.closest('[data-act="edit"], [data-act="del"]')) return;
+        if (expanded) state.expandedMissions.delete(m.id); else state.expandedMissions.add(m.id);
+        renderRunGroups();
+      });
+      row.querySelector('[data-act="edit"]').addEventListener("click", () => openMissionNameModal(m, group));
+      row.querySelector('[data-act="del"]').addEventListener("click", async () => {
+        if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
+          await snapshotBeforeDelete(`Before deleting mission "${m.name}"`);
+          await dbDelete("missions", m.id);
+          await loadMissions();
+          renderRunGroups();
+        }
+      });
+      if (expanded) {
+        const taskListEl = row.querySelector(".task-list");
+        renderTaskList(taskListEl, m);
+      }
+      container.appendChild(row);
+    });
+    const addBtn = document.createElement("button");
+    addBtn.className = "btn btn-ghost btn-full";
+    addBtn.style.marginTop = "6px";
+    addBtn.textContent = "+ Mission";
+    addBtn.addEventListener("click", () => openMissionNameModal(null, group));
+    container.appendChild(addBtn);
+  }
+
+  container.insertAdjacentHTML("beforeend", reorderToolbarHTML(editing, prefix));
+  const editBtn = document.getElementById(`btn-edit-order-${prefix}`);
+  if (editBtn) editBtn.addEventListener("click", () => { state.editingMissionsForGroupId = group.id; renderRunGroups(); });
+  const cancelBtn = document.getElementById(`btn-cancel-order-${prefix}`);
+  if (cancelBtn) cancelBtn.addEventListener("click", async () => {
+    state.editingMissionsForGroupId = null;
+    await loadMissions();
+    renderRunGroups();
+  });
+  const saveBtn = document.getElementById(`btn-save-order-${prefix}`);
+  if (saveBtn) saveBtn.addEventListener("click", async () => {
+    for (const [idx, m] of groupMissions.entries()) { m.order = idx; await dbPut("missions", m); }
+    state.editingMissionsForGroupId = null;
+    await recomputeGlobalMissionOrder();
+    await loadMissions();
+    renderRunGroups();
+    await runShadowBackup();
   });
 }
 
 function renderTaskList(container, mission) {
   const editing = state.editingTasksForMissionId === mission.id;
   const prefix = `tasks-${mission.id}`;
-  container.innerHTML = reorderToolbarHTML(editing, prefix);
+  container.innerHTML = "";
   (mission.tasks || []).forEach((t, tIdx) => {
     const row = document.createElement("div");
     row.dataset.idx = tIdx;
@@ -1047,6 +1232,7 @@ function renderTaskList(container, mission) {
         mission.tasks = mission.tasks.filter((tt) => tt.id !== t.id);
         await dbPut("missions", mission);
         await loadMissions();
+        renderRunGroups();
       }
     });
     container.appendChild(row);
@@ -1059,47 +1245,50 @@ function renderTaskList(container, mission) {
     addBtn.addEventListener("click", () => openTaskModal(mission, null));
     container.appendChild(addBtn);
   }
+  container.insertAdjacentHTML("beforeend", reorderToolbarHTML(editing, prefix));
 
   const editBtn = document.getElementById(`btn-edit-order-${prefix}`);
-  if (editBtn) editBtn.addEventListener("click", () => { state.editingTasksForMissionId = mission.id; renderMissions(); });
+  if (editBtn) editBtn.addEventListener("click", () => { state.editingTasksForMissionId = mission.id; renderRunGroups(); });
   const cancelBtn = document.getElementById(`btn-cancel-order-${prefix}`);
   if (cancelBtn) cancelBtn.addEventListener("click", async () => {
     state.editingTasksForMissionId = null;
     const fresh = (await dbGetAll("missions")).find((mm) => mm.id === mission.id);
     if (fresh) mission.tasks = fresh.tasks;
-    renderMissions();
+    renderRunGroups();
   });
   const saveBtn = document.getElementById(`btn-save-order-${prefix}`);
   if (saveBtn) saveBtn.addEventListener("click", async () => {
     await dbPut("missions", mission);
     state.editingTasksForMissionId = null;
     await loadMissions();
+    renderRunGroups();
+    await runShadowBackup();
   });
 }
 
-document.getElementById("btn-add-mission").addEventListener("click", () => openMissionNameModal(null));
-
-function openMissionNameModal(m) {
+function openMissionNameModal(m, group) {
   const isEdit = !!m;
   openModal(`
     <h2>${isEdit ? "Edit mission" : "New mission"}</h2>
+    <p class="empty-sub">Run: ${esc(isEdit ? (state.runGroups.find((g) => g.id === m.runGroupId)?.name || "Unassigned") : group.name)}</p>
     <div class="field"><label>Mission name</label><input class="text-input" id="m-mission-name" value="${isEdit ? esc(m.name) : ""}" placeholder="e.g. M07 — Coral nursery"></div>
     <div class="modal-actions">
-      <button class="btn btn-ghost" id="m-cancel">Cancel</button>
-      <button class="btn btn-primary" id="m-save">Save</button>
+      <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
+      <button class="btn btn-primary" id="m-save" type="button">Save</button>
     </div>
   `);
   document.getElementById("m-cancel").addEventListener("click", closeModal);
   document.getElementById("m-save").addEventListener("click", async () => {
     const name = document.getElementById("m-mission-name").value.trim();
     if (!name) { alert("Name this mission."); return; }
-    const record = isEdit ? m : { order: state.missions.length, tasks: [], taskSeq: 0 };
+    const record = isEdit ? m : { order: 9999, tasks: [], taskSeq: 0, runGroupId: group.id };
     record.name = name;
     const id = await dbPut("missions", record);
     closeModal();
-    await loadMissions();
     if (!isEdit) state.expandedMissions.add(id);
-    renderMissions();
+    await recomputeGlobalMissionOrder();
+    await loadMissions();
+    renderRunGroups();
   });
 }
 
@@ -1185,22 +1374,23 @@ function openTaskModal(mission, t) {
     closeModal();
     await loadMissions();
     state.expandedMissions.add(mission.id);
-    renderMissions();
+    renderRunGroups();
   });
 }
 
 // ---- Import missions CSV ----
 const EXAMPLE_MISSIONS_CSV =
-`Mission,Task,Type,Points,Max,PointsPerUnit,Options
-M01 Coral Nursery,Place sample in nursery,bool,20,,,
-M01 Coral Nursery,Samples relocated,number,,4,10,
-M02 Reef Restoration,Restoration state,choice,,,,Partial:10;Full:20
+`Run,Mission,Task,Type,Points,Max,PointsPerUnit,Options
+Run 1,M01 Coral Nursery,Place sample in nursery,bool,20,,,
+Run 1,M01 Coral Nursery,Samples relocated,number,,4,10,
+Run 1,M02 Reef Restoration,Restoration state,choice,,,,Partial:10;Full:20
+Run 2,M03 Salvage Operation,Ship raised,bool,20,,,
 `;
 
 document.getElementById("btn-import-missions").addEventListener("click", () => {
   openModal(`
     <h2>Import missions</h2>
-    <p class="empty-sub">Upload a CSV with columns <strong>Mission, Task, Type, Points, Max, PointsPerUnit, Options</strong>. One row per task &mdash; rows sharing a Mission name are grouped together in the order they appear. <strong>Type</strong> is <code>bool</code>, <code>number</code>, or <code>choice</code>. For <code>choice</code> rows, put states in <strong>Options</strong> as <code>Label:Points;Label:Points</code>. Importing adds to your existing missions rather than replacing them.</p>
+    <p class="empty-sub">Upload a CSV with columns <strong>Run, Mission, Task, Type, Points, Max, PointsPerUnit, Options</strong>. The Run column groups missions into leave-and-return trips (created automatically if they don't exist yet — leave it blank to use your first run). Rows sharing a Mission name are grouped together. <strong>Type</strong> is <code>bool</code>, <code>number</code>, or <code>choice</code>. For <code>choice</code> rows, put states in <strong>Options</strong> as <code>Label:Points;Label:Points</code>. Importing adds to what's already there rather than replacing it.</p>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="m-example">Download example CSV</button>
       <button class="btn btn-primary" id="m-choose">Choose CSV file</button>
@@ -1218,18 +1408,32 @@ document.getElementById("file-import-missions").addEventListener("change", async
   if (!rows.length) { alert("That file looks empty."); return; }
   const header = rows[0].map((h) => h.trim().toLowerCase());
   const col = (name) => header.indexOf(name);
-  const iMission = col("mission"), iTask = col("task"), iType = col("type"), iPoints = col("points"), iMax = col("max"), iPpu = col("pointsperunit"), iOptions = col("options");
+  const iRun = col("run"), iMission = col("mission"), iTask = col("task"), iType = col("type"), iPoints = col("points"), iMax = col("max"), iPpu = col("pointsperunit"), iOptions = col("options");
   if (iMission === -1 || iTask === -1 || iType === -1) { alert("CSV needs at least Mission, Task, and Type columns."); return; }
+  if (!state.runGroups.length) {
+    const gid = await dbPut("runGroups", { name: "Run 1", order: 0 });
+    state.runGroups = await dbGetAll("runGroups");
+  }
   const dataRows = rows.slice(1);
-  let missionsAdded = 0, tasksAdded = 0;
+  let missionsAdded = 0, tasksAdded = 0, runsAdded = 0;
   for (const r of dataRows) {
     const missionName = (r[iMission] || "").trim();
     const taskName = (r[iTask] || "").trim();
     const type = (r[iType] || "").trim().toLowerCase();
+    const runName = iRun !== -1 ? (r[iRun] || "").trim() : "";
     if (!missionName || !taskName || !["bool", "number", "choice"].includes(type)) continue;
+
+    let group = runName ? state.runGroups.find((g) => g.name.toLowerCase() === runName.toLowerCase()) : state.runGroups[0];
+    if (runName && !group) {
+      const gid = await dbPut("runGroups", { name: runName, order: state.runGroups.length });
+      group = { id: gid, name: runName, order: state.runGroups.length };
+      state.runGroups.push(group);
+      runsAdded++;
+    }
+
     let mission = state.missions.find((m) => m.name.toLowerCase() === missionName.toLowerCase());
     if (!mission) {
-      mission = { order: state.missions.length, name: missionName, tasks: [], taskSeq: 0 };
+      mission = { order: 9999, name: missionName, tasks: [], taskSeq: 0, runGroupId: group.id };
       const id = await dbPut("missions", mission);
       mission.id = id;
       state.missions.push(mission);
@@ -1248,14 +1452,23 @@ document.getElementById("file-import-missions").addEventListener("change", async
     await dbPut("missions", mission);
     tasksAdded++;
   }
+  await recomputeGlobalMissionOrder();
   await loadMissions();
-  alert(`Imported ${tasksAdded} task${tasksAdded === 1 ? "" : "s"} across ${missionsAdded} new mission${missionsAdded === 1 ? "" : "s"} (plus any matched into existing missions).`);
+  await loadRunGroups();
+  alert(`Imported ${tasksAdded} task${tasksAdded === 1 ? "" : "s"} across ${missionsAdded} new mission${missionsAdded === 1 ? "" : "s"} and ${runsAdded} new run${runsAdded === 1 ? "" : "s"} (plus any matched into existing ones).`);
 });
 
 // ==========================================================
-// GUIDED PRACTICE RUNS
+// GUIDED PRACTICE GAME RUNS
 // ==========================================================
 document.getElementById("btn-start-run").addEventListener("click", startGuidedRun);
+document.getElementById("run-filter-from").addEventListener("change", renderRuns);
+document.getElementById("run-filter-to").addEventListener("change", renderRuns);
+document.getElementById("btn-clear-run-filter").addEventListener("click", () => {
+  document.getElementById("run-filter-from").value = "";
+  document.getElementById("run-filter-to").value = "";
+  renderRuns();
+});
 
 // ---- Sound effects ----
 // Official FLL match audio is copyrighted by FIRST, so these files aren't
@@ -1267,12 +1480,6 @@ const SOUND_FILES = {
   thirty: "sounds/thirty-seconds.mp3",
   buzzer: "sounds/buzzer.mp3",
 };
-// Reuse one Audio element per sound rather than creating a new one on every
-// play — and "unlock" them all with a real (silent) play/pause the instant
-// the person taps to start, since that's the only point in the countdown
-// flow that's a direct, synchronous user gesture. The 30-second and buzzer
-// sounds fire later from a timer, which browsers don't treat as user-
-// initiated, so without this unlock step they'd get silently blocked.
 const soundElements = {};
 function getSoundElement(key) {
   if (!soundElements[key]) {
@@ -1283,22 +1490,27 @@ function getSoundElement(key) {
 function unlockAllSounds() {
   Object.keys(SOUND_FILES).forEach((key) => {
     const el = getSoundElement(key);
-    if (!el) return;
+    if (!el) { showErrorBanner(`Couldn't create audio for "${key}" — Audio API unavailable.`); return; }
     const prevVolume = el.volume;
     el.volume = 0;
-    const p = el.play();
+    let p;
+    try { p = el.play(); } catch (err) { showErrorBanner(`Unlocking "${key}" threw: ${err.name} — ${err.message}`); el.volume = prevVolume; return; }
     if (p && p.catch) {
-      p.then(() => { el.pause(); el.currentTime = 0; el.volume = prevVolume; }).catch(() => { el.volume = prevVolume; });
+      p.then(() => { el.pause(); el.currentTime = 0; el.volume = prevVolume; })
+       .catch((err) => { el.volume = prevVolume; showErrorBanner(`Unlocking "${key}" failed: ${err.name} — ${err.message}`); });
     }
   });
 }
 function playSound(key) {
   const el = getSoundElement(key);
-  if (!el) return;
+  if (!el) { showErrorBanner(`Couldn't create audio for "${key}".`); return; }
   try {
     el.currentTime = 0;
-    el.play().catch(() => {});
-  } catch (e) { /* no Audio support / no file — fine, just silent */ }
+    const p = el.play();
+    if (p && p.catch) p.catch((err) => showErrorBanner(`Sound "${key}" didn't play: ${err.name} — ${err.message}`));
+  } catch (e) {
+    showErrorBanner(`Sound "${key}" error: ${e.name} — ${e.message}`);
+  }
 }
 
 // ---- Precision tokens ----
@@ -1319,10 +1531,21 @@ async function usePrecisionToken() {
   if (el) el.textContent = run.precisionTokensRemaining;
 }
 
+// ---- Helpers for navigating Run groups (legs) and their missions ----
+function getLegMissions(leg) {
+  return state.missions.filter((m) => m.runGroupId === leg.id).sort((a, b) => a.order - b.order);
+}
+function nextGameRunLabel() {
+  const todayStr = new Date().toLocaleDateString();
+  const todayCount = state.runs.filter((r) => new Date(r.startedAt || 0).toLocaleDateString() === todayStr).length;
+  return `Game Run ${todayCount + 1}`;
+}
+
 // ---- Start flow: countdown, then horn, then the match begins ----
 async function startGuidedRun() {
-  if (!state.missions.length || !state.missions.some((m) => (m.tasks || []).length)) {
-    openModal(`<h2>No missions yet</h2><p class="empty-sub">Add missions and tasks in the Setup tab first, matching the official scoresheet.</p>
+  const legsWithMissions = state.runGroups.filter((g) => getLegMissions(g).some((m) => (m.tasks || []).length));
+  if (!legsWithMissions.length) {
+    openModal(`<h2>No missions yet</h2><p class="empty-sub">Add runs, missions, and tasks in the Setup tab first, matching the official scoresheet.</p>
       <div class="modal-actions"><button class="btn btn-primary" id="m-close">Got it</button></div>`);
     document.getElementById("m-close").addEventListener("click", closeModal);
     return;
@@ -1334,7 +1557,7 @@ function renderPreRunScreen() {
   openGuidedFullscreen(`
     <div class="gfs-header">
       <div class="guided-phase-badge">Ready?</div>
-      <h2 class="gfs-mission-name">New Practice Run</h2>
+      <h2 class="gfs-mission-name">New Practice Game Run</h2>
     </div>
     <div class="gfs-body gfs-center">
       <button type="button" class="btn btn-amber btn-full gfs-big-action gfs-huge-action" id="grn-start-countdown">Tap to start countdown</button>
@@ -1368,7 +1591,7 @@ async function actuallyStartRun() {
   const now = Date.now();
   const run = {
     order: state.runs.length,
-    label: `Run ${state.runs.length + 1}`,
+    label: nextGameRunLabel(),
     date: new Date(now).toLocaleDateString(),
     startedAt: now,
     inProgress: true,
@@ -1380,9 +1603,13 @@ async function actuallyStartRun() {
   };
   const id = await dbPut("runs", run);
   run.id = id;
+  // Skip to the first leg that actually has missions with tasks.
+  let legIdx = 0;
+  while (legIdx < state.runGroups.length && !getLegMissions(state.runGroups[legIdx]).some((m) => (m.tasks || []).length)) legIdx++;
   state.guidedRun = {
     run,
-    missionIdx: 0,
+    legIdx,
+    missionIdxInLeg: 0,
     taskIdx: 0,
     matchStartTs: now,
     missionStartTs: now,
@@ -1393,14 +1620,16 @@ async function actuallyStartRun() {
   state.guidedRun.timerHandle = setInterval(tickGuidedTimer, 500);
 }
 
-// ---- Continuous match clock (one clock for the whole run, like a real FLL match) ----
+// ---- Continuous match clock (one clock for the whole game run, like a real FLL match) ----
+const MATCH_LENGTH_MS = 150000; // 2:30, standard FLL match length
 function tickGuidedTimer() {
   if (!state.guidedRun) return;
   const elapsed = Date.now() - state.guidedRun.matchStartTs;
+  const remaining = Math.max(0, MATCH_LENGTH_MS - elapsed);
   const el = document.getElementById("grn-timer");
   if (el) {
-    el.textContent = fmtDuration(elapsed);
-    el.classList.toggle("timer-danger", elapsed >= 150000);
+    el.textContent = fmtDuration(remaining);
+    el.classList.toggle("timer-danger", remaining <= 0);
   }
   if (elapsed >= 120000 && !state.guidedRun.played30) {
     state.guidedRun.played30 = true;
@@ -1413,6 +1642,9 @@ function tickGuidedTimer() {
 }
 function stopGuidedTimer() {
   if (state.guidedRun?.timerHandle) clearInterval(state.guidedRun.timerHandle);
+}
+function liveTimerHTML() {
+  return fmtDuration(Math.max(0, MATCH_LENGTH_MS - (Date.now() - state.guidedRun.matchStartTs)));
 }
 
 function openGuidedFullscreen(html) {
@@ -1432,11 +1664,11 @@ function closeGuidedFullscreen() {
 }
 
 function cancelGuidedRunLink() {
-  return `<button type="button" class="gfs-cancel-x" id="grn-cancel" title="Cancel this run">&#10005;</button>`;
+  return `<button type="button" class="gfs-cancel-x" id="grn-cancel" title="Cancel this game run">&#10005;</button>`;
 }
 function wireCancelLink() {
   document.getElementById("grn-cancel").addEventListener("click", async () => {
-    if (!confirm("Cancel and discard this practice run?")) return;
+    if (!confirm("Cancel and discard this practice game run?")) return;
     stopGuidedTimer();
     await dbDelete("runs", state.guidedRun.run.id);
     state.guidedRun = null;
@@ -1455,7 +1687,7 @@ function isTaskComplete(t, raw) {
 }
 
 // Small row-style task display, used only by the editable Final Overview
-// (where you see every task in a mission at once, not one at a time).
+// (where you see every task in every mission at once, not one at a time).
 function taskRowHTML(t, raw) {
   const max = taskMaxPoints(t);
   if (t.type === "bool") {
@@ -1488,13 +1720,16 @@ function taskRowHTML(t, raw) {
   </div>`;
 }
 
-// ---- One task at a time, tap-to-advance, with a back arrow ----
+// ---- One task at a time, tap-to-advance, with a back arrow. Auto-advances
+// through every mission in the current run before asking for "Robot returned". ----
 function renderCurrentTaskScreen() {
-  const { run, missionIdx, taskIdx } = state.guidedRun;
-  const mission = state.missions[missionIdx];
+  const { run, legIdx, missionIdxInLeg, taskIdx } = state.guidedRun;
+  const leg = state.runGroups[legIdx];
+  const legMissions = getLegMissions(leg);
+  const mission = legMissions[missionIdxInLeg];
   const tasks = mission.tasks || [];
   if (taskIdx >= tasks.length) {
-    renderRobotReturnedScreen();
+    finishCurrentMission(leg, legMissions);
     return;
   }
   const task = tasks[taskIdx];
@@ -1508,24 +1743,25 @@ function renderCurrentTaskScreen() {
   } else if (task.type === "number") {
     const val = raw[task.id] ?? 0;
     controlHTML = `<div class="gfs-num-strip gfs-num-strip-big">${Array.from({ length: (task.max || 0) + 1 }, (_, i) =>
-      `<button type="button" class="gfs-num-btn gfs-num-btn-big${val === i ? " active" : ""}" data-val="${i}">${i}</button>`
+      `<button type="button" class="gfs-num-btn gfs-num-btn-big${val === i ? (i === 0 ? " active-zero" : " active") : ""}" data-val="${i}">${i}</button>`
     ).join("")}</div>`;
   } else {
     const cur = raw[task.id] ?? "";
     controlHTML = `<div class="gfs-choice-strip gfs-choice-strip-big">
-      <button type="button" class="gfs-choice-btn gfs-choice-btn-big${cur === "" ? " active" : ""}" data-val="">Not achieved</button>
+      <button type="button" class="gfs-choice-btn gfs-choice-btn-big${cur === "" ? " active-zero" : ""}" data-val="">Not achieved</button>
       ${(task.options || []).map((o, i) => `<button type="button" class="gfs-choice-btn gfs-choice-btn-big${String(cur) === String(i) ? " active" : ""}" data-val="${i}">${esc(o.label)}</button>`).join("")}
     </div>`;
   }
 
+  const canGoBack = taskIdx > 0 || missionIdxInLeg > 0;
   openGuidedFullscreen(`
     <div class="gfs-header">
       ${cancelGuidedRunLink()}
-      <button type="button" class="gfs-back-btn" id="grn-back" ${taskIdx === 0 ? "disabled" : ""}>&#8592;</button>
+      <button type="button" class="gfs-back-btn" id="grn-back" ${canGoBack ? "" : "disabled"}>&#8592;</button>
       ${precisionTokenWidgetHTML()}
-      <div class="guided-phase-badge">Mission ${missionIdx + 1} of ${state.missions.length} &middot; Task ${taskIdx + 1} of ${tasks.length}</div>
+      <div class="guided-phase-badge">${esc(leg.name)} &middot; Mission ${missionIdxInLeg + 1} of ${legMissions.length} &middot; Task ${taskIdx + 1} of ${tasks.length}</div>
       <h2 class="gfs-mission-name">${esc(mission.name)}</h2>
-      <div class="gfs-timer" id="grn-timer">${fmtDuration(Date.now() - state.guidedRun.matchStartTs)}</div>
+      <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
     </div>
     <div class="gfs-body gfs-center">
       <p class="gfs-task-prompt">${esc(task.name)} <span class="gfs-task-pts">/ ${taskMaxPoints(task)} pts</span></p>
@@ -1536,7 +1772,16 @@ function renderCurrentTaskScreen() {
   wireCancelLink();
   wirePrecisionTokenButton();
   document.getElementById("grn-back").addEventListener("click", () => {
-    if (state.guidedRun.taskIdx > 0) { state.guidedRun.taskIdx--; renderCurrentTaskScreen(); }
+    if (state.guidedRun.taskIdx > 0) {
+      state.guidedRun.taskIdx--;
+    } else if (state.guidedRun.missionIdxInLeg > 0) {
+      state.guidedRun.missionIdxInLeg--;
+      const prevMission = legMissions[state.guidedRun.missionIdxInLeg];
+      state.guidedRun.taskIdx = Math.max(0, (prevMission.tasks || []).length - 1);
+    } else {
+      return;
+    }
+    renderCurrentTaskScreen();
   });
 
   if (task.type === "bool") {
@@ -1561,20 +1806,37 @@ function advanceTask() {
   renderCurrentTaskScreen();
 }
 
+async function finishCurrentMission(leg, legMissions) {
+  const { run, missionIdxInLeg } = state.guidedRun;
+  const mission = legMissions[missionIdxInLeg];
+  const now = Date.now();
+  const durationMs = now - state.guidedRun.missionStartTs;
+  run.missionTimings.push({ missionId: mission.id, missionName: mission.name, runGroupId: leg.id, runGroupName: leg.name, startTs: state.guidedRun.missionStartTs, endTs: now, durationMs });
+  await dbPut("runs", run);
+  if (missionIdxInLeg < legMissions.length - 1) {
+    state.guidedRun.missionIdxInLeg++;
+    state.guidedRun.taskIdx = 0;
+    state.guidedRun.missionStartTs = now;
+    renderCurrentTaskScreen();
+  } else {
+    renderRobotReturnedScreen();
+  }
+}
+
 function renderRobotReturnedScreen() {
-  const { missionIdx } = state.guidedRun;
-  const mission = state.missions[missionIdx];
+  const { legIdx } = state.guidedRun;
+  const leg = state.runGroups[legIdx];
   openGuidedFullscreen(`
     <div class="gfs-header">
       ${cancelGuidedRunLink()}
       <button type="button" class="gfs-back-btn" id="grn-back">&#8592;</button>
       ${precisionTokenWidgetHTML()}
-      <div class="guided-phase-badge">Mission ${missionIdx + 1} of ${state.missions.length}</div>
-      <h2 class="gfs-mission-name">${esc(mission.name)}</h2>
-      <div class="gfs-timer" id="grn-timer">${fmtDuration(Date.now() - state.guidedRun.matchStartTs)}</div>
+      <div class="guided-phase-badge">${esc(leg.name)}</div>
+      <h2 class="gfs-mission-name">All missions done for this run</h2>
+      <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
     </div>
     <div class="gfs-body gfs-center">
-      <p class="empty-sub">All tasks marked for this mission.</p>
+      <p class="empty-sub">Every mission in "${esc(leg.name)}" is marked.</p>
       <button type="button" class="btn btn-primary btn-full gfs-big-action gfs-huge-action" id="grn-done">Robot returned</button>
     </div>
     <div class="gfs-footer"></div>
@@ -1582,23 +1844,26 @@ function renderRobotReturnedScreen() {
   wireCancelLink();
   wirePrecisionTokenButton();
   document.getElementById("grn-back").addEventListener("click", () => {
-    state.guidedRun.taskIdx = Math.max(0, (mission.tasks || []).length - 1);
+    const legMissions = getLegMissions(leg);
+    state.guidedRun.missionIdxInLeg = legMissions.length - 1;
+    state.guidedRun.taskIdx = Math.max(0, (legMissions[legMissions.length - 1].tasks || []).length - 1);
     renderCurrentTaskScreen();
   });
   document.getElementById("grn-done").addEventListener("click", async () => {
-    const { run } = state.guidedRun;
+    const { run, legIdx } = state.guidedRun;
     const now = Date.now();
-    const durationMs = now - state.guidedRun.missionStartTs;
-    run.missionTimings.push({ missionId: mission.id, missionName: mission.name, startTs: state.guidedRun.missionStartTs, endTs: now, durationMs });
-    await dbPut("runs", run);
-    if (missionIdx === state.missions.length - 1) {
+    // Find the next leg (in run-group order) that actually has scoreable missions.
+    let nextLegIdx = legIdx + 1;
+    while (nextLegIdx < state.runGroups.length && !getLegMissions(state.runGroups[nextLegIdx]).some((m) => (m.tasks || []).length)) nextLegIdx++;
+    if (nextLegIdx >= state.runGroups.length) {
       stopGuidedTimer();
       run.finishedAt = now;
       run.totalTimeMs = now - state.guidedRun.matchStartTs;
       await dbPut("runs", run);
       renderGuidedOverview();
     } else {
-      state.guidedRun.missionIdx += 1;
+      state.guidedRun.legIdx = nextLegIdx;
+      state.guidedRun.missionIdxInLeg = 0;
       state.guidedRun.taskIdx = 0;
       state.guidedRun.transitionStartTs = now;
       renderGuidedTransitionPhase();
@@ -1607,19 +1872,19 @@ function renderRobotReturnedScreen() {
 }
 
 function renderGuidedTransitionPhase() {
-  const { missionIdx } = state.guidedRun;
-  const nextMission = state.missions[missionIdx];
+  const { legIdx } = state.guidedRun;
+  const nextLeg = state.runGroups[legIdx];
   openGuidedFullscreen(`
     <div class="gfs-header">
       ${cancelGuidedRunLink()}
       ${precisionTokenWidgetHTML()}
       <div class="guided-phase-badge">Transition</div>
-      <h2 class="gfs-mission-name">Heading to: ${esc(nextMission.name)}</h2>
-      <div class="gfs-timer" id="grn-timer">${fmtDuration(Date.now() - state.guidedRun.matchStartTs)}</div>
+      <h2 class="gfs-mission-name">Heading to: ${esc(nextLeg.name)}</h2>
+      <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
     </div>
     <div class="gfs-body gfs-center">
-      <p class="empty-sub">Tap when the robot leaves base for the next mission.</p>
-      <button type="button" class="btn btn-amber btn-full gfs-big-action gfs-huge-action" id="grn-leave">Robot leaves for next mission</button>
+      <p class="empty-sub">Tap when the robot leaves base for the next run.</p>
+      <button type="button" class="btn btn-amber btn-full gfs-big-action gfs-huge-action" id="grn-leave">Robot leaves for next run</button>
     </div>
     <div class="gfs-footer"></div>
   `);
@@ -1628,7 +1893,7 @@ function renderGuidedTransitionPhase() {
   document.getElementById("grn-leave").addEventListener("click", () => {
     const now = Date.now();
     const durationMs = now - state.guidedRun.transitionStartTs;
-    state.guidedRun.run.transitionTimings.push({ beforeMissionId: nextMission.id, durationMs });
+    state.guidedRun.run.transitionTimings.push({ beforeRunGroupId: nextLeg.id, durationMs });
     state.guidedRun.missionStartTs = now;
     renderCurrentTaskScreen();
   });
@@ -1660,14 +1925,21 @@ function renderGuidedOverview() {
 function renderOverviewBody() {
   const { run } = state.guidedRun;
   const body = document.getElementById("gfs-overview-body");
-  body.innerHTML = state.missions.map((m) => {
-    const score = missionScoreForRun(m, run);
-    const max = missionMaxPoints(m);
-    const timing = (run.missionTimings || []).find((t) => t.missionId === m.id);
-    const rows = (m.tasks || []).map((t) => taskRowHTML(t, run.rawScores)).join("") || `<p class="empty-sub">No tasks.</p>`;
+  body.innerHTML = state.runGroups.map((leg) => {
+    const legMissions = getLegMissions(leg);
+    const missionsHTML = legMissions.map((m) => {
+      const score = missionScoreForRun(m, run);
+      const max = missionMaxPoints(m);
+      const timing = (run.missionTimings || []).find((t) => t.missionId === m.id);
+      const rows = (m.tasks || []).map((t) => taskRowHTML(t, run.rawScores)).join("") || `<p class="empty-sub">No tasks.</p>`;
+      return `<div class="gfs-subsection">
+        <h4>${esc(m.name)} <span class="gfs-task-pts">${score} / ${max}${timing ? ` &middot; ${fmtDuration(timing.durationMs)}` : ""}</span></h4>
+        <div class="gfs-task-list">${rows}</div>
+      </div>`;
+    }).join("");
     return `<div class="gfs-section">
-      <h3>${esc(m.name)} <span class="gfs-task-pts">${score} / ${max}${timing ? ` &middot; ${fmtDuration(timing.durationMs)}` : ""}</span></h3>
-      <div class="gfs-task-list">${rows}</div>
+      <h3>${esc(leg.name)}</h3>
+      ${missionsHTML || `<p class="empty-sub">No missions in this run.</p>`}
     </div>`;
   }).join("");
   bindOverviewEvents();
@@ -1710,24 +1982,37 @@ async function finalizeGuidedRun() {
   closeGuidedFullscreen();
   await loadRuns();
 }
-
-// ---- Saved runs / analysis ----
+// ---- Saved game runs / analysis ----
 async function loadRuns() {
   state.runs = (await dbGetAll("runs")).sort((a, b) => a.order - b.order);
   renderRuns();
+}
+
+function getRunDateFilterRange() {
+  const fromVal = document.getElementById("run-filter-from")?.value;
+  const toVal = document.getElementById("run-filter-to")?.value;
+  return {
+    from: fromVal ? new Date(fromVal).getTime() : -Infinity,
+    to: toVal ? new Date(toVal).getTime() : Infinity,
+  };
 }
 
 function renderRuns() {
   const list = document.getElementById("run-list");
   const stats = document.getElementById("run-stats");
   list.innerHTML = "";
-  const completed = state.runs.filter((r) => !r.inProgress);
+  const allCompleted = state.runs.filter((r) => !r.inProgress);
   const incomplete = state.runs.filter((r) => r.inProgress);
+  const { from, to } = getRunDateFilterRange();
+  const completed = allCompleted.filter((r) => { const t = r.startedAt || 0; return t >= from && t <= to; });
 
-  if (!completed.length && !incomplete.length) {
-    list.innerHTML = `<p class="empty-sub">No practice runs yet. Click Start New Practice Run to begin tracking your progress.</p>`;
+  if (!allCompleted.length && !incomplete.length) {
+    list.innerHTML = `<p class="empty-sub">No practice game runs yet. Click Start New Practice Game Run to begin tracking your progress.</p>`;
     stats.innerHTML = "";
     return;
+  }
+  if (!completed.length) {
+    list.innerHTML = `<p class="empty-sub">No completed game runs in that date range.</p>`;
   }
 
   if (completed.length) {
@@ -1754,7 +2039,7 @@ function renderRuns() {
       <div class="run-card-actions"><button class="btn btn-danger" data-act="del">Delete</button></div>
     `;
     card.querySelector('[data-act="del"]').addEventListener("click", async () => {
-      if (confirm(`Delete incomplete run "${run.label}"?`)) {
+      if (confirm(`Delete incomplete game run "${run.label}"?`)) {
         await snapshotBeforeDelete(`Before deleting incomplete run "${run.label}"`);
         await dbDelete("runs", run.id);
         await loadRuns();
@@ -1778,7 +2063,7 @@ function renderRuns() {
       </div>
       <div class="run-meta-row">
         <span>${fmtDuration(run.totalTimeMs || 0)} total</span>
-        <span>${(run.missionTimings || []).length} missions run</span>
+        <span>${new Set((run.missionTimings || []).map(mt => mt.runGroupId)).size} run${new Set((run.missionTimings || []).map(mt => mt.runGroupId)).size === 1 ? "" : "s"} &middot; ${(run.missionTimings || []).length} mission${(run.missionTimings || []).length === 1 ? "" : "s"}</span>
       </div>
       <div class="run-card-actions">
         <button class="btn btn-ghost" data-act="view">View breakdown</button>
@@ -1787,7 +2072,7 @@ function renderRuns() {
     `;
     card.querySelector('[data-act="view"]').addEventListener("click", () => viewRunBreakdown(run));
     card.querySelector('[data-act="del"]').addEventListener("click", async () => {
-      if (confirm(`Delete "${run.label}"?`)) {
+      if (confirm(`Delete game run "${run.label}"?`)) {
         await snapshotBeforeDelete(`Before deleting run "${run.label}"`);
         await dbDelete("runs", run.id);
         await loadRuns();
@@ -1798,14 +2083,24 @@ function renderRuns() {
 }
 
 function viewRunBreakdown(run) {
-  const rows = (run.missionTimings || []).map((mt) => {
+  const missionTimings = run.missionTimings || [];
+  const transitions = run.transitionTimings || [];
+  let rows = "";
+  let transIdx = 0;
+  let lastGroupId = undefined;
+  missionTimings.forEach((mt) => {
+    if (lastGroupId !== undefined && mt.runGroupId !== lastGroupId) {
+      if (transitions[transIdx]) {
+        rows += `<tr class="row-transition"><td colspan="2">Transition &mdash; ${esc(mt.runGroupName || "next run")}</td><td>${fmtDuration(transitions[transIdx].durationMs)}</td></tr>`;
+        transIdx++;
+      }
+    }
     const mission = state.missions.find((m) => m.id === mt.missionId);
     const score = mission ? missionScoreForRun(mission, run) : 0;
     const max = mission ? missionMaxPoints(mission) : 0;
-    return `<tr><td>${esc(mt.missionName)}</td><td>${score}/${max}</td><td>${fmtDuration(mt.durationMs)}</td></tr>`;
-  }).join("");
-  const transitions = run.transitionTimings || [];
-  const transRows = transitions.map((tt, i) => `<tr><td colspan="2">Transition ${i + 1}</td><td>${fmtDuration(tt.durationMs)}</td></tr>`).join("");
+    rows += `<tr class="row-mission"><td>${esc(mt.missionName)}</td><td>${score}/${max}</td><td>${fmtDuration(mt.durationMs)}</td></tr>`;
+    lastGroupId = mt.runGroupId;
+  });
   const avgOpTime = transitions.length ? transitions.reduce((s, t) => s + t.durationMs, 0) / transitions.length : 0;
   const tokensLeft = run.precisionTokensRemaining ?? 0;
   openModal(`
@@ -1815,7 +2110,7 @@ function viewRunBreakdown(run) {
     <div class="run-total-bar"><span class="rt-label">Total time</span><span class="rt-num">${fmtDuration(run.totalTimeMs || 0)}</span></div>
     <div class="run-total-bar"><span class="rt-label">Avg operation time</span><span class="rt-num">${transitions.length ? fmtDuration(avgOpTime) : "—"}</span></div>
     <p class="empty-sub">Precision tokens: ${tokensLeft} left &middot; +${precisionTokenBonus(tokensLeft)} bonus pts</p>
-    <table class="run-summary-table"><thead><tr><th>Mission</th><th>Score</th><th>Time</th></tr></thead><tbody>${rows}${transRows}</tbody></table>
+    <table class="run-summary-table"><thead><tr><th>Mission</th><th>Score</th><th>Time</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="modal-actions"><button class="btn btn-ghost btn-full" id="m-close">Close</button></div>
   `);
   document.getElementById("m-close").addEventListener("click", closeModal);
@@ -1829,21 +2124,23 @@ function parseLeadingMissionNumber(name, fallback) {
 
 function buildScoresheetCSV(runs) {
   const taskRows = [];
+  const groupsById = Object.fromEntries(state.runGroups.map((g) => [g.id, g]));
   state.missions.forEach((mission, mIdx) => {
     const mNum = parseLeadingMissionNumber(mission.name, mIdx + 1);
-    (mission.tasks || []).forEach((task) => taskRows.push({ mission, task, mNum }));
+    const runName = groupsById[mission.runGroupId]?.name || "";
+    (mission.tasks || []).forEach((task) => taskRows.push({ mission, task, mNum, runName }));
   });
 
-  const header = ["M#", "Official Name", "Notes", "Pts", ...runs.map((r) => r.label), "Success Rate", "", "Date/Time", "Score"];
+  const header = ["Run", "M#", "Official Name", "Notes", "Pts", ...runs.map((r) => r.label), "Success Rate", "", "Date/Time", "Score"];
   const lines = [header.map(csvEscape).join(",")];
 
   taskRows.forEach((row, i) => {
-    const { mission, task, mNum } = row;
+    const { mission, task, mNum, runName } = row;
     const flags = runs.map((r) => (isTaskComplete(task, r.rawScores || {}) ? "1" : ""));
     const successCount = flags.filter((f) => f === "1").length;
     const successRate = runs.length ? Math.round((successCount / runs.length) * 100) : 0;
     const sideTable = i < runs.length ? [new Date(runs[i].startedAt || runs[i].finishedAt || 0).toLocaleString(), String(runTotal(runs[i], state.missions))] : ["", ""];
-    const rowVals = [mNum, mission.name, task.name, taskMaxPoints(task), ...flags, `${successRate}%`, "", ...sideTable];
+    const rowVals = [runName, mNum, mission.name, task.name, taskMaxPoints(task), ...flags, `${successRate}%`, "", ...sideTable];
     lines.push(rowVals.map(csvEscape).join(","));
   });
 
@@ -1858,8 +2155,8 @@ document.getElementById("btn-export-runs-csv").addEventListener("click", () => {
     d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
     return d.toISOString().slice(0, 16);
   };
-  const earliest = completedRuns[0].startedAt || Date.now();
-  const latest = completedRuns[completedRuns.length - 1].startedAt || Date.now();
+  const earliest = (completedRuns[0].startedAt || Date.now()) - 60000;
+  const latest = (completedRuns[completedRuns.length - 1].startedAt || Date.now()) + 60000;
   openModal(`
     <h2>Export scoresheet CSV</h2>
     <p class="empty-sub">Choose a date/time range — every completed run started in that window becomes one column.</p>
@@ -1908,6 +2205,7 @@ document.getElementById("btn-export-backup").addEventListener("click", async () 
     missions: await dbGetAll("missions"),
     runs: await dbGetAll("runs"),
     meta: await dbGetAll("meta"),
+    runGroups: await dbGetAll("runGroups"),
   };
   download(`barp-backup-${Date.now()}.json`, JSON.stringify(data, null, 2), "application/json");
 });
@@ -1926,12 +2224,13 @@ document.getElementById("file-import-backup").addEventListener("change", async (
   if (!confirm("This replaces everything currently stored on this device with the backup file. Continue?")) return;
   try {
     const data = JSON.parse(await file.text());
-    await dbClear("attachments"); await dbClear("entries"); await dbClear("missions"); await dbClear("runs"); await dbClear("meta");
+    await dbClear("attachments"); await dbClear("entries"); await dbClear("missions"); await dbClear("runs"); await dbClear("meta"); await dbClear("runGroups");
     for (const a of data.attachments || []) await dbPut("attachments", a);
     for (const en of data.entries || []) await dbPut("entries", en);
     for (const m of data.missions || []) await dbPut("missions", m);
     for (const r of data.runs || []) await dbPut("runs", r);
     for (const meta of data.meta || []) await dbPut("meta", meta);
+    for (const g of data.runGroups || []) await dbPut("runGroups", g);
     await initAll();
     alert("Backup restored.");
   } catch (err) {
@@ -1964,6 +2263,7 @@ async function initAll() {
   await purgeOldTrash();
   await loadAttachments();
   await loadMissions();
+  await loadRunGroups();
   await loadRuns();
   await loadSeasonName();
   await renderLastBackupTime();
