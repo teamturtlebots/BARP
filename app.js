@@ -1207,7 +1207,6 @@ function openRunGroupModal(g) {
   const isEdit = !!g;
   openModal(`
     <h2>${isEdit ? "Rename run" : "New run"}</h2>
-    <p class="empty-sub">One trip out and back — group the missions the robot tackles in this trip.</p>
     <div class="field"><label>Name</label><input class="text-input" id="rg-name" value="${isEdit ? esc(g.name) : `Run ${state.runGroups.length + 1}`}"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
@@ -1602,28 +1601,6 @@ function playSound(key) {
     showErrorBanner(`Sound "${key}" error: ${e.name} — ${e.message}`);
   }
 }
-async function diagnoseAndPlaySound(key) {
-  const url = SOUND_FILES[key];
-  try {
-    const resp = await fetch(url, { cache: "no-store" });
-    if (!resp.ok) {
-      showErrorBanner(`"${url}" returned HTTP ${resp.status} (${resp.statusText || "error"}) — the file isn't reachable at that path on your hosted site.`);
-      return;
-    }
-    const contentType = resp.headers.get("content-type") || "(none)";
-    if (!contentType.toLowerCase().startsWith("audio")) {
-      showErrorBanner(`"${url}" loaded (HTTP 200) but its Content-Type is "${contentType}", not audio — the file at that path may not actually be the MP3, or your host is serving the wrong thing for that URL.`);
-      return;
-    }
-  } catch (e) {
-    showErrorBanner(`Couldn't even fetch "${url}": ${e.message}`);
-    return;
-  }
-  playSound(key);
-}
-document.getElementById("btn-test-start-sound").addEventListener("click", () => diagnoseAndPlaySound("start"));
-document.getElementById("btn-test-thirty-sound").addEventListener("click", () => diagnoseAndPlaySound("thirty"));
-document.getElementById("btn-test-buzzer-sound").addEventListener("click", () => diagnoseAndPlaySound("buzzer"));
 
 // ---- Precision tokens ----
 function precisionTokenWidgetHTML() {

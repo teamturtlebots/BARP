@@ -511,6 +511,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   font-size: 0.92rem; cursor: pointer;
 }
 .checkbox-row:last-child { border-bottom: none; }
+.checkbox-row-standalone { border-bottom: none; padding-left: 0; }
 .checkbox-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--moss); flex: none; }
 
 /* --- Added: redesigned one-task-at-a-time guided run screen --- */
