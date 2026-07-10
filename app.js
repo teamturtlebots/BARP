@@ -80,75 +80,19 @@ function reqToPromise(req) {
 }
 async function dbGetAll(store) { const t = await tx([store], "readonly"); return reqToPromise(t.objectStore(store).getAll()); }
 async function dbGet(store, key) { const t = await tx([store], "readonly"); return reqToPromise(t.objectStore(store).get(key)); }
-async function dbPut(store, value) { const t = await tx([store], "readwrite"); const r = await reqToPromise(t.objectStore(store).put(value)); scheduleShadowBackup(); return r; }
-async function dbDelete(store, key) { const t = await tx([store], "readwrite"); const r = await reqToPromise(t.objectStore(store).delete(key)); scheduleShadowBackup(); return r; }
+async function dbPut(store, value) { const t = await tx([store], "readwrite"); return reqToPromise(t.objectStore(store).put(value)); }
+async function dbDelete(store, key) { const t = await tx([store], "readwrite"); return reqToPromise(t.objectStore(store).delete(key)); }
 async function dbGetByIndex(store, indexName, value) { const t = await tx([store], "readonly"); return reqToPromise(t.objectStore(store).index(indexName).getAll(value)); }
 async function dbClear(store) { const t = await tx([store], "readwrite"); return reqToPromise(t.objectStore(store).clear()); }
 
-// ---------- Auto-backup shadow database ----------
-// A second, separate IndexedDB database that mirrors a full snapshot of your
-// data. It's deliberately independent from the main database so a "Reset
-// local data" or a corrupted main database doesn't take the backup down with
-// it. Updated automatically ~1.5s after any save, debounced so a burst of
-// edits only triggers one snapshot.
-const SHADOW_DB_NAME = "barp-db-v1-shadow";
-let shadowDbPromise = null;
-function openShadowDB() {
-  if (shadowDbPromise) return shadowDbPromise;
-  shadowDbPromise = new Promise((resolve, reject) => {
-    const req = indexedDB.open(SHADOW_DB_NAME, 1);
-    req.onupgradeneeded = () => {
-      if (!req.result.objectStoreNames.contains("snapshots")) {
-        req.result.createObjectStore("snapshots", { keyPath: "key" });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => { shadowDbPromise = null; reject(req.error); };
-  });
-  return shadowDbPromise;
-}
-let shadowBackupTimer = null;
-function scheduleShadowBackup() {
-  clearTimeout(shadowBackupTimer);
-  shadowBackupTimer = setTimeout(runShadowBackup, 1500);
-}
-async function runShadowBackup() {
-  try {
-    const data = {
-      version: 2,
-      savedAt: Date.now(),
-      attachments: await dbGetAllRaw("attachments"),
-      entries: await dbGetAllRaw("entries"),
-      missions: await dbGetAllRaw("missions"),
-      runs: await dbGetAllRaw("runs"),
-      meta: await dbGetAllRaw("meta"),
-      runGroups: await dbGetAllRaw("runGroups"),
-    };
-    const db = await openShadowDB();
-    await new Promise((resolve, reject) => {
-      const t = db.transaction("snapshots", "readwrite");
-      t.objectStore("snapshots").put({ key: "latest", data });
-      t.oncomplete = () => { renderLastBackupTime(); resolve(); };
-      t.onerror = () => reject(t.error);
-    });
-  } catch (e) { /* best-effort background task — never surface this to the user */ }
-}
-// Raw reads that bypass the main dbGetAll/scheduleShadowBackup loop (avoids
-// the backup triggering itself, and avoids depending on openDB()'s recovery
-// path while a backup is mid-flight).
+// Raw reads used when building a snapshot — same as dbGetAll, kept as a
+// separate name for clarity at call sites that are specifically building a
+// backup rather than refreshing on-screen state.
 async function dbGetAllRaw(store) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const req = db.transaction([store], "readonly").objectStore(store).getAll();
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-async function getShadowBackup() {
-  const db = await openShadowDB();
-  return new Promise((resolve, reject) => {
-    const req = db.transaction("snapshots", "readonly").objectStore("snapshots").get("latest");
-    req.onsuccess = () => resolve(req.result?.data || null);
     req.onerror = () => reject(req.error);
   });
 }
@@ -176,46 +120,33 @@ async function snapshotCurrentData() {
 // session, so it doesn't need to be very persistent.
 let lastPreRestoreSnapshot = null;
 
-async function renderLastBackupTime() {
-  const el = document.getElementById("last-backup-line");
-  if (!el) return;
-  try {
-    const data = await getShadowBackup();
-    el.textContent = data ? `Last automatic backup: ${new Date(data.savedAt).toLocaleString()}` : "No automatic backup yet.";
-  } catch (e) { el.textContent = "No automatic backup yet."; }
-}
-
-// ---------- Pre-delete safety snapshots ----------
-// The rolling auto-backup updates itself shortly after every change — including
-// deletes — so on its own it can't undo a delete (by the time it saves, the
-// deleted item is already gone). This takes a separate, one-off full snapshot
-// right before any delete actually happens, so there's always something to
-// restore even after the auto-backup has moved on.
-const MAX_DELETION_SNAPSHOTS = 20;
-async function snapshotBeforeDelete(label) {
+// ---------- Pre-action safety snapshots ----------
+// A full snapshot taken right before any structural change — deleting
+// something, editing an attachment, or changing runs/missions/tasks (adding,
+// renaming, or reordering). This is the only backup mechanism: there's no
+// separate debounced "automatic" backup running in the background, just
+// these one-off snapshots taken at the moment something is about to change.
+const MAX_CHANGE_SNAPSHOTS = 20;
+async function snapshotBeforeChange(label) {
   try {
     const data = await snapshotCurrentData();
     await dbPut("deletionSnapshots", { takenAt: Date.now(), label, data });
     const all = await dbGetAll("deletionSnapshots");
-    if (all.length > MAX_DELETION_SNAPSHOTS) {
+    if (all.length > MAX_CHANGE_SNAPSHOTS) {
       all.sort((a, b) => a.takenAt - b.takenAt);
-      for (const old of all.slice(0, all.length - MAX_DELETION_SNAPSHOTS)) await dbDelete("deletionSnapshots", old.id);
+      for (const old of all.slice(0, all.length - MAX_CHANGE_SNAPSHOTS)) await dbDelete("deletionSnapshots", old.id);
     }
-  } catch (e) { /* best-effort — never block the actual delete on this */ }
+  } catch (e) { /* best-effort — never block the actual change on this */ }
 }
 
 async function openBackupMenu() {
-  const shadow = await getShadowBackup();
-  const delSnaps = await dbGetAll("deletionSnapshots");
-  const items = [];
-  if (shadow) items.push({ label: "Automatic backup", takenAt: shadow.savedAt, data: shadow });
-  delSnaps.forEach((s) => items.push({ label: s.label, takenAt: s.takenAt, data: s.data }));
+  const items = (await dbGetAll("deletionSnapshots")).map((s) => ({ label: s.label, takenAt: s.takenAt, data: s.data }));
   items.sort((a, b) => b.takenAt - a.takenAt);
 
   openModal(`
     <h2>Restore a backup</h2>
     ${lastPreRestoreSnapshot ? `<button type="button" class="btn btn-amber btn-full" id="btn-redo-restore" style="margin-bottom:14px;">&#8635; Redo (undo the last restore)</button>` : ""}
-    <p class="empty-sub">Pick a point in time to restore everything back to. This includes the automatic background backup and a snapshot from right before every deletion.</p>
+    <p class="empty-sub">Pick a point in time to restore everything back to — a snapshot is saved automatically right before every deletion and every change to attachments, runs, missions, or tasks.</p>
     <div id="backup-menu-list" class="mission-list">
       ${items.length ? "" : `<p class="empty-sub">Nothing to restore yet.</p>`}
     </div>
@@ -287,7 +218,12 @@ function showErrorBanner(message) {
   banner.textContent = "Something went wrong: " + message + " — tap to dismiss";
   banner.hidden = false;
 }
-function resetLocalDatabase() {
+async function resetLocalDatabase() {
+  try {
+    const db = await openDB();
+    db.close();
+  } catch (e) { /* nothing open yet — fine */ }
+  dbPromise = null;
   const req = indexedDB.deleteDatabase(DB_NAME);
   req.onsuccess = () => location.reload();
   req.onerror = () => location.reload();
@@ -302,7 +238,11 @@ window.addEventListener("unhandledrejection", (e) => showErrorBanner(e.reason?.m
 // `container` is the row's parent. Rows keep their real DOM nodes throughout
 // the drag (swapped via insertBefore, never recreated), so pointer capture on
 // the handle stays valid for the whole gesture.
-function attachRowDrag(row, container, itemsArray, onSwap) {
+// ---------- Drag-to-reorder (touch-friendly, works with mouse too) ----------
+// Same-container version: used for attachments, run groups, and tasks — none
+// of which are allowed to move into a different parent list.
+function attachRowDrag(row, container, onSwap) {
+  row.setAttribute("data-draggable", "1");
   const handle = row.querySelector(".drag-handle");
   if (!handle) return;
   handle.addEventListener("pointerdown", (e) => {
@@ -311,16 +251,6 @@ function attachRowDrag(row, container, itemsArray, onSwap) {
     row.classList.add("dragging");
     let startY = e.clientY;
 
-    function swap(rowA, rowB) {
-      const idxA = Number(rowA.dataset.idx), idxB = Number(rowB.dataset.idx);
-      const tmp = itemsArray[idxA];
-      itemsArray[idxA] = itemsArray[idxB];
-      itemsArray[idxB] = tmp;
-      rowA.dataset.idx = idxB;
-      rowB.dataset.idx = idxA;
-      if (onSwap) onSwap();
-    }
-
     function onMove(ev) {
       const dy = ev.clientY - startY;
       row.style.transform = `translateY(${dy}px)`;
@@ -328,21 +258,87 @@ function attachRowDrag(row, container, itemsArray, onSwap) {
       const midY = rect.top + rect.height / 2;
 
       const prev = row.previousElementSibling;
-      if (prev && prev.classList.contains("drag-row")) {
+      if (prev && prev.hasAttribute("data-draggable")) {
         const prevRect = prev.getBoundingClientRect();
         if (midY < prevRect.top + prevRect.height / 2) {
           container.insertBefore(row, prev);
-          swap(row, prev);
+          if (onSwap) onSwap();
+          startY = ev.clientY;
+          row.style.transform = "translateY(0px)";
+          return;
+        }
+      }
+      const next = row.nextElementSibling;
+      if (next && next.hasAttribute("data-draggable")) {
+        const nextRect = next.getBoundingClientRect();
+        if (midY > nextRect.top + nextRect.height / 2) {
+          container.insertBefore(next, row);
+          if (onSwap) onSwap();
           startY = ev.clientY;
           row.style.transform = "translateY(0px)";
         }
       }
+    }
+    function onUp() {
+      try { handle.releasePointerCapture(e.pointerId); } catch (err) {}
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      row.classList.remove("dragging");
+      row.style.transform = "";
+    }
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+  });
+}
+
+// Cross-container version: used only for missions, which are allowed to move
+// between any of the currently-visible runs' mission lists — but nothing
+// deeper, a mission can only ever land inside a run's own list.
+function attachMissionDrag(row, allContainers) {
+  row.setAttribute("data-draggable", "1");
+  const handle = row.querySelector(".drag-handle");
+  if (!handle) return;
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    try { handle.setPointerCapture(e.pointerId); } catch (err) {}
+    row.classList.add("dragging");
+    let startY = e.clientY;
+
+    function onMove(ev) {
+      const dy = ev.clientY - startY;
+      row.style.transform = `translateY(${dy}px)`;
+      const rect = row.getBoundingClientRect();
+      const midY = rect.top + rect.height / 2;
+
+      let targetContainer = null;
+      for (const c of allContainers) {
+        if (c === row.parentElement) continue;
+        const cRect = c.getBoundingClientRect();
+        if (cRect.width === 0 && cRect.height === 0) continue; // hidden/collapsed
+        if (midY >= cRect.top && midY <= cRect.bottom) { targetContainer = c; break; }
+      }
+      if (targetContainer) {
+        targetContainer.appendChild(row);
+        startY = ev.clientY;
+        row.style.transform = "translateY(0px)";
+        return;
+      }
+
+      const prev = row.previousElementSibling;
+      if (prev && prev.hasAttribute("data-draggable")) {
+        const prevRect = prev.getBoundingClientRect();
+        if (midY < prevRect.top + prevRect.height / 2) {
+          row.parentElement.insertBefore(row, prev);
+          startY = ev.clientY;
+          row.style.transform = "translateY(0px)";
+          return;
+        }
+      }
       const next = row.nextElementSibling;
-      if (next && next.classList.contains("drag-row")) {
+      if (next && next.hasAttribute("data-draggable")) {
         const nextRect = next.getBoundingClientRect();
         if (midY > nextRect.top + nextRect.height / 2) {
-          container.insertBefore(next, row);
-          swap(row, next);
+          row.parentElement.insertBefore(next, row);
           startY = ev.clientY;
           row.style.transform = "translateY(0px)";
         }
@@ -418,7 +414,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
     btn.classList.add("active");
     document.getElementById(btn.dataset.view).hidden = false;
-    if (btn.dataset.view === "view-setup") { renderLastBackupTime(); }
+    // (nothing to refresh here now — Settings has no live-updating backup timestamp)
   });
 });
 
@@ -617,7 +613,7 @@ async function renderEntryList() {
     card.innerHTML = entryCardHTML(entry, showTag ? (att ? `#${att.number} ${att.name}` : "deleted attachment") : null);
     card.querySelector(".btn-icon").addEventListener("click", () => {
       confirmDestructive("This removes the entry from the log. You'll have a few seconds to undo right after.", async () => {
-        await snapshotBeforeDelete(`Before deleting a log entry`);
+        await snapshotBeforeChange(`Before deleting a log entry`);
         entry.deleted = true;
         entry.deletedAt = Date.now();
         await dbPut("entries", entry);
@@ -645,12 +641,12 @@ document.getElementById("btn-record-iteration").addEventListener("click", () => 
 function renderAttachmentsSetup() {
   const list = document.getElementById("attachment-setup-list");
   const editing = state.editingAttachmentOrder;
+  document.getElementById("attachment-order-toolbar-top").innerHTML = reorderToolbarHTML(editing, "attachments");
+  wireAttachmentOrderToolbar();
   (async () => {
     list.innerHTML = "";
     if (!state.attachments.length) {
       list.innerHTML = `<p class="empty-sub">No attachments yet. Add one for each swappable part on the robot.</p>`;
-      list.insertAdjacentHTML("beforeend", reorderToolbarHTML(editing, "attachments"));
-      wireAttachmentOrderToolbar();
       return;
     }
     for (const [idx, att] of state.attachments.entries()) {
@@ -664,7 +660,7 @@ function renderAttachmentsSetup() {
           <div class="m-info"><div class="m-name">${esc(att.name)}</div></div>
         `;
         list.appendChild(row);
-        attachRowDrag(row, list, state.attachments, () => {
+        attachRowDrag(row, list, () => {
           [...list.querySelectorAll(".drag-row .drag-num")].forEach((el, i) => { el.textContent = `#${i + 1}`; });
         });
       } else {
@@ -682,7 +678,7 @@ function renderAttachmentsSetup() {
         row.querySelector('[data-act="edit"]').addEventListener("click", () => openAttachmentModal(att));
         row.querySelector('[data-act="del"]').addEventListener("click", async () => {
           if (confirm(`Delete "${att.name}" and everything logged under it?`)) {
-            await snapshotBeforeDelete(`Before deleting attachment "${att.name}"`);
+            await snapshotBeforeChange(`Before deleting attachment "${att.name}"`);
             const entries = await dbGetByIndex("entries", "byAttachment", att.id);
             for (const en of entries) await dbDelete("entries", en.id);
             await dbDelete("attachments", att.id);
@@ -694,8 +690,6 @@ function renderAttachmentsSetup() {
         list.appendChild(row);
       }
     }
-    list.insertAdjacentHTML("beforeend", reorderToolbarHTML(editing, "attachments"));
-    wireAttachmentOrderToolbar();
   })();
 }
 
@@ -710,10 +704,10 @@ function wireAttachmentOrderToolbar() {
   });
   const saveBtn = document.getElementById("btn-save-order-attachments");
   if (saveBtn) saveBtn.addEventListener("click", async () => {
+    await snapshotBeforeChange("Before reordering attachments");
     for (const [idx, att] of state.attachments.entries()) { att.order = idx; att.number = idx + 1; await dbPut("attachments", att); }
     state.editingAttachmentOrder = false;
     await loadAttachments();
-    await runShadowBackup();
   });
 }
 
@@ -764,6 +758,7 @@ function openAttachmentModal(att) {
     record.name = name;
     record.photo = pendingAttPhoto;
     if (!isEdit) record.createdAt = Date.now();
+    await snapshotBeforeChange(isEdit ? `Before editing attachment "${att.name}"` : "Before adding a new attachment");
     const id = await dbPut("attachments", record);
     if (!isEdit) state.selectedAttachmentIds.add(id);
     closeModal();
@@ -1015,8 +1010,8 @@ document.getElementById("btn-add-rungroup").addEventListener("click", () => open
 
 function renderOrderToolbarTop() {
   const el = document.getElementById("order-toolbar-top");
+  el.innerHTML = reorderToolbarHTML(state.editingAllOrder, "all");
   if (state.editingAllOrder) {
-    el.innerHTML = `<button type="button" class="btn btn-primary" id="btn-save-order-all">Save order</button><button type="button" class="btn btn-ghost" id="btn-cancel-order-all">Cancel</button>`;
     document.getElementById("btn-save-order-all").addEventListener("click", saveAllOrder);
     document.getElementById("btn-cancel-order-all").addEventListener("click", async () => {
       state.editingAllOrder = false;
@@ -1024,14 +1019,17 @@ function renderOrderToolbarTop() {
       await loadRunGroups();
     });
   } else {
-    el.innerHTML = `<button type="button" class="btn btn-ghost" id="btn-edit-order-all">&#8645; Reorder runs, missions &amp; tasks</button>`;
     document.getElementById("btn-edit-order-all").addEventListener("click", () => { state.editingAllOrder = true; renderRunGroups(); });
   }
 }
 
 // Reads whatever order rows currently sit in, in the DOM — robust regardless
-// of how many nested levels were actually expanded/dragged this session.
+// of how many nested levels were actually dragged this session. A mission's
+// run assignment is read from whichever run's container its row currently
+// sits in, so cross-run drags are picked up correctly.
 async function saveAllOrder() {
+  await snapshotBeforeChange("Before reordering runs, missions & tasks");
+
   const groupEls = [...document.querySelectorAll("#rungroup-list > [data-gid]")];
   groupEls.forEach((el, idx) => {
     const g = state.runGroups.find((x) => x.id === Number(el.dataset.gid));
@@ -1040,10 +1038,13 @@ async function saveAllOrder() {
   for (const g of state.runGroups) await dbPut("runGroups", g);
 
   groupEls.forEach((groupEl) => {
-    const missionEls = [...groupEl.querySelectorAll(":scope > .task-list > [data-mid]")];
+    const gid = Number(groupEl.dataset.gid);
+    const missionListContainer = groupEl.querySelector(":scope > .task-list");
+    if (!missionListContainer) return;
+    const missionEls = [...missionListContainer.querySelectorAll(":scope > [data-mid]")];
     missionEls.forEach((mEl, idx) => {
       const m = state.missions.find((x) => x.id === Number(mEl.dataset.mid));
-      if (m) m.order = idx;
+      if (m) { m.order = idx; m.runGroupId = gid; }
     });
   });
 
@@ -1062,7 +1063,6 @@ async function saveAllOrder() {
   state.editingAllOrder = false;
   await loadMissions();
   await loadRunGroups();
-  await runShadowBackup();
 }
 
 function renderRunGroups() {
@@ -1073,48 +1073,62 @@ function renderRunGroups() {
   if (!state.runGroups.length) {
     list.innerHTML = `<p class="empty-sub">No runs yet. Add one, then add the missions it covers.</p>`;
   }
+
+  const missionContainers = []; // collected across all groups, for cross-run mission dragging
+  const missionRows = []; // {row, mission} pairs — wired up in a second pass once all containers are known
+
   state.runGroups.forEach((g) => {
     const wrap = document.createElement("div");
     wrap.dataset.gid = g.id;
     wrap.className = "mission-group";
-    const expanded = state.expandedRunGroups.has(g.id);
+    const expanded = editing ? true : state.expandedRunGroups.has(g.id);
     const groupMissions = state.missions.filter((m) => m.runGroupId === g.id);
     wrap.innerHTML = `
-      <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
+      <div class="mission-row mission-group-head${editing ? "" : " mission-expand-target"}" data-act="expand">
         ${editing ? `<span class="drag-handle">&#9776;</span>` : ""}
         <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
           <div class="m-name">${esc(g.name)}</div>
-          <div class="m-sub">${groupMissions.length} mission${groupMissions.length === 1 ? "" : "s"} &middot; tap to ${expanded ? "collapse" : "view missions"}</div>
+          <div class="m-sub">${groupMissions.length} mission${groupMissions.length === 1 ? "" : "s"}${editing ? "" : ` &middot; tap to ${expanded ? "collapse" : "view missions"}`}</div>
         </div>
         ${editing ? "" : `<button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>`}
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
-    wrap.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
-      if (e.target.closest('[data-act="edit"], [data-act="del"], .drag-handle')) return;
-      if (expanded) state.expandedRunGroups.delete(g.id); else state.expandedRunGroups.add(g.id);
-      renderRunGroups();
-    });
-    const editBtn = wrap.querySelector('[data-act="edit"]');
-    if (editBtn) editBtn.addEventListener("click", () => openRunGroupModal(g));
-    const delBtn = wrap.querySelector('[data-act="del"]');
-    if (delBtn) delBtn.addEventListener("click", async () => {
-      if (confirm(`Delete "${g.name}"? Its missions move to "Unassigned" rather than being deleted.`)) {
-        await snapshotBeforeDelete(`Before deleting run "${g.name}"`);
-        await dbDelete("runGroups", g.id);
-        await loadRunGroups();
-        await loadMissions();
+    if (!editing) {
+      wrap.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
+        if (e.target.closest('[data-act="edit"], [data-act="del"]')) return;
+        if (expanded) state.expandedRunGroups.delete(g.id); else state.expandedRunGroups.add(g.id);
         renderRunGroups();
-      }
-    });
-    if (editing) attachRowDrag(wrap, list, state.runGroups);
+      });
+      const editBtn = wrap.querySelector('[data-act="edit"]');
+      if (editBtn) editBtn.addEventListener("click", () => openRunGroupModal(g));
+      const delBtn = wrap.querySelector('[data-act="del"]');
+      if (delBtn) delBtn.addEventListener("click", async () => {
+        if (confirm(`Delete "${g.name}"? Its missions move to "Unassigned" rather than being deleted.`)) {
+          await snapshotBeforeChange(`Before deleting run "${g.name}"`);
+          await dbDelete("runGroups", g.id);
+          await loadRunGroups();
+          await loadMissions();
+          renderRunGroups();
+        }
+      });
+    } else {
+      attachRowDrag(wrap, list);
+    }
     if (expanded) {
       const container = wrap.querySelector(".task-list");
-      renderMissionsForGroup(container, g);
+      missionContainers.push(container);
+      renderMissionsForGroup(container, g, missionRows);
     }
     list.appendChild(wrap);
   });
+
+  // Second pass: now that every run's mission container exists, wire up
+  // cross-run dragging for every mission row at once.
+  if (editing) {
+    missionRows.forEach(({ row }) => attachMissionDrag(row, missionContainers));
+  }
 
   const orphans = state.missions.filter((m) => !state.runGroups.some((g) => g.id === m.runGroupId));
   if (orphans.length) {
@@ -1170,7 +1184,7 @@ function renderOrphanMissions(container, orphans) {
     row.querySelector('[data-act="edit"]').addEventListener("click", () => openMissionNameModal(m, null));
     row.querySelector('[data-act="del"]').addEventListener("click", async () => {
       if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
-        await snapshotBeforeDelete(`Before deleting mission "${m.name}"`);
+        await snapshotBeforeChange(`Before deleting mission "${m.name}"`);
         await dbDelete("missions", m.id);
         await loadMissions();
         renderRunGroups();
@@ -1180,8 +1194,6 @@ function renderOrphanMissions(container, orphans) {
     container.appendChild(row);
   });
 }
-
-function wireRunGroupOrderToolbar() { /* kept as no-op: unified into renderOrderToolbarTop() */ }
 
 function openRunGroupModal(g) {
   const isEdit = !!g;
@@ -1198,6 +1210,7 @@ function openRunGroupModal(g) {
   document.getElementById("m-save").addEventListener("click", async () => {
     const name = document.getElementById("rg-name").value.trim();
     if (!name) { alert("Name this run."); return; }
+    await snapshotBeforeChange(isEdit ? `Before renaming run "${g.name}"` : "Before adding a new run");
     const record = isEdit ? g : { order: state.runGroups.length };
     record.name = name;
     const id = await dbPut("runGroups", record);
@@ -1208,7 +1221,9 @@ function openRunGroupModal(g) {
 }
 
 // ---- Missions nested within a run ----
-function renderMissionsForGroup(container, group) {
+// `missionRows` (optional) collects {row, mission} pairs so the caller can
+// wire up cross-run dragging once every run's container has been created.
+function renderMissionsForGroup(container, group, missionRows) {
   const editing = state.editingAllOrder;
   container.innerHTML = "";
   const groupMissions = state.missions.filter((m) => m.runGroupId === group.id).sort((a, b) => a.order - b.order);
@@ -1217,39 +1232,42 @@ function renderMissionsForGroup(container, group) {
     container.insertAdjacentHTML("beforeend", `<p class="empty-sub">No missions in this run yet.</p>`);
   }
   groupMissions.forEach((m) => {
-    const expanded = state.expandedMissions.has(m.id);
+    const expanded = editing ? true : state.expandedMissions.has(m.id);
     const row = document.createElement("div");
     row.className = "mission-group";
     row.dataset.mid = m.id;
     row.innerHTML = `
-      <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
+      <div class="mission-row mission-group-head${editing ? "" : " mission-expand-target"}" data-act="expand">
         ${editing ? `<span class="drag-handle">&#9776;</span>` : ""}
         <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
           <div class="m-name">${esc(m.name)}</div>
-          <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts &middot; tap to ${expanded ? "collapse" : "view tasks"}</div>
+          <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts${editing ? "" : ` &middot; tap to ${expanded ? "collapse" : "view tasks"}`}</div>
         </div>
         ${editing ? "" : `<button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>`}
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
-    row.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
-      if (e.target.closest('[data-act="edit"], [data-act="del"], .drag-handle')) return;
-      if (expanded) state.expandedMissions.delete(m.id); else state.expandedMissions.add(m.id);
-      renderRunGroups();
-    });
-    const editBtn = row.querySelector('[data-act="edit"]');
-    if (editBtn) editBtn.addEventListener("click", () => openMissionNameModal(m, group));
-    const delBtn = row.querySelector('[data-act="del"]');
-    if (delBtn) delBtn.addEventListener("click", async () => {
-      if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
-        await snapshotBeforeDelete(`Before deleting mission "${m.name}"`);
-        await dbDelete("missions", m.id);
-        await loadMissions();
+    if (!editing) {
+      row.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
+        if (e.target.closest('[data-act="edit"], [data-act="del"]')) return;
+        if (expanded) state.expandedMissions.delete(m.id); else state.expandedMissions.add(m.id);
         renderRunGroups();
-      }
-    });
-    if (editing) attachRowDrag(row, container, groupMissions);
+      });
+      const editBtn = row.querySelector('[data-act="edit"]');
+      if (editBtn) editBtn.addEventListener("click", () => openMissionNameModal(m, group));
+      const delBtn = row.querySelector('[data-act="del"]');
+      if (delBtn) delBtn.addEventListener("click", async () => {
+        if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
+          await snapshotBeforeChange(`Before deleting mission "${m.name}"`);
+          await dbDelete("missions", m.id);
+          await loadMissions();
+          renderRunGroups();
+        }
+      });
+    } else if (missionRows) {
+      missionRows.push({ row, mission: m });
+    }
     if (expanded) {
       const taskListEl = row.querySelector(".task-list");
       renderTaskList(taskListEl, m);
@@ -1290,6 +1308,7 @@ function openMissionNameModal(m, group) {
     const record = isEdit ? m : { order: 9999, tasks: [], taskSeq: 0 };
     record.name = name;
     record.runGroupId = newGroupId;
+    await snapshotBeforeChange(isEdit ? `Before editing mission "${m.name}"` : "Before adding a new mission");
     const id = await dbPut("missions", record);
     closeModal();
     if (!isEdit) state.expandedMissions.add(id);
@@ -1321,7 +1340,7 @@ function renderTaskList(container, mission) {
         <div class="m-info"><div class="m-name">${esc(t.name)}</div></div>
       `;
       container.appendChild(row);
-      attachRowDrag(row, container, mission.tasks);
+      attachRowDrag(row, container);
       return;
     }
     row.className = "task-row";
@@ -1336,7 +1355,7 @@ function renderTaskList(container, mission) {
     row.querySelector('[data-act="edit"]').addEventListener("click", () => openTaskModal(mission, t));
     row.querySelector('[data-act="del"]').addEventListener("click", async () => {
       if (confirm(`Delete task "${t.name}"?`)) {
-        await snapshotBeforeDelete(`Before deleting task "${t.name}" from mission "${mission.name}"`);
+        await snapshotBeforeChange(`Before deleting task "${t.name}" from mission "${mission.name}"`);
         mission.tasks = mission.tasks.filter((tt) => tt.id !== t.id);
         await dbPut("missions", mission);
         await loadMissions();
@@ -1425,6 +1444,7 @@ function openTaskModal(mission, t) {
       delete record.points; delete record.max; delete record.pointsPerUnit;
     }
     if (!isEdit) mission.tasks.push(record);
+    await snapshotBeforeChange(isEdit ? `Before editing task "${record.name}"` : `Before adding a task to "${mission.name}"`);
     await dbPut("missions", mission);
     closeModal();
     await loadMissions();
@@ -1538,7 +1558,14 @@ const SOUND_FILES = {
 const soundElements = {};
 function getSoundElement(key) {
   if (!soundElements[key]) {
-    try { soundElements[key] = new Audio(SOUND_FILES[key]); } catch (e) { return null; }
+    try {
+      const el = document.createElement("audio");
+      el.src = SOUND_FILES[key];
+      el.preload = "auto";
+      el.style.display = "none";
+      document.body.appendChild(el);
+      soundElements[key] = el;
+    } catch (e) { return null; }
   }
   return soundElements[key];
 }
@@ -1567,6 +1594,9 @@ function playSound(key) {
     showErrorBanner(`Sound "${key}" error: ${e.name} — ${e.message}`);
   }
 }
+document.getElementById("btn-test-start-sound").addEventListener("click", () => playSound("start"));
+document.getElementById("btn-test-thirty-sound").addEventListener("click", () => playSound("thirty"));
+document.getElementById("btn-test-buzzer-sound").addEventListener("click", () => playSound("buzzer"));
 
 // ---- Precision tokens ----
 function precisionTokenWidgetHTML() {
@@ -2100,7 +2130,7 @@ function renderRuns() {
     `;
     card.querySelector('[data-act="del"]').addEventListener("click", async () => {
       if (confirm(`Delete incomplete game run "${run.label}"?`)) {
-        await snapshotBeforeDelete(`Before deleting incomplete run "${run.label}"`);
+        await snapshotBeforeChange(`Before deleting incomplete run "${run.label}"`);
         await dbDelete("runs", run.id);
         await loadRuns();
       }
@@ -2133,7 +2163,7 @@ function renderRuns() {
     card.querySelector('[data-act="view"]').addEventListener("click", () => viewRunBreakdown(run));
     card.querySelector('[data-act="del"]').addEventListener("click", async () => {
       if (confirm(`Delete game run "${run.label}"?`)) {
-        await snapshotBeforeDelete(`Before deleting run "${run.label}"`);
+        await snapshotBeforeChange(`Before deleting run "${run.label}"`);
         await dbDelete("runs", run.id);
         await loadRuns();
       }
@@ -2329,7 +2359,6 @@ async function initAll() {
   await loadRunGroups();
   await loadRuns();
   await loadSeasonName();
-  await renderLastBackupTime();
   document.getElementById("log-empty-state").hidden = state.attachments.length === 0 ? false : true;
 }
 initAll();

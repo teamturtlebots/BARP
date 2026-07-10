@@ -344,12 +344,12 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 }
 
 /* --- Added: mission groups with nested tasks --- */
-.mission-group { margin-bottom: 4px; }
+.mission-group { margin-bottom: 8px; }
 .mission-group-head { margin-bottom: 0; }
 .mission-expand-target { cursor: pointer; }
 .mission-expand-target:active { background: var(--paper-3); }
 .mission-expand-chevron { font-size: 1.1rem; flex: none; color: var(--moss); width: 24px; text-align: center; }
-.task-list { margin: 6px 0 14px 30px; display: flex; flex-direction: column; gap: 8px; }
+.task-list { margin: 6px 0 14px 0; display: flex; flex-direction: column; gap: 8px; }
 .task-row {
   background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
   padding: 8px 10px; display: flex; align-items: center; gap: 10px;

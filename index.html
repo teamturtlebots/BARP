@@ -79,6 +79,7 @@
       <button class="btn btn-amber" id="btn-add-attachment">+ Attachment</button>
     </div>
     <p class="empty-sub">Set these up once per season, then reorder or rename as your build changes. This is also where you delete one, along with everything logged under it.</p>
+    <div id="attachment-order-toolbar-top" class="order-toolbar-top"></div>
     <div id="attachment-setup-list" class="mission-list"></div>
 
     <div class="section-row" style="margin-top:28px;">
@@ -95,12 +96,11 @@
     <div class="section-row" style="margin-top:28px;">
       <h2>Backup</h2>
     </div>
-    <p class="empty-sub">Everything is stored only on this device. An automatic backup runs quietly in the background, and every deletion anywhere in the app also saves its own snapshot from right before it happened — both show up together when restoring.</p>
-    <p class="iteration-total-line" id="last-backup-line"></p>
+    <p class="empty-sub">Everything is stored only on this device. A snapshot is saved automatically right before every deletion and every change to attachments, runs, missions, or tasks — restore any of them from one menu.</p>
     <div class="btn-group">
       <button class="btn btn-ghost" id="btn-export-backup">Export full backup (.json)</button>
       <button class="btn btn-ghost" id="btn-import-backup">Restore from backup file</button>
-      <button class="btn btn-ghost" id="btn-restore-shadow">Restore from automatic backup</button>
+      <button class="btn btn-ghost" id="btn-restore-shadow">Restore a backup&hellip;</button>
     </div>
     <button class="btn btn-danger btn-full" id="btn-reset-db" style="margin-top:10px;">Reset local data</button>
     <p class="empty-sub">Only use this if the app is stuck (e.g. a database error banner). This permanently erases everything stored on this device (except backups) — export a manual backup first if you can.</p>
@@ -109,6 +109,11 @@
       <h2>Match Settings</h2>
     </div>
     <p class="empty-sub">Every run starts with 6 precision tokens. Sound effects (start horn, 30-seconds warning, end buzzer) play automatically during a guided run — see the README for details.</p>
+    <div class="btn-group">
+      <button class="btn btn-ghost" id="btn-test-start-sound">Test start horn</button>
+      <button class="btn btn-ghost" id="btn-test-thirty-sound">Test 30-sec warning</button>
+      <button class="btn btn-ghost" id="btn-test-buzzer-sound">Test buzzer</button>
+    </div>
 
     <div class="section-row" style="margin-top:28px;">
       <h2>Notebook name</h2>
