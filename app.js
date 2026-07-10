@@ -198,6 +198,7 @@ const state = {
   expandedRunGroups: new Set(),
   editingAttachmentOrder: false,
   editingAllOrder: false,
+  equipmentInspectionEnabled: true,
   guidedRun: null, // { run, legIdx, missionIdxInLeg, taskIdx, matchStartTs, ... }
 };
 
@@ -494,9 +495,16 @@ const PRECISION_TOKEN_BONUS = { 0: 0, 1: 10, 2: 15, 3: 25, 4: 35, 5: 50, 6: 50 }
 function precisionTokenBonus(remaining) { return PRECISION_TOKEN_BONUS[remaining] ?? 0; }
 const PRECISION_TOKENS_START = 6;
 
-function runMaxPoints(missions) { return missions.reduce((sum, m) => sum + missionMaxPoints(m), 0) + 50; }
+// Bonus points for passing the equipment inspection (attachments fit within
+// the inspection area) — asked once at the start of the run, before the
+// countdown.
+const EQUIPMENT_INSPECTION_BONUS = 20;
+
+function runMaxPoints(missions) { return missions.reduce((sum, m) => sum + missionMaxPoints(m), 0) + 50 + EQUIPMENT_INSPECTION_BONUS; }
 function runTotal(run, missions) {
-  return missions.reduce((sum, m) => sum + missionScoreForRun(m, run), 0) + precisionTokenBonus(run.precisionTokensRemaining ?? 0);
+  return missions.reduce((sum, m) => sum + missionScoreForRun(m, run), 0)
+    + precisionTokenBonus(run.precisionTokensRemaining ?? 0)
+    + (run.equipmentInspectionPassed ? EQUIPMENT_INSPECTION_BONUS : 0);
 }
 
 // ==========================================================
@@ -1089,7 +1097,7 @@ function renderRunGroups() {
         <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
           <div class="m-name">${esc(g.name)}</div>
-          <div class="m-sub">${groupMissions.length} mission${groupMissions.length === 1 ? "" : "s"}${editing ? "" : ` &middot; tap to ${expanded ? "collapse" : "view missions"}`}</div>
+          <div class="m-sub">${groupMissions.length} mission${groupMissions.length === 1 ? "" : "s"}</div>
         </div>
         ${editing ? "" : `<button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>`}
       </div>
@@ -1140,7 +1148,7 @@ function renderRunGroups() {
         <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
           <div class="m-name">Unassigned</div>
-          <div class="m-sub">${orphans.length} mission${orphans.length === 1 ? "" : "s"} without a run &mdash; tap to ${expanded ? "collapse" : "view &amp; reassign"}</div>
+          <div class="m-sub">${orphans.length} mission${orphans.length === 1 ? "" : "s"} without a run</div>
         </div>
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
@@ -1242,7 +1250,7 @@ function renderMissionsForGroup(container, group, missionRows) {
         <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
           <div class="m-name">${esc(m.name)}</div>
-          <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts${editing ? "" : ` &middot; tap to ${expanded ? "collapse" : "view tasks"}`}</div>
+          <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts</div>
         </div>
         ${editing ? "" : `<button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>`}
       </div>
@@ -1594,9 +1602,28 @@ function playSound(key) {
     showErrorBanner(`Sound "${key}" error: ${e.name} — ${e.message}`);
   }
 }
-document.getElementById("btn-test-start-sound").addEventListener("click", () => playSound("start"));
-document.getElementById("btn-test-thirty-sound").addEventListener("click", () => playSound("thirty"));
-document.getElementById("btn-test-buzzer-sound").addEventListener("click", () => playSound("buzzer"));
+async function diagnoseAndPlaySound(key) {
+  const url = SOUND_FILES[key];
+  try {
+    const resp = await fetch(url, { cache: "no-store" });
+    if (!resp.ok) {
+      showErrorBanner(`"${url}" returned HTTP ${resp.status} (${resp.statusText || "error"}) — the file isn't reachable at that path on your hosted site.`);
+      return;
+    }
+    const contentType = resp.headers.get("content-type") || "(none)";
+    if (!contentType.toLowerCase().startsWith("audio")) {
+      showErrorBanner(`"${url}" loaded (HTTP 200) but its Content-Type is "${contentType}", not audio — the file at that path may not actually be the MP3, or your host is serving the wrong thing for that URL.`);
+      return;
+    }
+  } catch (e) {
+    showErrorBanner(`Couldn't even fetch "${url}": ${e.message}`);
+    return;
+  }
+  playSound(key);
+}
+document.getElementById("btn-test-start-sound").addEventListener("click", () => diagnoseAndPlaySound("start"));
+document.getElementById("btn-test-thirty-sound").addEventListener("click", () => diagnoseAndPlaySound("thirty"));
+document.getElementById("btn-test-buzzer-sound").addEventListener("click", () => diagnoseAndPlaySound("buzzer"));
 
 // ---- Precision tokens ----
 function precisionTokenWidgetHTML() {
@@ -1616,7 +1643,7 @@ async function usePrecisionToken() {
   if (el) el.textContent = run.precisionTokensRemaining;
   const overviewLabel = document.querySelector(".gfs-timer-label");
   if (overviewLabel && overviewLabel.textContent.includes("tokens left")) {
-    overviewLabel.textContent = `${fmtDuration(run.totalTimeMs)} total time · ${run.precisionTokensRemaining} tokens left · review below or save now`;
+    overviewLabel.textContent = `${fmtDuration(run.totalTimeMs)} total time · ${run.precisionTokensRemaining} tokens left · inspection ${run.equipmentInspectionPassed ? `passed (+${EQUIPMENT_INSPECTION_BONUS})` : "not passed"} · review below or save now`;
   }
 }
 
@@ -1630,7 +1657,9 @@ function nextGameRunLabel() {
   return `Game Run ${todayCount + 1}`;
 }
 
-// ---- Start flow: countdown, then horn, then the match begins ----
+// ---- Start flow: equipment inspection (optional), then countdown, then horn ----
+let pendingEquipmentInspection = false;
+
 async function startGuidedRun() {
   const legsWithMissions = state.runGroups.filter((g) => getLegMissions(g).some((m) => (m.tasks || []).length));
   if (!legsWithMissions.length) {
@@ -1639,7 +1668,40 @@ async function startGuidedRun() {
     document.getElementById("m-close").addEventListener("click", closeModal);
     return;
   }
-  renderPreRunScreen();
+  pendingEquipmentInspection = false;
+  if (state.equipmentInspectionEnabled) {
+    renderEquipmentInspectionScreen();
+  } else {
+    renderPreRunScreen();
+  }
+}
+
+function renderEquipmentInspectionScreen() {
+  openGuidedFullscreen(`
+    <div class="gfs-header">
+      <div class="guided-phase-badge">Equipment Inspection</div>
+      <h2 class="gfs-mission-name">Does everything fit within the inspection area?</h2>
+    </div>
+    <div class="gfs-body gfs-center">
+      <p class="empty-sub">+${EQUIPMENT_INSPECTION_BONUS} points if yes. Either answer starts the countdown right away.</p>
+      <button type="button" class="btn btn-primary btn-full gfs-big-action gfs-huge-action" id="grn-inspection-yes">Yes &mdash; +${EQUIPMENT_INSPECTION_BONUS} pts</button>
+      <button type="button" class="btn btn-ghost btn-full gfs-big-action" id="grn-inspection-no" style="margin-top:12px;">No</button>
+    </div>
+    <div class="gfs-footer">
+      <button type="button" class="btn-link-cancel" id="grn-cancel-pre">Cancel</button>
+    </div>
+  `);
+  document.getElementById("grn-cancel-pre").addEventListener("click", closeGuidedFullscreen);
+  document.getElementById("grn-inspection-yes").addEventListener("click", () => {
+    pendingEquipmentInspection = true;
+    unlockAllSounds(); // must happen synchronously, right here, to count as a user gesture
+    runCountdown();
+  });
+  document.getElementById("grn-inspection-no").addEventListener("click", () => {
+    pendingEquipmentInspection = false;
+    unlockAllSounds();
+    runCountdown();
+  });
 }
 
 function renderPreRunScreen() {
@@ -1685,6 +1747,7 @@ async function actuallyStartRun() {
     startedAt: now,
     inProgress: true,
     precisionTokensRemaining: PRECISION_TOKENS_START,
+    equipmentInspectionPassed: pendingEquipmentInspection,
     rawScores: {},
     missionTimings: [],
     transitionTimings: [],
@@ -1704,6 +1767,7 @@ async function actuallyStartRun() {
     missionStartTs: now,
     played30: false,
     playedBuzzer: false,
+    timeExpired: false,
   };
   renderCurrentTaskScreen();
   state.guidedRun.timerHandle = setInterval(tickGuidedTimer, 500);
@@ -1716,10 +1780,9 @@ function tickGuidedTimer() {
   const elapsed = Date.now() - state.guidedRun.matchStartTs;
   const remaining = Math.max(0, MATCH_LENGTH_MS - elapsed);
   const el = document.getElementById("grn-timer");
-  if (el) {
-    el.textContent = fmtDuration(remaining);
-    el.classList.toggle("timer-danger", remaining <= 0);
-  }
+  const header = document.querySelector(".gfs-header");
+  if (el) el.textContent = fmtDuration(remaining);
+  if (header) header.classList.toggle("header-danger", remaining <= 0);
   if (elapsed >= 120000 && !state.guidedRun.played30) {
     state.guidedRun.played30 = true;
     playSound("thirty");
@@ -1728,6 +1791,20 @@ function tickGuidedTimer() {
     state.guidedRun.playedBuzzer = true;
     playSound("buzzer");
   }
+  if (remaining <= 0 && !state.guidedRun.timeExpired) {
+    state.guidedRun.timeExpired = true;
+    handleTimeExpired();
+  }
+}
+async function handleTimeExpired() {
+  await new Promise((r) => setTimeout(r, 600)); // let the red header actually be seen first
+  stopGuidedTimer();
+  const { run } = state.guidedRun;
+  const now = Date.now();
+  run.finishedAt = now;
+  run.totalTimeMs = now - state.guidedRun.matchStartTs;
+  await dbPut("runs", run);
+  renderGuidedOverview();
 }
 function stopGuidedTimer() {
   if (state.guidedRun?.timerHandle) clearInterval(state.guidedRun.timerHandle);
@@ -1754,6 +1831,13 @@ function closeGuidedFullscreen() {
 
 function cancelGuidedRunLink() {
   return `<button type="button" class="gfs-cancel-x" id="grn-cancel" title="Cancel this game run">&#10005;</button>`;
+}
+function gfsHeaderTopHTML(badgeText, showBack, backEnabled) {
+  return `<div class="gfs-header-top">
+    ${cancelGuidedRunLink()}
+    ${showBack ? `<button type="button" class="gfs-back-btn" id="grn-back" ${backEnabled ? "" : "disabled"}>&#8592;</button>` : ""}
+    <div class="guided-phase-badge">${badgeText}</div>
+  </div>`;
 }
 function wireCancelLink() {
   document.getElementById("grn-cancel").addEventListener("click", async () => {
@@ -1845,10 +1929,8 @@ function renderCurrentTaskScreen() {
   const canGoBack = taskIdx > 0 || missionIdxInLeg > 0;
   openGuidedFullscreen(`
     <div class="gfs-header">
-      ${cancelGuidedRunLink()}
-      <button type="button" class="gfs-back-btn" id="grn-back" ${canGoBack ? "" : "disabled"}>&#8592;</button>
+      ${gfsHeaderTopHTML(`${esc(leg.name)} &middot; Mission ${missionIdxInLeg + 1} of ${legMissions.length} &middot; Task ${taskIdx + 1} of ${tasks.length}`, true, canGoBack)}
       ${precisionTokenWidgetHTML()}
-      <div class="guided-phase-badge">${esc(leg.name)} &middot; Mission ${missionIdxInLeg + 1} of ${legMissions.length} &middot; Task ${taskIdx + 1} of ${tasks.length}</div>
       <h2 class="gfs-mission-name">${esc(mission.name)}</h2>
       <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
     </div>
@@ -1917,10 +1999,8 @@ function renderRobotReturnedScreen() {
   const leg = state.runGroups[legIdx];
   openGuidedFullscreen(`
     <div class="gfs-header">
-      ${cancelGuidedRunLink()}
-      <button type="button" class="gfs-back-btn" id="grn-back">&#8592;</button>
+      ${gfsHeaderTopHTML(esc(leg.name), true, true)}
       ${precisionTokenWidgetHTML()}
-      <div class="guided-phase-badge">${esc(leg.name)}</div>
       <h2 class="gfs-mission-name">All missions done for this run</h2>
       <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
     </div>
@@ -1965,9 +2045,8 @@ function renderGuidedTransitionPhase() {
   const nextLeg = state.runGroups[legIdx];
   openGuidedFullscreen(`
     <div class="gfs-header">
-      ${cancelGuidedRunLink()}
+      ${gfsHeaderTopHTML("Transition", false, false)}
       ${precisionTokenWidgetHTML()}
-      <div class="guided-phase-badge">Transition</div>
       <h2 class="gfs-mission-name">Heading to: ${esc(nextLeg.name)}</h2>
       <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
     </div>
@@ -1992,12 +2071,11 @@ function renderGuidedOverview() {
   const { run } = state.guidedRun;
   openGuidedFullscreen(`
     <div class="gfs-header">
-      ${cancelGuidedRunLink()}
+      ${gfsHeaderTopHTML("Final overview", false, false)}
       ${precisionTokenWidgetHTML()}
-      <div class="guided-phase-badge">Final overview</div>
       <h2 class="gfs-mission-name">${esc(run.label)}</h2>
       <div class="gfs-timer" id="gfs-overview-total">${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}</div>
-      <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs)} total time &middot; ${run.precisionTokensRemaining ?? 0} tokens left &middot; review below or save now</div>
+      <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs)} total time &middot; ${run.precisionTokensRemaining ?? 0} tokens left &middot; inspection ${run.equipmentInspectionPassed ? `passed (+${EQUIPMENT_INSPECTION_BONUS})` : "not passed"} &middot; review below or save now</div>
       <button class="btn btn-primary btn-full" id="grn-save-top" type="button" style="margin-top:12px;">&#10003; Save &amp; Finish</button>
     </div>
     <div class="gfs-body" id="gfs-overview-body"></div>
@@ -2189,6 +2267,13 @@ function viewRunBreakdown(run) {
     const score = mission ? missionScoreForRun(mission, run) : 0;
     const max = mission ? missionMaxPoints(mission) : 0;
     rows += `<tr class="row-mission"><td>${esc(mt.missionName)}</td><td>${score}/${max}</td><td>${fmtDuration(mt.durationMs)}</td></tr>`;
+    if (mission) {
+      (mission.tasks || []).forEach((t) => {
+        const taskScore = pointsFromRawTask(t, (run.rawScores || {})[t.id]);
+        const taskMax = taskMaxPoints(t);
+        rows += `<tr class="row-task"><td>${esc(t.name)}</td><td>${taskScore}/${taskMax}</td><td></td></tr>`;
+      });
+    }
     lastGroupId = mt.runGroupId;
   });
   const avgOpTime = transitions.length ? transitions.reduce((s, t) => s + t.durationMs, 0) / transitions.length : 0;
@@ -2200,7 +2285,8 @@ function viewRunBreakdown(run) {
     <div class="run-total-bar"><span class="rt-label">Total time</span><span class="rt-num">${fmtDuration(run.totalTimeMs || 0)}</span></div>
     <div class="run-total-bar"><span class="rt-label">Avg operation time</span><span class="rt-num">${transitions.length ? fmtDuration(avgOpTime) : "—"}</span></div>
     <p class="empty-sub">Precision tokens: ${tokensLeft} left &middot; +${precisionTokenBonus(tokensLeft)} bonus pts</p>
-    <table class="run-summary-table"><thead><tr><th>Mission</th><th>Score</th><th>Time</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="empty-sub">Equipment inspection: ${run.equipmentInspectionPassed ? `passed &middot; +${EQUIPMENT_INSPECTION_BONUS} bonus pts` : "not passed"}</p>
+    <table class="run-summary-table"><thead><tr><th>Mission / Task</th><th>Score</th><th>Time</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="modal-actions"><button class="btn btn-ghost btn-full" id="m-close">Close</button></div>
   `);
   document.getElementById("m-close").addEventListener("click", closeModal);
@@ -2351,6 +2437,17 @@ async function purgeOldTrash() {
     if (e.deleted && e.deletedAt && e.deletedAt < cutoff) await dbDelete("entries", e.id);
   }
 }
+const equipmentInspectionInput = document.getElementById("input-equipment-inspection-enabled");
+equipmentInspectionInput.addEventListener("change", async () => {
+  state.equipmentInspectionEnabled = equipmentInspectionInput.checked;
+  await dbPut("meta", { key: "equipmentInspectionEnabled", value: state.equipmentInspectionEnabled });
+});
+async function loadEquipmentInspectionSetting() {
+  const rec = await dbGet("meta", "equipmentInspectionEnabled");
+  state.equipmentInspectionEnabled = rec?.value ?? true;
+  equipmentInspectionInput.checked = state.equipmentInspectionEnabled;
+}
+
 async function initAll() {
   await purgeOldTrash();
   await loadAttachments();
@@ -2359,6 +2456,7 @@ async function initAll() {
   await loadRunGroups();
   await loadRuns();
   await loadSeasonName();
+  await loadEquipmentInspectionSetting();
   document.getElementById("log-empty-state").hidden = state.attachments.length === 0 ? false : true;
 }
 initAll();
