@@ -244,6 +244,7 @@ window.addEventListener("unhandledrejection", (e) => showErrorBanner(e.reason?.m
 // of which are allowed to move into a different parent list.
 function attachRowDrag(row, container, onSwap) {
   row.setAttribute("data-draggable", "1");
+  row.classList.add("drag-row");
   const handle = row.querySelector(".drag-handle");
   if (!handle) return;
   handle.addEventListener("pointerdown", (e) => {
@@ -297,6 +298,7 @@ function attachRowDrag(row, container, onSwap) {
 // deeper, a mission can only ever land inside a run's own list.
 function attachMissionDrag(row, allContainers) {
   row.setAttribute("data-draggable", "1");
+  row.classList.add("drag-row");
   const handle = row.querySelector(".drag-handle");
   if (!handle) return;
   handle.addEventListener("pointerdown", (e) => {
@@ -643,43 +645,27 @@ async function renderEntryList() {
 }
 
 // ---- Attachment management (Setup tab) ----
-document.getElementById("btn-add-attachment").addEventListener("click", () => openAttachmentModal(null));
 document.getElementById("btn-record-iteration").addEventListener("click", () => openRecordIterationModal());
 
 function renderAttachmentsSetup() {
   const list = document.getElementById("attachment-setup-list");
   const editing = state.editingAttachmentOrder;
-  document.getElementById("attachment-order-toolbar-top").innerHTML = reorderToolbarHTML(editing, "attachments");
-  wireAttachmentOrderToolbar();
+  renderAttachmentOrderToolbar();
   (async () => {
     list.innerHTML = "";
     if (!state.attachments.length) {
-      list.innerHTML = `<p class="empty-sub">No attachments yet. Add one for each swappable part on the robot.</p>`;
+      list.innerHTML = `<p class="empty-sub">No attachments yet.${editing ? "" : " Tap Edit to add one."}</p>`;
       return;
     }
     for (const [idx, att] of state.attachments.entries()) {
       const row = document.createElement("div");
       row.dataset.idx = idx;
       if (editing) {
-        row.className = "mission-row drag-row";
+        row.className = "mission-row";
         row.innerHTML = `
           <span class="drag-handle">&#9776;</span>
           <span class="drag-num">#${idx + 1}</span>
           <div class="m-info"><div class="m-name">${esc(att.name)}</div></div>
-        `;
-        list.appendChild(row);
-        attachRowDrag(row, list, () => {
-          [...list.querySelectorAll(".drag-row .drag-num")].forEach((el, i) => { el.textContent = `#${i + 1}`; });
-        });
-      } else {
-        const count = await iterationCount(att.id);
-        row.className = "mission-row";
-        row.innerHTML = `
-          ${att.photo ? `<img class="att-thumb" src="${att.photo}" alt="">` : ""}
-          <div class="m-info">
-            <div class="m-name">#${esc(att.number)} ${esc(att.name)}</div>
-            <div class="m-sub">${count} iteration${count === 1 ? "" : "s"} logged</div>
-          </div>
           <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
           <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
         `;
@@ -696,12 +682,40 @@ function renderAttachmentsSetup() {
           }
         });
         list.appendChild(row);
+        attachRowDrag(row, list, () => {
+          [...list.querySelectorAll(".drag-row .drag-num")].forEach((el, i) => { el.textContent = `#${i + 1}`; });
+        });
+      } else {
+        const count = await iterationCount(att.id);
+        row.className = "mission-row";
+        row.innerHTML = `
+          ${att.photo ? `<img class="att-thumb" src="${att.photo}" alt="">` : ""}
+          <div class="m-info">
+            <div class="m-name">#${esc(att.number)} ${esc(att.name)}</div>
+            <div class="m-sub">${count} iteration${count === 1 ? "" : "s"} logged</div>
+          </div>
+        `;
+        list.appendChild(row);
       }
     }
   })();
 }
 
+function renderAttachmentOrderToolbar() {
+  const el = document.getElementById("attachment-order-toolbar-top");
+  const editing = state.editingAttachmentOrder;
+  el.innerHTML = editing
+    ? `<div class="edit-mode-toolbar">
+         <button type="button" class="btn btn-amber btn-sm" id="btn-add-attachment">+ Attachment</button>
+         <div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-save-order-attachments">Save</button><button type="button" class="btn-small-link" id="btn-cancel-order-attachments">Cancel</button></div>
+       </div>`
+    : `<div class="reorder-toolbar-small reorder-toolbar-top-align"><button type="button" class="btn-small-link" id="btn-edit-order-attachments">Edit</button></div>`;
+  wireAttachmentOrderToolbar();
+}
+
 function wireAttachmentOrderToolbar() {
+  const addBtn = document.getElementById("btn-add-attachment");
+  if (addBtn) addBtn.addEventListener("click", () => openAttachmentModal(null));
   const editBtn = document.getElementById("btn-edit-order-attachments");
   if (editBtn) editBtn.addEventListener("click", () => { state.editingAttachmentOrder = true; renderAttachmentsSetup(); });
   const cancelBtn = document.getElementById("btn-cancel-order-attachments");
@@ -1014,12 +1028,22 @@ function taskSubLabel(t) {
 }
 
 // ---- Runs (leave-and-return trips), each holding several missions ----
-document.getElementById("btn-add-rungroup").addEventListener("click", () => openRunGroupModal(null));
 
 function renderOrderToolbarTop() {
   const el = document.getElementById("order-toolbar-top");
-  el.innerHTML = reorderToolbarHTML(state.editingAllOrder, "all");
-  if (state.editingAllOrder) {
+  const editing = state.editingAllOrder;
+  el.innerHTML = editing
+    ? `<div class="edit-mode-toolbar">
+         <div class="btn-group">
+           <button type="button" class="btn btn-ghost btn-sm" id="btn-import-missions">Import CSV</button>
+           <button type="button" class="btn btn-amber btn-sm" id="btn-add-rungroup">+ Run</button>
+         </div>
+         <div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-save-order-all">Save</button><button type="button" class="btn-small-link" id="btn-cancel-order-all">Cancel</button></div>
+       </div>`
+    : `<div class="reorder-toolbar-small reorder-toolbar-top-align"><button type="button" class="btn-small-link" id="btn-edit-order-all">Edit</button></div>`;
+  if (editing) {
+    document.getElementById("btn-add-rungroup").addEventListener("click", () => openRunGroupModal(null));
+    document.getElementById("btn-import-missions").addEventListener("click", openImportMissionsModal);
     document.getElementById("btn-save-order-all").addEventListener("click", saveAllOrder);
     document.getElementById("btn-cancel-order-all").addEventListener("click", async () => {
       state.editingAllOrder = false;
@@ -1099,16 +1123,16 @@ function renderRunGroups() {
           <div class="m-name">${esc(g.name)}</div>
           <div class="m-sub">${groupMissions.length} mission${groupMissions.length === 1 ? "" : "s"}</div>
         </div>
-        ${editing ? "" : `<button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>`}
+        ${editing ? `<button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>` : ""}
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
     if (!editing) {
       wrap.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
-        if (e.target.closest('[data-act="edit"], [data-act="del"]')) return;
         if (expanded) state.expandedRunGroups.delete(g.id); else state.expandedRunGroups.add(g.id);
         renderRunGroups();
       });
+    } else {
       const editBtn = wrap.querySelector('[data-act="edit"]');
       if (editBtn) editBtn.addEventListener("click", () => openRunGroupModal(g));
       const delBtn = wrap.querySelector('[data-act="del"]');
@@ -1121,7 +1145,6 @@ function renderRunGroups() {
           renderRunGroups();
         }
       });
-    } else {
       attachRowDrag(wrap, list);
     }
     if (expanded) {
@@ -1251,16 +1274,16 @@ function renderMissionsForGroup(container, group, missionRows) {
           <div class="m-name">${esc(m.name)}</div>
           <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts</div>
         </div>
-        ${editing ? "" : `<button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>`}
+        ${editing ? `<button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>` : ""}
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
     if (!editing) {
       row.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
-        if (e.target.closest('[data-act="edit"], [data-act="del"]')) return;
         if (expanded) state.expandedMissions.delete(m.id); else state.expandedMissions.add(m.id);
         renderRunGroups();
       });
+    } else {
       const editBtn = row.querySelector('[data-act="edit"]');
       if (editBtn) editBtn.addEventListener("click", () => openMissionNameModal(m, group));
       const delBtn = row.querySelector('[data-act="del"]');
@@ -1272,8 +1295,7 @@ function renderMissionsForGroup(container, group, missionRows) {
           renderRunGroups();
         }
       });
-    } else if (missionRows) {
-      missionRows.push({ row, mission: m });
+      if (missionRows) missionRows.push({ row, mission: m });
     }
     if (expanded) {
       const taskListEl = row.querySelector(".task-list");
@@ -1281,9 +1303,9 @@ function renderMissionsForGroup(container, group, missionRows) {
     }
     container.appendChild(row);
   });
-  if (!editing) {
+  if (editing) {
     const addBtn = document.createElement("button");
-    addBtn.className = "btn btn-ghost btn-full";
+    addBtn.className = "btn btn-ghost btn-full btn-sm";
     addBtn.style.marginTop = "6px";
     addBtn.textContent = "+ Mission";
     addBtn.addEventListener("click", () => openMissionNameModal(null, group));
@@ -1341,11 +1363,23 @@ function renderTaskList(container, mission) {
     const row = document.createElement("div");
     row.dataset.tid = t.id;
     if (editing) {
-      row.className = "task-row drag-row";
+      row.className = "task-row";
       row.innerHTML = `
         <span class="drag-handle">&#9776;</span>
         <div class="m-info"><div class="m-name">${esc(t.name)}</div></div>
+        <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
+        <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
       `;
+      row.querySelector('[data-act="edit"]').addEventListener("click", () => openTaskModal(mission, t));
+      row.querySelector('[data-act="del"]').addEventListener("click", async () => {
+        if (confirm(`Delete task "${t.name}"?`)) {
+          await snapshotBeforeChange(`Before deleting task "${t.name}" from mission "${mission.name}"`);
+          mission.tasks = mission.tasks.filter((tt) => tt.id !== t.id);
+          await dbPut("missions", mission);
+          await loadMissions();
+          renderRunGroups();
+        }
+      });
       container.appendChild(row);
       attachRowDrag(row, container);
       return;
@@ -1356,24 +1390,12 @@ function renderTaskList(container, mission) {
         <div class="m-name">${esc(t.name)}</div>
         <div class="m-sub">${taskSubLabel(t)}</div>
       </div>
-      <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
-      <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
     `;
-    row.querySelector('[data-act="edit"]').addEventListener("click", () => openTaskModal(mission, t));
-    row.querySelector('[data-act="del"]').addEventListener("click", async () => {
-      if (confirm(`Delete task "${t.name}"?`)) {
-        await snapshotBeforeChange(`Before deleting task "${t.name}" from mission "${mission.name}"`);
-        mission.tasks = mission.tasks.filter((tt) => tt.id !== t.id);
-        await dbPut("missions", mission);
-        await loadMissions();
-        renderRunGroups();
-      }
-    });
     container.appendChild(row);
   });
-  if (!editing) {
+  if (editing) {
     const addBtn = document.createElement("button");
-    addBtn.className = "btn btn-ghost btn-full";
+    addBtn.className = "btn btn-ghost btn-full btn-sm";
     addBtn.style.marginTop = "6px";
     addBtn.textContent = "+ Task";
     addBtn.addEventListener("click", () => openTaskModal(mission, null));
@@ -1469,7 +1491,7 @@ Run 1,M02 Reef Restoration,Restoration state,choice,,,,Partial:10;Full:20
 Run 2,M03 Salvage Operation,Ship raised,bool,20,,,
 `;
 
-document.getElementById("btn-import-missions").addEventListener("click", () => {
+function openImportMissionsModal() {
   openModal(`
     <h2>Import missions</h2>
     <p class="empty-sub">Upload a CSV with columns <strong>Run, Mission, Task, Type, Points, Max, PointsPerUnit, Options</strong>. The Run column groups missions into leave-and-return trips (created automatically if they don't exist yet — leave it blank to use your first run). Rows sharing a Mission name are grouped together. <strong>Type</strong> is <code>bool</code>, <code>number</code>, or <code>choice</code>. For <code>choice</code> rows, put states in <strong>Options</strong> as <code>Label:Points;Label:Points</code>. Importing adds to what's already there rather than replacing it.</p>
@@ -1480,7 +1502,7 @@ document.getElementById("btn-import-missions").addEventListener("click", () => {
   `);
   document.getElementById("m-example").addEventListener("click", () => download("missions-example.csv", EXAMPLE_MISSIONS_CSV, "text/csv"));
   document.getElementById("m-choose").addEventListener("click", () => { closeModal(); document.getElementById("file-import-missions").click(); });
-});
+}
 
 document.getElementById("file-import-missions").addEventListener("change", async (e) => {
   const file = e.target.files[0];
@@ -1660,8 +1682,7 @@ function renderEquipmentInspectionScreen() {
       <h2 class="gfs-mission-name">Does everything fit within the inspection area?</h2>
     </div>
     <div class="gfs-body gfs-center">
-      <p class="empty-sub">+${EQUIPMENT_INSPECTION_BONUS} points if yes. Either answer starts the countdown right away.</p>
-      <button type="button" class="btn btn-primary btn-full gfs-big-action gfs-huge-action" id="grn-inspection-yes">Yes &mdash; +${EQUIPMENT_INSPECTION_BONUS} pts</button>
+      <button type="button" class="btn btn-primary btn-full gfs-big-action gfs-huge-action" id="grn-inspection-yes">Yes</button>
       <button type="button" class="btn btn-ghost btn-full gfs-big-action" id="grn-inspection-no" style="margin-top:12px;">No</button>
     </div>
     <div class="gfs-footer">

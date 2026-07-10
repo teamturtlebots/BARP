@@ -605,9 +605,11 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .run-filter-to-label { color: var(--text-soft); font-size: 0.8rem; flex: none; }
 
 /* --- Added: unified top-positioned reorder toolbar for Runs/Missions/Tasks --- */
-.order-toolbar-top { display: flex; gap: 8px; margin-bottom: 14px; }
-.order-toolbar-top .btn { flex: 1; }
-.order-toolbar-top .btn-ghost#btn-edit-order-all { flex: none; font-size: 0.8rem; padding: 8px 12px; }
+.order-toolbar-top { margin-bottom: 14px; }
+.reorder-toolbar-top-align { justify-content: flex-start; }
+.edit-mode-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.edit-mode-toolbar .reorder-toolbar-small { margin-top: 0; }
+.btn-sm { padding: 7px 12px; font-size: 0.82rem; }
 
 /* --- Added: unassigned missions bucket (shown after deleting a run) --- */
 .unassigned-group .mission-group-head { border-color: var(--coral); border-style: dashed; }
