@@ -249,12 +249,14 @@ function attachRowDrag(row, container, onSwap, groupMode = false) {
   if (!handle) return;
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();
-    try { handle.setPointerCapture(e.pointerId); } catch (err) {}
     row.classList.add("dragging");
     let startY = e.clientY;
+    let latestY = e.clientY;
+    let rafPending = false;
 
-    function onMove(ev) {
-      const dy = ev.clientY - startY;
+    function evaluate() {
+      rafPending = false;
+      const dy = latestY - startY;
       row.style.transform = `translateY(${dy}px)`;
       const rect = row.getBoundingClientRect();
       const midY = rect.top + rect.height / 2;
@@ -265,7 +267,7 @@ function attachRowDrag(row, container, onSwap, groupMode = false) {
         if (midY < prevRect.top + prevRect.height / 2) {
           container.insertBefore(row, prev);
           if (onSwap) onSwap();
-          startY = ev.clientY;
+          startY = latestY;
           row.style.transform = "translateY(0px)";
           return;
         }
@@ -276,20 +278,28 @@ function attachRowDrag(row, container, onSwap, groupMode = false) {
         if (midY > nextRect.top + nextRect.height / 2) {
           container.insertBefore(next, row);
           if (onSwap) onSwap();
-          startY = ev.clientY;
+          startY = latestY;
           row.style.transform = "translateY(0px)";
         }
       }
     }
+    function onMove(ev) {
+      latestY = ev.clientY;
+      if (!rafPending) { rafPending = true; requestAnimationFrame(evaluate); }
+    }
     function onUp() {
-      try { handle.releasePointerCapture(e.pointerId); } catch (err) {}
-      handle.removeEventListener("pointermove", onMove);
-      handle.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
       row.classList.remove("dragging");
       row.style.transform = "";
     }
-    handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onUp);
+    // Listening on window (rather than capturing on the handle) means the
+    // drag always ends cleanly even if the row gets moved to a different
+    // parent mid-drag — pointer capture can silently drop on reparenting.
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   });
 }
 
@@ -303,12 +313,14 @@ function attachMissionDrag(row, allContainers) {
   if (!handle) return;
   handle.addEventListener("pointerdown", (e) => {
     e.preventDefault();
-    try { handle.setPointerCapture(e.pointerId); } catch (err) {}
     row.classList.add("dragging");
     let startY = e.clientY;
+    let latestY = e.clientY;
+    let rafPending = false;
 
-    function onMove(ev) {
-      const dy = ev.clientY - startY;
+    function evaluate() {
+      rafPending = false;
+      const dy = latestY - startY;
       row.style.transform = `translateY(${dy}px)`;
       const rect = row.getBoundingClientRect();
       const midY = rect.top + rect.height / 2;
@@ -322,7 +334,7 @@ function attachMissionDrag(row, allContainers) {
       }
       if (targetContainer) {
         targetContainer.appendChild(row);
-        startY = ev.clientY;
+        startY = latestY;
         row.style.transform = "translateY(0px)";
         return;
       }
@@ -332,7 +344,7 @@ function attachMissionDrag(row, allContainers) {
         const prevRect = prev.getBoundingClientRect();
         if (midY < prevRect.top + prevRect.height / 2) {
           row.parentElement.insertBefore(row, prev);
-          startY = ev.clientY;
+          startY = latestY;
           row.style.transform = "translateY(0px)";
           return;
         }
@@ -342,20 +354,28 @@ function attachMissionDrag(row, allContainers) {
         const nextRect = next.getBoundingClientRect();
         if (midY > nextRect.top + nextRect.height / 2) {
           row.parentElement.insertBefore(next, row);
-          startY = ev.clientY;
+          startY = latestY;
           row.style.transform = "translateY(0px)";
         }
       }
     }
+    function onMove(ev) {
+      latestY = ev.clientY;
+      if (!rafPending) { rafPending = true; requestAnimationFrame(evaluate); }
+    }
     function onUp() {
-      try { handle.releasePointerCapture(e.pointerId); } catch (err) {}
-      handle.removeEventListener("pointermove", onMove);
-      handle.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
       row.classList.remove("dragging");
       row.style.transform = "";
     }
-    handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onUp);
+    // Window-level listeners (not pointer capture on the handle) so the drag
+    // still ends cleanly even after the row is reparented into another run's
+    // container — capture can silently drop when the captured element moves.
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   });
 }
 function reorderToolbarHTML(editing, prefix) {
@@ -1258,9 +1278,6 @@ function renderMissionsForGroup(container, group, missionRows) {
   container.innerHTML = "";
   const groupMissions = state.missions.filter((m) => m.runGroupId === group.id).sort((a, b) => a.order - b.order);
 
-  if (!groupMissions.length) {
-    container.insertAdjacentHTML("beforeend", `<p class="empty-sub">No missions in this run yet.</p>`);
-  }
   groupMissions.forEach((m) => {
     const expanded = editing ? true : state.expandedMissions.has(m.id);
     const row = document.createElement("div");
@@ -1306,7 +1323,6 @@ function renderMissionsForGroup(container, group, missionRows) {
   if (editing) {
     const addBtn = document.createElement("button");
     addBtn.className = "btn btn-ghost btn-full btn-sm";
-    addBtn.style.marginTop = "6px";
     addBtn.textContent = "+ Mission";
     addBtn.addEventListener("click", () => openMissionNameModal(null, group));
     container.appendChild(addBtn);
@@ -1396,7 +1412,6 @@ function renderTaskList(container, mission) {
   if (editing) {
     const addBtn = document.createElement("button");
     addBtn.className = "btn btn-ghost btn-full btn-sm";
-    addBtn.style.marginTop = "6px";
     addBtn.textContent = "+ Task";
     addBtn.addEventListener("click", () => openTaskModal(mission, null));
     container.appendChild(addBtn);

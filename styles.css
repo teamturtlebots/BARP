@@ -344,7 +344,6 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 }
 
 /* --- Added: mission groups with nested tasks --- */
-.mission-group { margin-bottom: 8px; }
 .mission-group-head { margin-bottom: 0; }
 .mission-expand-target { cursor: pointer; }
 .mission-expand-target:active { background: var(--paper-3); }
@@ -463,8 +462,12 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 }
 .gfs-header.header-danger { background: var(--coral); }
 .gfs-header .guided-phase-badge { background: rgba(255,255,255,0.14); color: var(--amber); }
-.gfs-header-top { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-.gfs-header-top .guided-phase-badge { flex: 1; margin: 0; }
+.gfs-header-top { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; position: relative; min-height: 38px; }
+.gfs-header-top .guided-phase-badge {
+  flex: none; margin: 0; position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  max-width: calc(100% - 104px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .gfs-mission-name { color: var(--paper); font-size: 1.3rem; margin: 6px 0 10px; }
 .gfs-timer { font-family: var(--mono); font-size: 2.6rem; color: var(--amber); font-weight: 700; line-height: 1; }
 .gfs-timer-label { font-size: 0.72rem; color: var(--moss-light); text-transform: uppercase; letter-spacing: 0.04em; }
@@ -522,7 +525,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   font-size: 1.1rem; cursor: pointer; display: flex; align-items: center; justify-content: center;
   flex: none;
 }
-.gfs-back-btn { font-size: 1.2rem; position: relative; top: -1px; }
+.gfs-back-btn { font-size: 1.2rem; position: relative; top: -3px; }
 
 .guided-fullscreen.gfs-frozen .gfs-body,
 .guided-fullscreen.gfs-frozen .precision-token-btn,
@@ -591,7 +594,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   display: flex; align-items: center; gap: 12px;
   touch-action: none; user-select: none;
   background: var(--paper-2); border: 1.5px solid var(--line); border-radius: 8px;
-  padding: 10px 12px; margin-bottom: 8px;
+  padding: 10px 12px;
 }
 .drag-row.dragging { z-index: 30; box-shadow: 0 4px 14px rgba(0,0,0,0.25); border-color: var(--moss); background: #fff; }
 .drag-group {
