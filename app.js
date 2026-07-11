@@ -242,9 +242,9 @@ window.addEventListener("unhandledrejection", (e) => showErrorBanner(e.reason?.m
 // ---------- Drag-to-reorder (touch-friendly, works with mouse too) ----------
 // Same-container version: used for attachments, run groups, and tasks — none
 // of which are allowed to move into a different parent list.
-function attachRowDrag(row, container, onSwap) {
+function attachRowDrag(row, container, onSwap, groupMode = false) {
   row.setAttribute("data-draggable", "1");
-  row.classList.add("drag-row");
+  row.classList.add(groupMode ? "drag-group" : "drag-row");
   const handle = row.querySelector(".drag-handle");
   if (!handle) return;
   handle.addEventListener("pointerdown", (e) => {
@@ -298,7 +298,7 @@ function attachRowDrag(row, container, onSwap) {
 // deeper, a mission can only ever land inside a run's own list.
 function attachMissionDrag(row, allContainers) {
   row.setAttribute("data-draggable", "1");
-  row.classList.add("drag-row");
+  row.classList.add("drag-group");
   const handle = row.querySelector(".drag-handle");
   if (!handle) return;
   handle.addEventListener("pointerdown", (e) => {
@@ -709,7 +709,7 @@ function renderAttachmentOrderToolbar() {
          <button type="button" class="btn btn-amber btn-sm" id="btn-add-attachment">+ Attachment</button>
          <div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-save-order-attachments">Save</button><button type="button" class="btn-small-link" id="btn-cancel-order-attachments">Cancel</button></div>
        </div>`
-    : `<div class="reorder-toolbar-small reorder-toolbar-top-align"><button type="button" class="btn-small-link" id="btn-edit-order-attachments">Edit</button></div>`;
+    : `<div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-edit-order-attachments">Edit</button></div>`;
   wireAttachmentOrderToolbar();
 }
 
@@ -1040,7 +1040,7 @@ function renderOrderToolbarTop() {
          </div>
          <div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-save-order-all">Save</button><button type="button" class="btn-small-link" id="btn-cancel-order-all">Cancel</button></div>
        </div>`
-    : `<div class="reorder-toolbar-small reorder-toolbar-top-align"><button type="button" class="btn-small-link" id="btn-edit-order-all">Edit</button></div>`;
+    : `<div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-edit-order-all">Edit</button></div>`;
   if (editing) {
     document.getElementById("btn-add-rungroup").addEventListener("click", () => openRunGroupModal(null));
     document.getElementById("btn-import-missions").addEventListener("click", openImportMissionsModal);
@@ -1145,7 +1145,7 @@ function renderRunGroups() {
           renderRunGroups();
         }
       });
-      attachRowDrag(wrap, list);
+      attachRowDrag(wrap, list, undefined, true);
     }
     if (expanded) {
       const container = wrap.querySelector(".task-list");
@@ -1768,11 +1768,25 @@ async function actuallyStartRun() {
     timeExpired: false,
   };
   renderCurrentTaskScreen();
-  state.guidedRun.timerHandle = setInterval(tickGuidedTimer, 500);
+  state.guidedRun.timerHandle = setInterval(tickGuidedTimer, 200);
+  // Scheduled precisely against the match clock (not the poll interval) so
+  // the 30s tone and the buzzer fire exactly on time, not up to one poll late.
+  scheduleGuidedAlarms(state.guidedRun);
 }
 
 // ---- Continuous match clock (one clock for the whole game run, like a real FLL match) ----
 const MATCH_LENGTH_MS = 150000; // 2:30, standard FLL match length
+function scheduleGuidedAlarms(gr) {
+  gr.timeout30 = setTimeout(() => {
+    if (state.guidedRun !== gr || gr.played30) return;
+    gr.played30 = true;
+    playSound("thirty");
+  }, Math.max(0, 120000 - (Date.now() - gr.matchStartTs)));
+  gr.timeoutBuzzer = setTimeout(() => {
+    if (state.guidedRun !== gr || gr.timeExpired) return;
+    handleTimeExpired();
+  }, Math.max(0, MATCH_LENGTH_MS - (Date.now() - gr.matchStartTs)));
+}
 function tickGuidedTimer() {
   if (!state.guidedRun) return;
   const elapsed = Date.now() - state.guidedRun.matchStartTs;
@@ -1781,31 +1795,35 @@ function tickGuidedTimer() {
   const header = document.querySelector(".gfs-header");
   if (el) el.textContent = fmtDuration(remaining);
   if (header) header.classList.toggle("header-danger", remaining <= 0);
-  if (elapsed >= 120000 && !state.guidedRun.played30) {
-    state.guidedRun.played30 = true;
-    playSound("thirty");
-  }
-  if (elapsed >= 150000 && !state.guidedRun.playedBuzzer) {
-    state.guidedRun.playedBuzzer = true;
-    playSound("buzzer");
-  }
-  if (remaining <= 0 && !state.guidedRun.timeExpired) {
-    state.guidedRun.timeExpired = true;
-    handleTimeExpired();
-  }
 }
-async function handleTimeExpired() {
-  await new Promise((r) => setTimeout(r, 600)); // let the red header actually be seen first
-  stopGuidedTimer();
-  const { run } = state.guidedRun;
-  const now = Date.now();
-  run.finishedAt = now;
-  run.totalTimeMs = now - state.guidedRun.matchStartTs;
-  await dbPut("runs", run);
-  renderGuidedOverview();
+function handleTimeExpired() {
+  if (!state.guidedRun || state.guidedRun.timeExpired) return;
+  const gr = state.guidedRun;
+  gr.timeExpired = true;
+  playSound("buzzer");
+  const el = document.getElementById("grn-timer");
+  if (el) el.textContent = fmtDuration(0);
+  const header = document.querySelector(".gfs-header");
+  if (header) header.classList.add("header-danger");
+  // Freeze the screen for exactly 2 seconds: no score changes, no precision
+  // token spending, before moving on to the final overview.
+  const fullscreenEl = document.getElementById("guided-fullscreen");
+  if (fullscreenEl) fullscreenEl.classList.add("gfs-frozen");
+  setTimeout(async () => {
+    if (state.guidedRun !== gr) return; // run was cancelled/replaced meanwhile
+    stopGuidedTimer();
+    const { run } = gr;
+    const now = Date.now();
+    run.finishedAt = now;
+    run.totalTimeMs = now - gr.matchStartTs;
+    await dbPut("runs", run);
+    renderGuidedOverview();
+  }, 2000);
 }
 function stopGuidedTimer() {
   if (state.guidedRun?.timerHandle) clearInterval(state.guidedRun.timerHandle);
+  if (state.guidedRun?.timeout30) clearTimeout(state.guidedRun.timeout30);
+  if (state.guidedRun?.timeoutBuzzer) clearTimeout(state.guidedRun.timeoutBuzzer);
 }
 function liveTimerHTML() {
   return fmtDuration(Math.max(0, MATCH_LENGTH_MS - (Date.now() - state.guidedRun.matchStartTs)));
@@ -1927,7 +1945,7 @@ function renderCurrentTaskScreen() {
   const canGoBack = taskIdx > 0 || missionIdxInLeg > 0;
   openGuidedFullscreen(`
     <div class="gfs-header">
-      ${gfsHeaderTopHTML(`${esc(leg.name)} &middot; Mission ${missionIdxInLeg + 1} of ${legMissions.length} &middot; Task ${taskIdx + 1} of ${tasks.length}`, true, canGoBack)}
+      ${gfsHeaderTopHTML(esc(leg.name), true, canGoBack)}
       ${precisionTokenWidgetHTML()}
       <h2 class="gfs-mission-name">${esc(mission.name)}</h2>
       <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
