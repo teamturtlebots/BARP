@@ -348,7 +348,15 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .mission-expand-target { cursor: pointer; }
 .mission-expand-target:active { background: var(--paper-3); }
 .mission-expand-chevron { font-size: 1.1rem; flex: none; color: var(--moss); width: 24px; text-align: center; }
-.task-list { margin: 6px 0 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+.task-list { margin: 6px 0 14px 20px; display: flex; flex-direction: column; gap: 8px; }
+.btn-add-inline {
+  display: inline-flex; align-items: center; gap: 5px; align-self: flex-start;
+  background: none; border: 1.5px dashed var(--line); border-radius: 20px;
+  padding: 5px 13px 5px 10px; font-size: 0.8rem; font-weight: 600; color: var(--moss);
+  cursor: pointer; font-family: var(--body);
+}
+.btn-add-inline:hover { background: var(--paper-2); border-color: var(--moss-light); }
+.btn-add-inline .plus-icon { font-size: 0.95rem; line-height: 1; }
 .task-row {
   background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
   padding: 8px 10px; display: flex; align-items: center; gap: 10px;

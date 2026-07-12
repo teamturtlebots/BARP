@@ -144,7 +144,7 @@ async function openBackupMenu() {
   items.sort((a, b) => b.takenAt - a.takenAt);
 
   openModal(`
-    <h2>Restore a backup</h2>
+    <h2>Restore from automatic backup</h2>
     ${lastPreRestoreSnapshot ? `<button type="button" class="btn btn-amber btn-full" id="btn-redo-restore" style="margin-bottom:14px;">&#8635; Redo (undo the last restore)</button>` : ""}
     <p class="empty-sub">Pick a point in time to restore everything back to — a snapshot is saved automatically right before every deletion and every change to attachments, runs, missions, or tasks.</p>
     <div id="backup-menu-list" class="mission-list">
@@ -199,8 +199,22 @@ const state = {
   editingAttachmentOrder: false,
   editingAllOrder: false,
   equipmentInspectionEnabled: true,
+  keepGoingAfterBuzzer: false,
   guidedRun: null, // { run, legIdx, missionIdxInLeg, taskIdx, matchStartTs, ... }
+  sessionCreated: { attachments: new Set(), runGroups: new Set(), missions: new Set(), tasks: new Set() },
 };
+
+// Call right after something new is created, and again right before it's
+// deleted. If it was created earlier in this same session, the "before
+// adding" snapshot already covers rolling that back, so the delete doesn't
+// need its own redundant restore point — e.g. add a task then immediately
+// delete it shouldn't log two backup entries for a change that nets to zero.
+function markCreatedThisSession(kind, id) { state.sessionCreated[kind].add(id); }
+async function snapshotBeforeDelete(kind, id, label) {
+  const set = state.sessionCreated[kind];
+  if (set.has(id)) { set.delete(id); return; }
+  await snapshotBeforeChange(label);
+}
 
 // ---------- Visible error reporting ----------
 // If a click handler throws, buttons can look "dead" (the CSS :active press
@@ -692,7 +706,7 @@ function renderAttachmentsSetup() {
         row.querySelector('[data-act="edit"]').addEventListener("click", () => openAttachmentModal(att));
         row.querySelector('[data-act="del"]').addEventListener("click", async () => {
           if (confirm(`Delete "${att.name}" and everything logged under it?`)) {
-            await snapshotBeforeChange(`Before deleting attachment "${att.name}"`);
+            await snapshotBeforeDelete("attachments", att.id, `Before deleting attachment "${att.name}"`);
             const entries = await dbGetByIndex("entries", "byAttachment", att.id);
             for (const en of entries) await dbDelete("entries", en.id);
             await dbDelete("attachments", att.id);
@@ -802,7 +816,7 @@ function openAttachmentModal(att) {
     if (!isEdit) record.createdAt = Date.now();
     await snapshotBeforeChange(isEdit ? `Before editing attachment "${att.name}"` : "Before adding a new attachment");
     const id = await dbPut("attachments", record);
-    if (!isEdit) state.selectedAttachmentIds.add(id);
+    if (!isEdit) { state.selectedAttachmentIds.add(id); markCreatedThisSession("attachments", id); }
     closeModal();
     await loadAttachments();
   });
@@ -1080,9 +1094,44 @@ function renderOrderToolbarTop() {
 // run assignment is read from whichever run's container its row currently
 // sits in, so cross-run drags are picked up correctly.
 async function saveAllOrder() {
-  await snapshotBeforeChange("Before reordering runs, missions & tasks");
-
   const groupEls = [...document.querySelectorAll("#rungroup-list > [data-gid]")];
+
+  // Figure out whether anything was actually reordered/reassigned before
+  // touching the DB — adding/editing/deleting a mission or task already
+  // snapshots itself individually, so Save shouldn't also log a "reordering"
+  // change when the only thing that happened was, say, adding a task.
+  const beforeGroupOrder = [...state.runGroups].sort((a, b) => a.order - b.order).map((g) => g.id);
+  const beforeMissionOrder = [...state.missions]
+    .filter((m) => state.runGroups.some((g) => g.id === m.runGroupId))
+    .sort((a, b) => a.order - b.order)
+    .map((m) => [m.id, m.runGroupId]);
+  const beforeTaskOrder = state.missions.map((m) => [m.id, (m.tasks || []).map((t) => t.id)]);
+
+  const afterGroupOrder = groupEls.map((el) => Number(el.dataset.gid));
+  const afterMissionOrder = [];
+  const afterTaskOrderMap = {};
+  groupEls.forEach((groupEl) => {
+    const gid = Number(groupEl.dataset.gid);
+    const missionListContainer = groupEl.querySelector(":scope > .task-list");
+    if (!missionListContainer) return;
+    const missionEls = [...missionListContainer.querySelectorAll(":scope > [data-mid]")];
+    missionEls.forEach((mEl) => afterMissionOrder.push([Number(mEl.dataset.mid), gid]));
+  });
+  const allMissionEls = [...document.querySelectorAll("[data-mid]")];
+  for (const mEl of allMissionEls) {
+    const mid = Number(mEl.dataset.mid);
+    const taskEls = [...mEl.querySelectorAll(":scope > .task-list > [data-tid]")];
+    if (taskEls.length) afterTaskOrderMap[mid] = taskEls.map((te) => te.dataset.tid);
+  }
+  const afterTaskOrder = state.missions.map((m) => [m.id, afterTaskOrderMap[m.id] || (m.tasks || []).map((t) => t.id)]);
+
+  const orderChanged =
+    JSON.stringify(beforeGroupOrder) !== JSON.stringify(afterGroupOrder) ||
+    JSON.stringify(beforeMissionOrder) !== JSON.stringify(afterMissionOrder) ||
+    JSON.stringify(beforeTaskOrder) !== JSON.stringify(afterTaskOrder);
+
+  if (orderChanged) await snapshotBeforeChange("Before reordering runs, missions & tasks");
+
   groupEls.forEach((el, idx) => {
     const g = state.runGroups.find((x) => x.id === Number(el.dataset.gid));
     if (g) g.order = idx;
@@ -1100,7 +1149,6 @@ async function saveAllOrder() {
     });
   });
 
-  const allMissionEls = [...document.querySelectorAll("[data-mid]")];
   for (const mEl of allMissionEls) {
     const m = state.missions.find((x) => x.id === Number(mEl.dataset.mid));
     if (!m) continue;
@@ -1158,7 +1206,7 @@ function renderRunGroups() {
       const delBtn = wrap.querySelector('[data-act="del"]');
       if (delBtn) delBtn.addEventListener("click", async () => {
         if (confirm(`Delete "${g.name}"? Its missions move to "Unassigned" rather than being deleted.`)) {
-          await snapshotBeforeChange(`Before deleting run "${g.name}"`);
+          await snapshotBeforeDelete("runGroups", g.id, `Before deleting run "${g.name}"`);
           await dbDelete("runGroups", g.id);
           await loadRunGroups();
           await loadMissions();
@@ -1235,7 +1283,7 @@ function renderOrphanMissions(container, orphans) {
     row.querySelector('[data-act="edit"]').addEventListener("click", () => openMissionNameModal(m, null));
     row.querySelector('[data-act="del"]').addEventListener("click", async () => {
       if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
-        await snapshotBeforeChange(`Before deleting mission "${m.name}"`);
+        await snapshotBeforeDelete("missions", m.id, `Before deleting mission "${m.name}"`);
         await dbDelete("missions", m.id);
         await loadMissions();
         renderRunGroups();
@@ -1265,7 +1313,7 @@ function openRunGroupModal(g) {
     record.name = name;
     const id = await dbPut("runGroups", record);
     closeModal();
-    if (!isEdit) state.expandedRunGroups.add(id);
+    if (!isEdit) { state.expandedRunGroups.add(id); markCreatedThisSession("runGroups", id); }
     await loadRunGroups();
   });
 }
@@ -1306,7 +1354,7 @@ function renderMissionsForGroup(container, group, missionRows) {
       const delBtn = row.querySelector('[data-act="del"]');
       if (delBtn) delBtn.addEventListener("click", async () => {
         if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
-          await snapshotBeforeChange(`Before deleting mission "${m.name}"`);
+          await snapshotBeforeDelete("missions", m.id, `Before deleting mission "${m.name}"`);
           await dbDelete("missions", m.id);
           await loadMissions();
           renderRunGroups();
@@ -1322,8 +1370,8 @@ function renderMissionsForGroup(container, group, missionRows) {
   });
   if (editing) {
     const addBtn = document.createElement("button");
-    addBtn.className = "btn btn-ghost btn-full btn-sm";
-    addBtn.textContent = "+ Mission";
+    addBtn.className = "btn-add-inline";
+    addBtn.innerHTML = `<span class="plus-icon">&#43;</span> Mission`;
     addBtn.addEventListener("click", () => openMissionNameModal(null, group));
     container.appendChild(addBtn);
   }
@@ -1356,7 +1404,7 @@ function openMissionNameModal(m, group) {
     await snapshotBeforeChange(isEdit ? `Before editing mission "${m.name}"` : "Before adding a new mission");
     const id = await dbPut("missions", record);
     closeModal();
-    if (!isEdit) state.expandedMissions.add(id);
+    if (!isEdit) { state.expandedMissions.add(id); markCreatedThisSession("missions", id); }
     state.expandedRunGroups.add(newGroupId);
     await recomputeGlobalMissionOrder();
     await loadMissions();
@@ -1389,7 +1437,7 @@ function renderTaskList(container, mission) {
       row.querySelector('[data-act="edit"]').addEventListener("click", () => openTaskModal(mission, t));
       row.querySelector('[data-act="del"]').addEventListener("click", async () => {
         if (confirm(`Delete task "${t.name}"?`)) {
-          await snapshotBeforeChange(`Before deleting task "${t.name}" from mission "${mission.name}"`);
+          await snapshotBeforeDelete("tasks", t.id, `Before deleting task "${t.name}" from mission "${mission.name}"`);
           mission.tasks = mission.tasks.filter((tt) => tt.id !== t.id);
           await dbPut("missions", mission);
           await loadMissions();
@@ -1411,8 +1459,8 @@ function renderTaskList(container, mission) {
   });
   if (editing) {
     const addBtn = document.createElement("button");
-    addBtn.className = "btn btn-ghost btn-full btn-sm";
-    addBtn.textContent = "+ Task";
+    addBtn.className = "btn-add-inline";
+    addBtn.innerHTML = `<span class="plus-icon">&#43;</span> Task`;
     addBtn.addEventListener("click", () => openTaskModal(mission, null));
     container.appendChild(addBtn);
   }
@@ -1487,7 +1535,7 @@ function openTaskModal(mission, t) {
       }));
       delete record.points; delete record.max; delete record.pointsPerUnit;
     }
-    if (!isEdit) mission.tasks.push(record);
+    if (!isEdit) { mission.tasks.push(record); markCreatedThisSession("tasks", record.id); }
     await snapshotBeforeChange(isEdit ? `Before editing task "${record.name}"` : `Before adding a task to "${mission.name}"`);
     await dbPut("missions", mission);
     closeModal();
@@ -1638,6 +1686,33 @@ function playSound(key) {
     showErrorBanner(`Sound "${key}" error: ${e.name} — ${e.message}`);
   }
 }
+// Plays a sound and resolves once it actually finishes — with a fallback
+// timer so a missing/blocked file (the app ships without the copyrighted
+// FLL audio by default) never blocks the run indefinitely.
+function playSoundAndWait(key, fallbackMs) {
+  return new Promise((resolve) => {
+    const el = getSoundElement(key);
+    if (!el) { showErrorBanner(`Couldn't create audio for "${key}".`); setTimeout(resolve, fallbackMs); return; }
+    let done = false;
+    const fallbackTimer = setTimeout(finish, fallbackMs);
+    function finish() {
+      if (done) return;
+      done = true;
+      el.removeEventListener("ended", finish);
+      clearTimeout(fallbackTimer);
+      resolve();
+    }
+    el.addEventListener("ended", finish, { once: true });
+    try {
+      el.currentTime = 0;
+      const p = el.play();
+      if (p && p.catch) p.catch((err) => { showErrorBanner(`Sound "${key}" didn't play: ${err.name} — ${err.message}`); finish(); });
+    } catch (e) {
+      showErrorBanner(`Sound "${key}" error: ${e.name} — ${e.message}`);
+      finish();
+    }
+  });
+}
 
 // ---- Precision tokens ----
 function precisionTokenWidgetHTML() {
@@ -1686,6 +1761,7 @@ async function startGuidedRun() {
   if (state.equipmentInspectionEnabled) {
     renderEquipmentInspectionScreen();
   } else {
+    pendingEquipmentInspection = true; // not asking means it always counts as passed
     renderPreRunScreen();
   }
 }
@@ -1802,29 +1878,46 @@ function scheduleGuidedAlarms(gr) {
     handleTimeExpired();
   }, Math.max(0, MATCH_LENGTH_MS - (Date.now() - gr.matchStartTs)));
 }
+function currentTimerDisplay() {
+  const elapsed = Date.now() - state.guidedRun.matchStartTs;
+  const remaining = MATCH_LENGTH_MS - elapsed;
+  if (remaining >= 0) return fmtDuration(remaining);
+  if (state.keepGoingAfterBuzzer) return `+${fmtDuration(-remaining)}`;
+  return fmtDuration(0);
+}
 function tickGuidedTimer() {
   if (!state.guidedRun) return;
   const elapsed = Date.now() - state.guidedRun.matchStartTs;
-  const remaining = Math.max(0, MATCH_LENGTH_MS - elapsed);
+  const remaining = MATCH_LENGTH_MS - elapsed;
   const el = document.getElementById("grn-timer");
   const header = document.querySelector(".gfs-header");
-  if (el) el.textContent = fmtDuration(remaining);
+  if (el) el.textContent = currentTimerDisplay();
   if (header) header.classList.toggle("header-danger", remaining <= 0);
 }
 function handleTimeExpired() {
   if (!state.guidedRun || state.guidedRun.timeExpired) return;
   const gr = state.guidedRun;
   gr.timeExpired = true;
-  playSound("buzzer");
-  const el = document.getElementById("grn-timer");
-  if (el) el.textContent = fmtDuration(0);
   const header = document.querySelector(".gfs-header");
   if (header) header.classList.add("header-danger");
-  // Freeze the screen for exactly 2 seconds: no score changes, no precision
-  // token spending, before moving on to the final overview.
+
+  if (state.keepGoingAfterBuzzer) {
+    // Let the user keep scoring — the timer keeps running (now counting up
+    // past zero as overtime) instead of freezing the screen and forcing the
+    // final overview the moment the clock hits zero.
+    playSound("buzzer");
+    const el = document.getElementById("grn-timer");
+    if (el) el.textContent = currentTimerDisplay();
+    return;
+  }
+
+  const el = document.getElementById("grn-timer");
+  if (el) el.textContent = fmtDuration(0);
+  // Freeze the screen — no score changes, no precision token spending —
+  // until the buzzer sound actually finishes, then move on to the overview.
   const fullscreenEl = document.getElementById("guided-fullscreen");
   if (fullscreenEl) fullscreenEl.classList.add("gfs-frozen");
-  setTimeout(async () => {
+  playSoundAndWait("buzzer", 2000).then(async () => {
     if (state.guidedRun !== gr) return; // run was cancelled/replaced meanwhile
     stopGuidedTimer();
     const { run } = gr;
@@ -1833,7 +1926,7 @@ function handleTimeExpired() {
     run.totalTimeMs = now - gr.matchStartTs;
     await dbPut("runs", run);
     renderGuidedOverview();
-  }, 2000);
+  });
 }
 function stopGuidedTimer() {
   if (state.guidedRun?.timerHandle) clearInterval(state.guidedRun.timerHandle);
@@ -1841,7 +1934,7 @@ function stopGuidedTimer() {
   if (state.guidedRun?.timeoutBuzzer) clearTimeout(state.guidedRun.timeoutBuzzer);
 }
 function liveTimerHTML() {
-  return fmtDuration(Math.max(0, MATCH_LENGTH_MS - (Date.now() - state.guidedRun.matchStartTs)));
+  return currentTimerDisplay();
 }
 
 function openGuidedFullscreen(html) {
@@ -1852,12 +1945,14 @@ function openGuidedFullscreen(html) {
     el.className = "guided-fullscreen";
     document.body.appendChild(el);
   }
+  el.classList.remove("gfs-frozen"); // never let a leftover freeze from a
+  // cancelled/timed-out run block the next run's buttons
   el.innerHTML = html;
   el.hidden = false;
 }
 function closeGuidedFullscreen() {
   const el = document.getElementById("guided-fullscreen");
-  if (el) { el.hidden = true; el.innerHTML = ""; }
+  if (el) { el.hidden = true; el.innerHTML = ""; el.classList.remove("gfs-frozen"); }
 }
 
 function cancelGuidedRunLink() {
@@ -2478,6 +2573,16 @@ async function loadEquipmentInspectionSetting() {
   state.equipmentInspectionEnabled = rec?.value ?? true;
   equipmentInspectionInput.checked = state.equipmentInspectionEnabled;
 }
+const keepGoingAfterBuzzerInput = document.getElementById("input-keep-going-after-buzzer");
+keepGoingAfterBuzzerInput.addEventListener("change", async () => {
+  state.keepGoingAfterBuzzer = keepGoingAfterBuzzerInput.checked;
+  await dbPut("meta", { key: "keepGoingAfterBuzzer", value: state.keepGoingAfterBuzzer });
+});
+async function loadKeepGoingAfterBuzzerSetting() {
+  const rec = await dbGet("meta", "keepGoingAfterBuzzer");
+  state.keepGoingAfterBuzzer = rec?.value ?? false;
+  keepGoingAfterBuzzerInput.checked = state.keepGoingAfterBuzzer;
+}
 
 async function initAll() {
   await purgeOldTrash();
@@ -2488,6 +2593,7 @@ async function initAll() {
   await loadRuns();
   await loadSeasonName();
   await loadEquipmentInspectionSetting();
+  await loadKeepGoingAfterBuzzerSetting();
   document.getElementById("log-empty-state").hidden = state.attachments.length === 0 ? false : true;
 }
 initAll();

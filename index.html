@@ -93,7 +93,7 @@
     <div class="btn-group">
       <button class="btn btn-ghost" id="btn-export-backup">Export full backup (.json)</button>
       <button class="btn btn-ghost" id="btn-import-backup">Restore from backup file</button>
-      <button class="btn btn-ghost" id="btn-restore-shadow">Restore a backup&hellip;</button>
+      <button class="btn btn-ghost" id="btn-restore-shadow">Restore from automatic backup&hellip;</button>
     </div>
     <button class="btn btn-danger btn-full" id="btn-reset-db" style="margin-top:10px;">Reset local data</button>
     <p class="empty-sub">Only use this if the app is stuck (e.g. a database error banner). This permanently erases everything stored on this device (except backups) — export a manual backup first if you can.</p>
@@ -102,7 +102,8 @@
       <h2>Match Settings</h2>
     </div>
     <p class="empty-sub">Sound effects play automatically during a guided run — see the README for details.</p>
-    <label class="checkbox-row checkbox-row-standalone"><input type="checkbox" id="input-equipment-inspection-enabled" checked> Ask about the Equipment Inspection bonus before each run</label>
+    <label class="checkbox-row checkbox-row-standalone"><input type="checkbox" id="input-equipment-inspection-enabled" checked> Ask about the Equipment Inspection bonus before each run (if off, it always counts as passed)</label>
+    <label class="checkbox-row checkbox-row-standalone"><input type="checkbox" id="input-keep-going-after-buzzer"> Keep scoring after time runs out (timer keeps counting instead of ending the run)</label>
 
     <div class="section-row" style="margin-top:28px;">
       <h2>Notebook name</h2>
