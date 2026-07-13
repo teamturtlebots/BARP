@@ -191,7 +191,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .run-card-actions { display: flex; gap: 8px; margin-top: 10px; }
 
 /* Mission editor list */
-.mission-list { display: flex; flex-direction: column; gap: 10px; }
+.mission-list { display: flex; flex-direction: column; gap: 8px; }
 .mission-row {
   background: var(--paper-2);
   border: 1px solid var(--line);
@@ -348,15 +348,9 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .mission-expand-target { cursor: pointer; }
 .mission-expand-target:active { background: var(--paper-3); }
 .mission-expand-chevron { font-size: 1.1rem; flex: none; color: var(--moss); width: 24px; text-align: center; }
-.task-list { margin: 6px 0 14px 20px; display: flex; flex-direction: column; gap: 8px; }
-.btn-add-inline {
-  display: inline-flex; align-items: center; gap: 5px; align-self: flex-start;
-  background: none; border: 1.5px dashed var(--line); border-radius: 20px;
-  padding: 5px 13px 5px 10px; font-size: 0.8rem; font-weight: 600; color: var(--moss);
-  cursor: pointer; font-family: var(--body);
-}
-.btn-add-inline:hover { background: var(--paper-2); border-color: var(--moss-light); }
-.btn-add-inline .plus-icon { font-size: 0.95rem; line-height: 1; }
+.task-list { margin: 8px 0 0 20px; display: flex; flex-direction: column; gap: 8px; }
+.btn-icon-add { color: var(--moss); font-size: 1.3rem; font-weight: 700; }
+.btn-icon-add:hover { color: var(--moss-light); }
 .task-row {
   background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
   padding: 8px 10px; display: flex; align-items: center; gap: 10px;
@@ -431,6 +425,30 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .camera-controls { display: flex; gap: 8px; margin-top: 8px; }
 .camera-controls .btn { flex: 1; }
 
+/* --- Added: interactive iteration logging flow --- */
+.iter-attachment-grid { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+.iter-attachment-btn {
+  padding: 16px; border-radius: 10px; border: 1.5px solid var(--line);
+  background: var(--paper-2); color: var(--text); font-family: var(--body);
+  font-weight: 600; font-size: 1rem; cursor: pointer; text-align: left;
+}
+.iter-attachment-btn.active { border-color: var(--moss); background: var(--moss); color: var(--paper); }
+.size-picker-big { flex-direction: column; gap: 12px; width: 100%; }
+.size-picker-big .size-btn { padding: 20px; font-size: 1.1rem; }
+#iter-camera-video { width: 100%; border-radius: 12px; background: #000; display: block; }
+.iter-shutter-row { display: flex; align-items: center; justify-content: space-between; padding: 0 24px; margin: 16px 0; }
+.iter-shutter-btn {
+  width: 68px; height: 68px; border-radius: 50%; flex: none;
+  background: var(--paper); border: 4px solid var(--ink-deep); cursor: pointer;
+}
+.iter-shutter-btn:active { background: var(--paper-3); }
+.iter-upload-btn {
+  width: 40px; height: 40px; border-radius: 50%; flex: none;
+  background: rgba(255,255,255,0.14); border: 1.5px solid var(--moss-light);
+  color: var(--paper); font-size: 1.1rem; cursor: pointer;
+}
+.iter-shutter-spacer { width: 40px; flex: none; }
+
 /* --- Added: disabled button state (used by type-to-confirm delete) --- */
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn:disabled:active { transform: none; }
@@ -478,6 +496,8 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 }
 .gfs-mission-name { color: var(--paper); font-size: 1.3rem; margin: 6px 0 10px; }
 .gfs-timer { font-family: var(--mono); font-size: 2.6rem; color: var(--amber); font-weight: 700; line-height: 1; }
+.gfs-timer-row { display: flex; align-items: baseline; justify-content: center; gap: 18px; }
+.gfs-points { font-family: var(--mono); font-size: 1.3rem; color: var(--paper); font-weight: 600; opacity: 0.85; }
 .gfs-timer-label { font-size: 0.72rem; color: var(--moss-light); text-transform: uppercase; letter-spacing: 0.04em; }
 
 .gfs-body { flex: 1; overflow-y: auto; padding: 16px; }
@@ -486,6 +506,15 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .gfs-section h3 { font-size: 0.95rem; text-transform: none; letter-spacing: normal; color: var(--ink-deep); font-family: var(--display); font-weight: 700; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 2px solid var(--amber); }
 .gfs-subsection { margin-bottom: 16px; margin-left: 4px; }
 .gfs-subsection h4 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-soft); margin: 0 0 6px; }
+.brk-tabs { display: flex; gap: 6px; margin-top: 12px; }
+.brk-tab-btn {
+  flex: 1; background: rgba(255,255,255,0.1); border: none; border-radius: 8px 8px 0 0;
+  color: var(--moss-light); font-family: var(--body); font-weight: 600; font-size: 0.85rem;
+  padding: 8px 0; cursor: pointer;
+}
+.brk-tab-btn.active { background: var(--paper); color: var(--ink-deep); }
+.brk-readonly button { pointer-events: none; }
+.brk-transition-row { font-style: italic; margin: 6px 0 18px; }
 .gfs-task-list { display: flex; flex-direction: column; gap: 8px; }
 
 .gfs-task-row {

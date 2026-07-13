@@ -200,6 +200,7 @@ const state = {
   editingAllOrder: false,
   equipmentInspectionEnabled: true,
   keepGoingAfterBuzzer: false,
+  interactiveIterationsEnabled: false,
   guidedRun: null, // { run, legIdx, missionIdxInLeg, taskIdx, matchStartTs, ... }
   sessionCreated: { attachments: new Set(), runGroups: new Set(), missions: new Set(), tasks: new Set() },
 };
@@ -834,6 +835,11 @@ function openRecordIterationModal() {
     document.getElementById("m-close").addEventListener("click", closeModal);
     return;
   }
+  if (state.interactiveIterationsEnabled) { startInteractiveIterationFlow(); return; }
+  openRecordIterationModalClassic();
+}
+
+function openRecordIterationModalClassic() {
   pendingPhoto = null;
   pendingSize = "small";
   const defaultAttId = state.selectedAttachmentIds.size === 1 ? [...state.selectedAttachmentIds][0] : state.attachments[0].id;
@@ -922,6 +928,206 @@ function openRecordIterationModal() {
     await dbPut("entries", { attachmentId, timestamp: Date.now(), photo: pendingPhoto, whatChanged, whyChanged, size: pendingSize });
     state.selectedAttachmentIds.add(attachmentId);
     closeModal();
+    renderAttachmentChips();
+    await renderEntryList();
+    await renderIterationTotal();
+    renderAttachmentsSetup();
+  });
+}
+
+// ---- Interactive iteration logging: one step at a time, camera-first ----
+const ITER_STEPS = ["attachment", "size", "photo", "what", "why"];
+function startInteractiveIterationFlow() {
+  state.iterFlow = {
+    step: 0,
+    attachmentId: state.selectedAttachmentIds.size === 1 ? [...state.selectedAttachmentIds][0] : state.attachments[0].id,
+    size: "small",
+    photo: null,
+    what: "",
+    why: "",
+  };
+  renderIterStep();
+}
+function renderIterStep() {
+  iterStopCameraStream(); // leaving/entering any step other than photo shouldn't leave the camera running
+  const step = ITER_STEPS[state.iterFlow.step];
+  if (step === "attachment") renderIterAttachmentStep();
+  else if (step === "size") renderIterSizeStep();
+  else if (step === "photo") renderIterPhotoStep();
+  else if (step === "what") renderIterWhatStep();
+  else renderIterWhyStep();
+}
+function iterHeaderHTML(title) {
+  const canBack = state.iterFlow.step > 0;
+  return `<div class="gfs-header">
+    <div class="gfs-header-top">
+      <button type="button" class="gfs-cancel-x" id="iter-cancel" title="Cancel">&#10005;</button>
+      <button type="button" class="gfs-back-btn" id="iter-back" ${canBack ? "" : "disabled"}>&#8592;</button>
+      <div class="guided-phase-badge">Record Iteration</div>
+    </div>
+    <h2 class="gfs-mission-name">${esc(title)}</h2>
+  </div>`;
+}
+function wireIterNav() {
+  document.getElementById("iter-cancel").addEventListener("click", () => {
+    if (!confirm("Discard this iteration entry?")) return;
+    iterStopCameraStream();
+    stopRecognizer();
+    state.iterFlow = null;
+    closeGuidedFullscreen();
+  });
+  const back = document.getElementById("iter-back");
+  if (back && state.iterFlow.step > 0) {
+    back.addEventListener("click", () => { state.iterFlow.step--; renderIterStep(); });
+  }
+}
+function renderIterAttachmentStep() {
+  openGuidedFullscreen(`
+    ${iterHeaderHTML("Which attachment?")}
+    <div class="gfs-body gfs-center">
+      <div class="iter-attachment-grid">
+        ${state.attachments.map((a) => `<button type="button" class="iter-attachment-btn${a.id === state.iterFlow.attachmentId ? " active" : ""}" data-id="${a.id}">#${esc(a.number)} ${esc(a.name)}</button>`).join("")}
+      </div>
+    </div>
+    <div class="gfs-footer"></div>
+  `);
+  wireIterNav();
+  document.querySelectorAll(".iter-attachment-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.iterFlow.attachmentId = Number(btn.dataset.id);
+      state.iterFlow.step++;
+      renderIterStep();
+    });
+  });
+}
+function renderIterSizeStep() {
+  openGuidedFullscreen(`
+    ${iterHeaderHTML("Size of this iteration?")}
+    <div class="gfs-body gfs-center">
+      <div class="size-picker size-picker-big" id="iter-size-picker">
+        <button type="button" class="size-btn${state.iterFlow.size === "small" ? " active" : ""}" data-size="small">Small<span>bug fix</span></button>
+        <button type="button" class="size-btn${state.iterFlow.size === "moderate" ? " active" : ""}" data-size="moderate">Moderate<span>a real change</span></button>
+        <button type="button" class="size-btn${state.iterFlow.size === "major" ? " active" : ""}" data-size="major">Major<span>strategy change</span></button>
+      </div>
+    </div>
+    <div class="gfs-footer"></div>
+  `);
+  wireIterNav();
+  document.querySelectorAll("#iter-size-picker .size-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.iterFlow.size = btn.dataset.size;
+      state.iterFlow.step++;
+      renderIterStep();
+    });
+  });
+}
+async function iterStartCamera() {
+  try {
+    activeCameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+    const video = document.getElementById("iter-camera-video");
+    if (video) video.srcObject = activeCameraStream;
+  } catch (err) {
+    showErrorBanner("Couldn't access the camera (" + (err.message || err.name) + ") — use the upload button instead.");
+  }
+}
+function iterStopCameraStream() {
+  if (activeCameraStream) { activeCameraStream.getTracks().forEach((t) => t.stop()); activeCameraStream = null; }
+}
+function iterCapturePhoto() {
+  const video = document.getElementById("iter-camera-video");
+  if (!video || !video.videoWidth) return;
+  const maxDim = 900;
+  let { videoWidth: width, videoHeight: height } = video;
+  if (width > height && width > maxDim) { height = Math.round(height * (maxDim / width)); width = maxDim; }
+  else if (height > maxDim) { width = Math.round(width * (maxDim / height)); height = maxDim; }
+  const canvas = document.createElement("canvas");
+  canvas.width = width; canvas.height = height;
+  canvas.getContext("2d").drawImage(video, 0, 0, width, height);
+  state.iterFlow.photo = canvas.toDataURL("image/jpeg", 0.72);
+  const wrap = document.getElementById("iter-photo-preview");
+  if (wrap) wrap.innerHTML = `<img class="photo-preview" src="${state.iterFlow.photo}">`;
+  const nextBtn = document.getElementById("iter-photo-next");
+  if (nextBtn) nextBtn.textContent = "Next";
+}
+function renderIterPhotoStep() {
+  openGuidedFullscreen(`
+    ${iterHeaderHTML("Take a photo")}
+    <div class="gfs-body gfs-center">
+      <div class="photo-preview-wrap" id="iter-photo-preview">${state.iterFlow.photo ? `<img class="photo-preview" src="${state.iterFlow.photo}">` : ""}</div>
+      <div class="camera-view" id="iter-camera-view"><video id="iter-camera-video" autoplay playsinline muted></video></div>
+      <div class="iter-shutter-row">
+        <button type="button" class="iter-upload-btn" id="iter-upload-btn" title="Upload a photo instead">&#128193;</button>
+        <button type="button" class="iter-shutter-btn" id="iter-shutter-btn" title="Capture"></button>
+        <span class="iter-shutter-spacer"></span>
+      </div>
+      <input type="file" accept="image/*" id="iter-photo-file" hidden>
+    </div>
+    <div class="gfs-footer">
+      <button type="button" class="btn btn-primary btn-full" id="iter-photo-next">${state.iterFlow.photo ? "Next" : "Skip photo"}</button>
+    </div>
+  `);
+  wireIterNav();
+  iterStartCamera(); // camera opens immediately — this step is camera-first, not a choice screen
+  document.getElementById("iter-shutter-btn").addEventListener("click", iterCapturePhoto);
+  document.getElementById("iter-upload-btn").addEventListener("click", () => document.getElementById("iter-photo-file").click());
+  document.getElementById("iter-photo-file").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    iterStopCameraStream();
+    state.iterFlow.photo = await resizeImageToDataURL(file, 900, 0.72);
+    const wrap = document.getElementById("iter-photo-preview");
+    if (wrap) wrap.innerHTML = `<img class="photo-preview" src="${state.iterFlow.photo}">`;
+    document.getElementById("iter-photo-next").textContent = "Next";
+  });
+  document.getElementById("iter-photo-next").addEventListener("click", () => {
+    state.iterFlow.step++;
+    renderIterStep();
+  });
+}
+function renderIterWhatStep() {
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  openGuidedFullscreen(`
+    ${iterHeaderHTML("What changed?")}
+    <div class="gfs-body gfs-center">
+      ${SpeechRec ? `<div class="voice-row"><button class="btn btn-ghost" id="iter-voice-1" type="button">&#127908; Dictate</button><span class="voice-status" id="iter-voice-status-1"></span></div>` : ""}
+      <textarea class="textarea-input" id="iter-what" placeholder="e.g. Swapped the claw's gear ratio from 1:1 to 3:1">${esc(state.iterFlow.what)}</textarea>
+    </div>
+    <div class="gfs-footer">
+      <button type="button" class="btn btn-primary btn-full" id="iter-what-next">Next</button>
+    </div>
+  `);
+  wireIterNav();
+  if (SpeechRec) document.getElementById("iter-voice-1").addEventListener("click", () => toggleVoiceNote(SpeechRec, "iter-what", "iter-voice-status-1", "iter-voice-1"));
+  document.getElementById("iter-what-next").addEventListener("click", () => {
+    stopRecognizer();
+    state.iterFlow.what = document.getElementById("iter-what").value.trim();
+    state.iterFlow.step++;
+    renderIterStep();
+  });
+}
+function renderIterWhyStep() {
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  openGuidedFullscreen(`
+    ${iterHeaderHTML("Why changed?")}
+    <div class="gfs-body gfs-center">
+      ${SpeechRec ? `<div class="voice-row"><button class="btn btn-ghost" id="iter-voice-2" type="button">&#127908; Dictate</button><span class="voice-status" id="iter-voice-status-2"></span></div>` : ""}
+      <textarea class="textarea-input" id="iter-why" placeholder="e.g. It was stalling under load on the last run">${esc(state.iterFlow.why)}</textarea>
+    </div>
+    <div class="gfs-footer">
+      <button type="button" class="btn btn-primary btn-full" id="iter-save">Save entry</button>
+    </div>
+  `);
+  wireIterNav();
+  if (SpeechRec) document.getElementById("iter-voice-2").addEventListener("click", () => toggleVoiceNote(SpeechRec, "iter-why", "iter-voice-status-2", "iter-voice-2"));
+  document.getElementById("iter-save").addEventListener("click", async () => {
+    stopRecognizer();
+    state.iterFlow.why = document.getElementById("iter-why").value.trim();
+    const { attachmentId, size, photo, what, why } = state.iterFlow;
+    if (!what && !why && !photo) { alert("Add a photo or a note first."); return; }
+    await dbPut("entries", { attachmentId, timestamp: Date.now(), photo, whatChanged: what, whyChanged: why, size });
+    state.selectedAttachmentIds.add(attachmentId);
+    state.iterFlow = null;
+    closeGuidedFullscreen();
     renderAttachmentChips();
     await renderEntryList();
     await renderIterationTotal();
@@ -1191,7 +1397,7 @@ function renderRunGroups() {
           <div class="m-name">${esc(g.name)}</div>
           <div class="m-sub">${groupMissions.length} mission${groupMissions.length === 1 ? "" : "s"}</div>
         </div>
-        ${editing ? `<button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>` : ""}
+        ${editing ? `<button class="btn-icon btn-icon-add" data-act="add-mission" title="Add a mission">&#43;</button><button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>` : ""}
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
@@ -1201,6 +1407,8 @@ function renderRunGroups() {
         renderRunGroups();
       });
     } else {
+      const addBtn = wrap.querySelector('[data-act="add-mission"]');
+      if (addBtn) addBtn.addEventListener("click", () => openMissionNameModal(null, g));
       const editBtn = wrap.querySelector('[data-act="edit"]');
       if (editBtn) editBtn.addEventListener("click", () => openRunGroupModal(g));
       const delBtn = wrap.querySelector('[data-act="del"]');
@@ -1270,16 +1478,18 @@ function renderOrphanMissions(container, orphans) {
           <div class="m-name">${esc(m.name)}</div>
           <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts</div>
         </div>
+        <button class="btn-icon btn-icon-add" data-act="add-task" title="Add a task">&#43;</button>
         <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
         <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
     row.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
-      if (e.target.closest('[data-act="edit"], [data-act="del"]')) return;
+      if (e.target.closest('[data-act="edit"], [data-act="del"], [data-act="add-task"]')) return;
       if (expanded) state.expandedMissions.delete(m.id); else state.expandedMissions.add(m.id);
       renderRunGroups();
     });
+    row.querySelector('[data-act="add-task"]').addEventListener("click", () => openTaskModal(m, null));
     row.querySelector('[data-act="edit"]').addEventListener("click", () => openMissionNameModal(m, null));
     row.querySelector('[data-act="del"]').addEventListener("click", async () => {
       if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
@@ -1339,7 +1549,7 @@ function renderMissionsForGroup(container, group, missionRows) {
           <div class="m-name">${esc(m.name)}</div>
           <div class="m-sub">${(m.tasks || []).length} task${(m.tasks || []).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts</div>
         </div>
-        ${editing ? `<button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>` : ""}
+        ${editing ? `<button class="btn-icon btn-icon-add" data-act="add-task" title="Add a task">&#43;</button><button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>` : ""}
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
@@ -1349,6 +1559,8 @@ function renderMissionsForGroup(container, group, missionRows) {
         renderRunGroups();
       });
     } else {
+      const addBtn = row.querySelector('[data-act="add-task"]');
+      if (addBtn) addBtn.addEventListener("click", () => openTaskModal(m, null));
       const editBtn = row.querySelector('[data-act="edit"]');
       if (editBtn) editBtn.addEventListener("click", () => openMissionNameModal(m, group));
       const delBtn = row.querySelector('[data-act="del"]');
@@ -1368,13 +1580,6 @@ function renderMissionsForGroup(container, group, missionRows) {
     }
     container.appendChild(row);
   });
-  if (editing) {
-    const addBtn = document.createElement("button");
-    addBtn.className = "btn-add-inline";
-    addBtn.innerHTML = `<span class="plus-icon">&#43;</span> Mission`;
-    addBtn.addEventListener("click", () => openMissionNameModal(null, group));
-    container.appendChild(addBtn);
-  }
 }
 
 function openMissionNameModal(m, group) {
@@ -1457,13 +1662,6 @@ function renderTaskList(container, mission) {
     `;
     container.appendChild(row);
   });
-  if (editing) {
-    const addBtn = document.createElement("button");
-    addBtn.className = "btn-add-inline";
-    addBtn.innerHTML = `<span class="plus-icon">&#43;</span> Task`;
-    addBtn.addEventListener("click", () => openTaskModal(mission, null));
-    container.appendChild(addBtn);
-  }
 }
 
 function openTaskModal(mission, t) {
@@ -1647,70 +1845,66 @@ const SOUND_FILES = {
   thirty: "sounds/thirty-seconds.mp3",
   buzzer: "sounds/buzzer.mp3",
 };
-const soundElements = {};
-function getSoundElement(key) {
-  if (!soundElements[key]) {
-    try {
-      const el = document.createElement("audio");
-      el.src = SOUND_FILES[key];
-      el.preload = "auto";
-      el.style.display = "none";
-      document.body.appendChild(el);
-      soundElements[key] = el;
-    } catch (e) { return null; }
+// Web Audio API instead of <audio> elements: HTMLMediaElement playback has
+// real, inconsistent latency (seek + decode pipeline) even after being
+// "unlocked" once. Decoding every sound into an AudioBuffer up front means
+// actually playing it later is just starting a buffer — effectively instant.
+let audioCtx = null;
+const audioBuffers = {};
+function getAudioCtx() {
+  if (!audioCtx) {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return null;
+    audioCtx = new Ctor();
   }
-  return soundElements[key];
+  return audioCtx;
 }
+async function preloadSound(key) {
+  const ctx = getAudioCtx();
+  if (!ctx) return;
+  try {
+    const resp = await fetch(SOUND_FILES[key]);
+    if (!resp.ok) return; // file not shipped (copyrighted audio) — fine, playback just no-ops
+    const arr = await resp.arrayBuffer();
+    audioBuffers[key] = await ctx.decodeAudioData(arr);
+  } catch (e) { /* missing/undecodable file — playSound will just no-op below */ }
+}
+function preloadAllSounds() { Object.keys(SOUND_FILES).forEach(preloadSound); }
 function unlockAllSounds() {
-  Object.keys(SOUND_FILES).forEach((key) => {
-    const el = getSoundElement(key);
-    if (!el) { showErrorBanner(`Couldn't create audio for "${key}" — Audio API unavailable.`); return; }
-    const prevVolume = el.volume;
-    el.volume = 0;
-    let p;
-    try { p = el.play(); } catch (err) { showErrorBanner(`Unlocking "${key}" threw: ${err.name} — ${err.message}`); el.volume = prevVolume; return; }
-    if (p && p.catch) {
-      p.then(() => { el.pause(); el.currentTime = 0; el.volume = prevVolume; })
-       .catch((err) => { el.volume = prevVolume; showErrorBanner(`Unlocking "${key}" failed: ${err.name} — ${err.message}`); });
-    }
-  });
+  // Must be called from directly inside a click handler (a real user
+  // gesture) — this is what lets the AudioContext actually produce sound on
+  // iOS/Chrome's autoplay policies. Decoding already happened at load time.
+  const ctx = getAudioCtx();
+  if (ctx && ctx.state === "suspended") ctx.resume();
 }
 function playSound(key) {
-  const el = getSoundElement(key);
-  if (!el) { showErrorBanner(`Couldn't create audio for "${key}".`); return; }
-  try {
-    el.currentTime = 0;
-    const p = el.play();
-    if (p && p.catch) p.catch((err) => showErrorBanner(`Sound "${key}" didn't play: ${err.name} — ${err.message}`));
-  } catch (e) {
-    showErrorBanner(`Sound "${key}" error: ${e.name} — ${e.message}`);
-  }
+  const ctx = getAudioCtx();
+  const buf = audioBuffers[key];
+  if (!ctx || !buf) return; // missing file — silently no-op, same as before
+  if (ctx.state === "suspended") ctx.resume();
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  src.start(0);
+  return src;
 }
-// Plays a sound and resolves once it actually finishes — with a fallback
-// timer so a missing/blocked file (the app ships without the copyrighted
-// FLL audio by default) never blocks the run indefinitely.
+// Plays a sound and resolves once it actually finishes — using the buffer's
+// real decoded duration, with a fallback timer in case the file is missing
+// (the app ships without the copyrighted FLL audio by default).
 function playSoundAndWait(key, fallbackMs) {
   return new Promise((resolve) => {
-    const el = getSoundElement(key);
-    if (!el) { showErrorBanner(`Couldn't create audio for "${key}".`); setTimeout(resolve, fallbackMs); return; }
+    const ctx = getAudioCtx();
+    const buf = audioBuffers[key];
+    if (!ctx || !buf) { setTimeout(resolve, fallbackMs); return; }
+    if (ctx.state === "suspended") ctx.resume();
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
     let done = false;
-    const fallbackTimer = setTimeout(finish, fallbackMs);
-    function finish() {
-      if (done) return;
-      done = true;
-      el.removeEventListener("ended", finish);
-      clearTimeout(fallbackTimer);
-      resolve();
-    }
-    el.addEventListener("ended", finish, { once: true });
-    try {
-      el.currentTime = 0;
-      const p = el.play();
-      if (p && p.catch) p.catch((err) => { showErrorBanner(`Sound "${key}" didn't play: ${err.name} — ${err.message}`); finish(); });
-    } catch (e) {
-      showErrorBanner(`Sound "${key}" error: ${e.name} — ${e.message}`);
-      finish();
-    }
+    const finish = () => { if (done) return; done = true; resolve(); };
+    src.onended = finish;
+    setTimeout(finish, buf.duration * 1000 + 100); // safety net alongside onended
+    src.start(0);
   });
 }
 
@@ -1936,6 +2130,10 @@ function stopGuidedTimer() {
 function liveTimerHTML() {
   return currentTimerDisplay();
 }
+function liveScoreHTML() {
+  if (!state.guidedRun) return "0 / 0";
+  return `${runTotal(state.guidedRun.run, state.missions)} / ${runMaxPoints(state.missions)}`;
+}
 
 function openGuidedFullscreen(html) {
   let el = document.getElementById("guided-fullscreen");
@@ -2058,7 +2256,10 @@ function renderCurrentTaskScreen() {
       ${gfsHeaderTopHTML(esc(leg.name), true, canGoBack)}
       ${precisionTokenWidgetHTML()}
       <h2 class="gfs-mission-name">${esc(mission.name)}</h2>
-      <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
+      <div class="gfs-timer-row">
+        <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
+        <div class="gfs-points" id="grn-points">${liveScoreHTML()} pts</div>
+      </div>
     </div>
     <div class="gfs-body gfs-center">
       <p class="gfs-task-prompt">${esc(task.name)} <span class="gfs-task-pts">/ ${taskMaxPoints(task)} pts</span></p>
@@ -2128,7 +2329,10 @@ function renderRobotReturnedScreen() {
       ${gfsHeaderTopHTML(esc(leg.name), true, true)}
       ${precisionTokenWidgetHTML()}
       <h2 class="gfs-mission-name">All missions done for this run</h2>
-      <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
+      <div class="gfs-timer-row">
+        <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
+        <div class="gfs-points" id="grn-points">${liveScoreHTML()} pts</div>
+      </div>
     </div>
     <div class="gfs-body gfs-center">
       <p class="empty-sub">Every mission in "${esc(leg.name)}" is marked.</p>
@@ -2174,7 +2378,10 @@ function renderGuidedTransitionPhase() {
       ${gfsHeaderTopHTML("Transition", false, false)}
       ${precisionTokenWidgetHTML()}
       <h2 class="gfs-mission-name">Heading to: ${esc(nextLeg.name)}</h2>
-      <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
+      <div class="gfs-timer-row">
+        <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
+        <div class="gfs-points" id="grn-points">${liveScoreHTML()} pts</div>
+      </div>
     </div>
     <div class="gfs-body gfs-center">
       <p class="empty-sub">Tap when the robot leaves base for the next run.</p>
@@ -2198,10 +2405,9 @@ function renderGuidedOverview() {
   openGuidedFullscreen(`
     <div class="gfs-header">
       ${gfsHeaderTopHTML("Final overview", false, false)}
-      ${precisionTokenWidgetHTML()}
       <h2 class="gfs-mission-name">${esc(run.label)}</h2>
       <div class="gfs-timer" id="gfs-overview-total">${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}</div>
-      <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs)} total time &middot; ${run.precisionTokensRemaining ?? 0} tokens left &middot; inspection ${run.equipmentInspectionPassed ? `passed (+${EQUIPMENT_INSPECTION_BONUS})` : "not passed"} &middot; review below or save now</div>
+      <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs)} total time &middot; review below or save now</div>
       <button class="btn btn-primary btn-full" id="grn-save-top" type="button" style="margin-top:12px;">&#10003; Save &amp; Finish</button>
     </div>
     <div class="gfs-body" id="gfs-overview-body"></div>
@@ -2211,7 +2417,6 @@ function renderGuidedOverview() {
   `);
   renderOverviewBody();
   wireCancelLink();
-  wirePrecisionTokenButton();
   document.getElementById("grn-save-top").addEventListener("click", finalizeGuidedRun);
   document.getElementById("grn-save-bottom").addEventListener("click", finalizeGuidedRun);
 }
@@ -2219,7 +2424,25 @@ function renderGuidedOverview() {
 function renderOverviewBody() {
   const { run } = state.guidedRun;
   const body = document.getElementById("gfs-overview-body");
-  body.innerHTML = state.runGroups.map((leg) => {
+  const inspectionOn = !!run.equipmentInspectionPassed;
+  const tokensLeft = run.precisionTokensRemaining ?? 0;
+  const bonusHTML = `<div class="gfs-section">
+    <h3>Bonuses</h3>
+    <div class="gfs-task-row gfs-task-row-wrap">
+      <span class="gfs-task-name">Equipment Inspection <span class="gfs-task-pts">${inspectionOn ? EQUIPMENT_INSPECTION_BONUS : 0} / ${EQUIPMENT_INSPECTION_BONUS}</span></span>
+      <div class="gfs-choice-strip">
+        <button type="button" class="gfs-choice-btn${inspectionOn ? " active" : ""}" data-special="inspection" data-val="yes">Yes</button>
+        <button type="button" class="gfs-choice-btn${!inspectionOn ? " active" : ""}" data-special="inspection" data-val="no">No</button>
+      </div>
+    </div>
+    <div class="gfs-task-row gfs-task-row-wrap">
+      <span class="gfs-task-name">Precision Tokens Left <span class="gfs-task-pts">+${precisionTokenBonus(tokensLeft)} pts</span></span>
+      <div class="gfs-num-strip">${Array.from({ length: 7 }, (_, i) =>
+        `<button type="button" class="gfs-num-btn${tokensLeft === i ? " active" : ""}" data-special="tokens" data-val="${i}">${i}</button>`
+      ).join("")}</div>
+    </div>
+  </div>`;
+  body.innerHTML = bonusHTML + state.runGroups.map((leg) => {
     const legMissions = getLegMissions(leg);
     const missionsHTML = legMissions.map((m) => {
       const score = missionScoreForRun(m, run);
@@ -2241,13 +2464,25 @@ function renderOverviewBody() {
 }
 
 function bindOverviewEvents() {
+  document.querySelectorAll('#gfs-overview-body [data-special="inspection"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.guidedRun.run.equipmentInspectionPassed = btn.dataset.val === "yes";
+      renderOverviewBody();
+    });
+  });
+  document.querySelectorAll('#gfs-overview-body [data-special="tokens"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.guidedRun.run.precisionTokensRemaining = Number(btn.dataset.val);
+      renderOverviewBody();
+    });
+  });
   document.querySelectorAll('#gfs-overview-body [data-type="bool"] .gfs-choice-btn').forEach((btn) => {
     btn.addEventListener("click", () => {
       state.guidedRun.run.rawScores[btn.dataset.tid] = btn.dataset.val === "yes";
       renderOverviewBody();
     });
   });
-  document.querySelectorAll("#gfs-overview-body .gfs-num-btn").forEach((btn) => {
+  document.querySelectorAll("#gfs-overview-body .gfs-num-btn:not([data-special])").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.guidedRun.run.rawScores[btn.dataset.tid] = Number(btn.dataset.val);
       renderOverviewBody();
@@ -2364,7 +2599,7 @@ function renderRuns() {
         <button class="btn btn-danger" data-act="del">Delete</button>
       </div>
     `;
-    card.querySelector('[data-act="view"]').addEventListener("click", () => viewRunBreakdown(run));
+    card.querySelector('[data-act="view"]').addEventListener("click", () => renderRunBreakdown(run));
     card.querySelector('[data-act="del"]').addEventListener("click", async () => {
       if (confirm(`Delete game run "${run.label}"?`)) {
         await snapshotBeforeChange(`Before deleting run "${run.label}"`);
@@ -2376,49 +2611,177 @@ function renderRuns() {
   });
 }
 
-function viewRunBreakdown(run) {
+function renderRunBreakdown(run) {
+  state.breakdown = { run, editing: false, tab: "scores" };
+  openGuidedFullscreen(`
+    <div class="gfs-header">
+      <div class="gfs-header-top">
+        <button type="button" class="gfs-back-btn" id="brk-back">&#8592;</button>
+        <div class="guided-phase-badge">${esc(run.label)}</div>
+      </div>
+      <div class="gfs-timer" id="brk-total">${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}</div>
+      <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs || 0)} total time</div>
+      <div class="brk-tabs">
+        <button type="button" class="brk-tab-btn" data-tab="scores">Scores</button>
+        <button type="button" class="brk-tab-btn" data-tab="timing">Timing</button>
+      </div>
+    </div>
+    <div class="gfs-body" id="brk-body"></div>
+    <div class="gfs-footer">
+      <button type="button" class="btn btn-ghost btn-full" id="brk-edit-btn">Edit</button>
+    </div>
+  `);
+  document.getElementById("brk-back").addEventListener("click", closeGuidedFullscreen);
+  document.getElementById("brk-edit-btn").addEventListener("click", async () => {
+    const b = state.breakdown;
+    if (b.editing) {
+      await dbPut("runs", b.run);
+      await loadRuns();
+    }
+    b.editing = !b.editing;
+    renderBreakdownTabs();
+  });
+  renderBreakdownTabs();
+}
+
+function renderBreakdownTabs() {
+  const b = state.breakdown;
+  document.querySelectorAll(".brk-tab-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.tab === b.tab);
+    btn.onclick = () => { b.tab = btn.dataset.tab; renderBreakdownTabs(); };
+  });
+  const editBtn = document.getElementById("brk-edit-btn");
+  if (editBtn) {
+    editBtn.hidden = b.tab !== "scores";
+    editBtn.textContent = b.editing ? "Save changes" : "Edit";
+  }
+  if (b.tab === "scores") renderBreakdownScoresTab();
+  else renderBreakdownTimingTab();
+}
+
+function renderBreakdownScoresTab() {
+  const { run, editing } = state.breakdown;
+  const body = document.getElementById("brk-body");
+  const inspectionOn = !!run.equipmentInspectionPassed;
+  const tokensLeft = run.precisionTokensRemaining ?? 0;
+  const bonusHTML = `<div class="gfs-section">
+    <h3>Bonuses</h3>
+    <div class="gfs-task-row gfs-task-row-wrap">
+      <span class="gfs-task-name">Equipment Inspection <span class="gfs-task-pts">${inspectionOn ? EQUIPMENT_INSPECTION_BONUS : 0} / ${EQUIPMENT_INSPECTION_BONUS}</span></span>
+      <div class="gfs-choice-strip">
+        <button type="button" class="gfs-choice-btn${inspectionOn ? " active" : ""}" data-special="inspection" data-val="yes">Yes</button>
+        <button type="button" class="gfs-choice-btn${!inspectionOn ? " active" : ""}" data-special="inspection" data-val="no">No</button>
+      </div>
+    </div>
+    <div class="gfs-task-row gfs-task-row-wrap">
+      <span class="gfs-task-name">Precision Tokens Left <span class="gfs-task-pts">+${precisionTokenBonus(tokensLeft)} pts</span></span>
+      <div class="gfs-num-strip">${Array.from({ length: 7 }, (_, i) =>
+        `<button type="button" class="gfs-num-btn${tokensLeft === i ? " active" : ""}" data-special="tokens" data-val="${i}">${i}</button>`
+      ).join("")}</div>
+    </div>
+  </div>`;
+  const sectionsHTML = state.runGroups.map((leg) => {
+    const legMissions = getLegMissions(leg);
+    const missionsHTML = legMissions.map((m) => {
+      const score = missionScoreForRun(m, run);
+      const max = missionMaxPoints(m);
+      const timing = (run.missionTimings || []).find((t) => t.missionId === m.id);
+      const rows = (m.tasks || []).map((t) => taskRowHTML(t, run.rawScores || {})).join("") || `<p class="empty-sub">No tasks.</p>`;
+      return `<div class="gfs-subsection">
+        <h4>${esc(m.name)} <span class="gfs-task-pts">${score} / ${max}${timing ? ` &middot; ${fmtDuration(timing.durationMs)}` : ""}</span></h4>
+        <div class="gfs-task-list">${rows}</div>
+      </div>`;
+    }).join("");
+    return `<div class="gfs-section">
+      <h3>${esc(leg.name)}</h3>
+      ${missionsHTML || `<p class="empty-sub">No missions in this run.</p>`}
+    </div>`;
+  }).join("");
+  body.className = "gfs-body" + (editing ? "" : " brk-readonly");
+  body.innerHTML = bonusHTML + sectionsHTML;
+  if (editing) bindBreakdownEditEvents();
+}
+
+function bindBreakdownEditEvents() {
+  const { run } = state.breakdown;
+  document.querySelectorAll('#brk-body [data-special="inspection"]').forEach((btn) => {
+    btn.addEventListener("click", () => { run.equipmentInspectionPassed = btn.dataset.val === "yes"; renderBreakdownScoresTab(); refreshBreakdownTotal(); });
+  });
+  document.querySelectorAll('#brk-body [data-special="tokens"]').forEach((btn) => {
+    btn.addEventListener("click", () => { run.precisionTokensRemaining = Number(btn.dataset.val); renderBreakdownScoresTab(); refreshBreakdownTotal(); });
+  });
+  document.querySelectorAll('#brk-body [data-type="bool"] .gfs-choice-btn').forEach((btn) => {
+    btn.addEventListener("click", () => { run.rawScores[btn.dataset.tid] = btn.dataset.val === "yes"; renderBreakdownScoresTab(); refreshBreakdownTotal(); });
+  });
+  document.querySelectorAll("#brk-body .gfs-num-btn:not([data-special])").forEach((btn) => {
+    btn.addEventListener("click", () => { run.rawScores[btn.dataset.tid] = Number(btn.dataset.val); renderBreakdownScoresTab(); refreshBreakdownTotal(); });
+  });
+  document.querySelectorAll('#brk-body [data-type="choice"] .gfs-choice-btn').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const v = btn.dataset.val;
+      run.rawScores[btn.dataset.tid] = v === "" ? null : Number(v);
+      renderBreakdownScoresTab();
+      refreshBreakdownTotal();
+    });
+  });
+}
+function refreshBreakdownTotal() {
+  const { run } = state.breakdown;
+  const el = document.getElementById("brk-total");
+  if (el) el.textContent = `${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}`;
+}
+
+function renderBreakdownTimingTab() {
+  const { run } = state.breakdown;
+  const body = document.getElementById("brk-body");
   const missionTimings = run.missionTimings || [];
   const transitions = run.transitionTimings || [];
-  let rows = "";
+  let html = "";
   let transIdx = 0;
-  let lastGroupId = undefined;
+  let lastGroupId;
+  let groupRows = "";
+  let groupTotal = 0;
+  let groupName = "";
+  const flushGroup = () => {
+    if (!groupName) return;
+    html += `<div class="gfs-section">
+      <h3>${esc(groupName)} <span class="gfs-task-pts">${fmtDuration(groupTotal)}</span></h3>
+      <div class="gfs-task-list">${groupRows}</div>
+    </div>`;
+  };
   missionTimings.forEach((mt) => {
     if (lastGroupId !== undefined && mt.runGroupId !== lastGroupId) {
+      flushGroup();
       if (transitions[transIdx]) {
-        rows += `<tr class="row-transition"><td colspan="2">Transition &mdash; ${esc(mt.runGroupName || "next run")}</td><td>${fmtDuration(transitions[transIdx].durationMs)}</td></tr>`;
+        html += `<p class="empty-sub brk-transition-row">Transition to "${esc(mt.runGroupName || "next run")}": ${fmtDuration(transitions[transIdx].durationMs)}</p>`;
         transIdx++;
       }
+      groupRows = "";
+      groupTotal = 0;
     }
-    const mission = state.missions.find((m) => m.id === mt.missionId);
-    const score = mission ? missionScoreForRun(mission, run) : 0;
-    const max = mission ? missionMaxPoints(mission) : 0;
-    rows += `<tr class="row-mission"><td>${esc(mt.missionName)}</td><td>${score}/${max}</td><td>${fmtDuration(mt.durationMs)}</td></tr>`;
-    if (mission) {
-      (mission.tasks || []).forEach((t) => {
-        const taskScore = pointsFromRawTask(t, (run.rawScores || {})[t.id]);
-        const taskMax = taskMaxPoints(t);
-        rows += `<tr class="row-task"><td>${esc(t.name)}</td><td>${taskScore}/${taskMax}</td><td></td></tr>`;
-      });
-    }
+    groupName = mt.runGroupName;
+    groupTotal += mt.durationMs;
+    groupRows += `<div class="gfs-task-row"><span class="gfs-task-name">${esc(mt.missionName)}</span><span class="gfs-task-pts">${fmtDuration(mt.durationMs)}</span></div>`;
     lastGroupId = mt.runGroupId;
   });
+  flushGroup();
   const avgOpTime = transitions.length ? transitions.reduce((s, t) => s + t.durationMs, 0) / transitions.length : 0;
-  const tokensLeft = run.precisionTokensRemaining ?? 0;
-  openModal(`
-    <h2>${esc(run.label)}</h2>
-    <p class="empty-sub">${esc(run.date || "")}</p>
-    <div class="run-total-bar"><span class="rt-label">Total score</span><span class="rt-num">${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}</span></div>
-    <div class="run-total-bar"><span class="rt-label">Total time</span><span class="rt-num">${fmtDuration(run.totalTimeMs || 0)}</span></div>
-    <div class="run-total-bar"><span class="rt-label">Avg operation time</span><span class="rt-num">${transitions.length ? fmtDuration(avgOpTime) : "—"}</span></div>
-    <p class="empty-sub">Precision tokens: ${tokensLeft} left &middot; +${precisionTokenBonus(tokensLeft)} bonus pts</p>
-    <p class="empty-sub">Equipment inspection: ${run.equipmentInspectionPassed ? `passed &middot; +${EQUIPMENT_INSPECTION_BONUS} bonus pts` : "not passed"}</p>
-    <table class="run-summary-table"><thead><tr><th>Mission / Task</th><th>Score</th><th>Time</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="modal-actions"><button class="btn btn-ghost btn-full" id="m-close">Close</button></div>
-  `);
-  document.getElementById("m-close").addEventListener("click", closeModal);
+  body.className = "gfs-body";
+  body.innerHTML = `<p class="empty-sub">Avg operation (transition) time: ${transitions.length ? fmtDuration(avgOpTime) : "—"}</p>`
+    + (html || `<p class="empty-sub">No timing data recorded for this run.</p>`);
 }
 
 // ---- Scoresheet-style CSV export ----
+function colLetter(n) {
+  // 1-indexed spreadsheet column letters: 1 -> A, 26 -> Z, 27 -> AA, ...
+  let s = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
 function buildScoresheetCSV(runs) {
   const sortedGroups = state.runGroups.slice().sort((a, b) => a.order - b.order);
   const groupNumberById = Object.fromEntries(sortedGroups.map((g, i) => [g.id, i + 1]));
@@ -2432,21 +2795,34 @@ function buildScoresheetCSV(runs) {
     (mission.tasks || []).forEach((task) => taskRows.push({ mission, task, runName, runNum }));
   });
 
-  const header = ["Official Name", "Notes", "Pts", "Name", "#", ...runs.map((r) => r.label), "Success Rate", "", "Run #", "Score"];
+  // Run-flag columns start right after "M#,Official Name,Notes,Pts,Name,#"
+  // (6 columns), so the first flag column is G, matching the template.
+  const firstFlagCol = 7;
+  const lastFlagCol = firstFlagCol + runs.length - 1;
+  const flagRangeFor = (rowNum) => `${colLetter(firstFlagCol)}${rowNum}:${colLetter(lastFlagCol)}${rowNum}`;
+
+  const header = ["M#", "Official Name", "Notes", "Pts", "Name", "#", ...runs.map((r) => r.label), "Success Rate", "", "Run #", "Score"];
   const lines = [header.map(csvEscape).join(",")];
 
   taskRows.forEach((row, i) => {
     const { mission, task, runName, runNum } = row;
+    const rowNum = i + 2; // +2: header is row 1, data starts at row 2
     const flags = runs.map((r) => (isTaskComplete(task, r.rawScores || {}) ? "1" : ""));
-    const successCount = flags.filter((f) => f === "1").length;
-    const successRate = runs.length ? Math.round((successCount / runs.length) * 100) : 0;
+    // A real spreadsheet formula (not a pre-computed number) so it recalculates
+    // if the flags are ever edited after export/import — matches how the
+    // original tracker computes Success Rate live off the flag cells.
+    const successRateFormula = runs.length
+      ? `=TEXT(COUNTIF(${flagRangeFor(rowNum)},1)/${runs.length},"0%")`
+      : "";
     const sideTable = i < runs.length ? [String(i + 1), String(runTotal(runs[i], state.missions))] : ["", ""];
-    const rowVals = [mission.name, task.name, taskMaxPoints(task), runName, runNum, ...flags, `${successRate}%`, "", ...sideTable];
+    const rowVals = ["", mission.name, task.name, taskMaxPoints(task), runName, runNum, ...flags, successRateFormula, "", ...sideTable];
     lines.push(rowVals.map(csvEscape).join(","));
   });
 
-  const tokenRow = ["", "", "Precision Tokens Left", "", "", ...runs.map((r) => String(r.precisionTokensRemaining ?? "")), "", "", "", ""];
+  const tokenRow = ["", "", "", 1, "Precision Token Points", "", ...runs.map((r) => String(precisionTokenBonus(r.precisionTokensRemaining ?? 0))), "", "", "", ""];
   lines.push(tokenRow.map(csvEscape).join(","));
+  const inspectionRow = ["", "", "", 1, "Equipment Inspection", "", ...runs.map((r) => String(r.equipmentInspectionPassed ? EQUIPMENT_INSPECTION_BONUS : 0)), "", "", "", ""];
+  lines.push(inspectionRow.map(csvEscape).join(","));
 
   return lines.join("\n");
 }
@@ -2583,8 +2959,19 @@ async function loadKeepGoingAfterBuzzerSetting() {
   state.keepGoingAfterBuzzer = rec?.value ?? false;
   keepGoingAfterBuzzerInput.checked = state.keepGoingAfterBuzzer;
 }
+const interactiveIterationsInput = document.getElementById("input-interactive-iterations");
+interactiveIterationsInput.addEventListener("change", async () => {
+  state.interactiveIterationsEnabled = interactiveIterationsInput.checked;
+  await dbPut("meta", { key: "interactiveIterationsEnabled", value: state.interactiveIterationsEnabled });
+});
+async function loadInteractiveIterationsSetting() {
+  const rec = await dbGet("meta", "interactiveIterationsEnabled");
+  state.interactiveIterationsEnabled = rec?.value ?? false;
+  interactiveIterationsInput.checked = state.interactiveIterationsEnabled;
+}
 
 async function initAll() {
+  preloadAllSounds(); // fire-and-forget, decoding well ahead of any run starting
   await purgeOldTrash();
   await loadAttachments();
   await loadMissions();
@@ -2594,6 +2981,7 @@ async function initAll() {
   await loadSeasonName();
   await loadEquipmentInspectionSetting();
   await loadKeepGoingAfterBuzzerSetting();
+  await loadInteractiveIterationsSetting();
   document.getElementById("log-empty-state").hidden = state.attachments.length === 0 ? false : true;
 }
 initAll();
