@@ -2061,9 +2061,12 @@ async function actuallyStartRun() {
   // on it — basically a plain scoresheet with a clock, fill it in as you go.
   if (state.interactiveScoringEnabled) renderCurrentTaskScreen();
   else renderGuidedOverview();
-  state.guidedRun.timerHandle = setInterval(tickGuidedTimer, 200);
+  state.guidedRun.timerHandle = setInterval(tickGuidedTimer, 100);
   // Scheduled precisely against the match clock (not the poll interval) so
-  // the 30s tone and the buzzer fire exactly on time, not up to one poll late.
+  // the 30s tone fires close to on time; the buzzer itself is triggered by
+  // tickGuidedTimer's own zero-crossing check below, since that re-measures
+  // real elapsed time on every tick and can't drift the way a single
+  // long-duration setTimeout can over a full 2:30 span.
   scheduleGuidedAlarms(state.guidedRun);
 }
 
@@ -2095,6 +2098,7 @@ function tickGuidedTimer() {
   const header = document.querySelector(".gfs-header");
   if (el) el.textContent = currentTimerDisplay();
   if (header) header.classList.toggle("header-danger", remaining <= 0);
+  if (remaining <= 0 && !state.guidedRun.timeExpired) handleTimeExpired();
 }
 function handleTimeExpired() {
   if (!state.guidedRun || state.guidedRun.timeExpired) return;
