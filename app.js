@@ -9,7 +9,7 @@ if ("serviceWorker" in navigator) {
 
 // ---------- IndexedDB helper ----------
 const DB_NAME = "barp-db-v1";
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 let dbPromise = null;
 
 function createStores(db) {
@@ -35,12 +35,14 @@ function createStores(db) {
   if (!db.objectStoreNames.contains("meta")) {
     db.createObjectStore("meta", { keyPath: "key" });
   }
-  if (!db.objectStoreNames.contains("deletionSnapshots")) {
-    db.createObjectStore("deletionSnapshots", { keyPath: "id", autoIncrement: true });
-  }
   // Practice Sessions was removed as a feature — drop the leftover store if present.
   if (db.objectStoreNames.contains("sessions")) {
     db.deleteObjectStore("sessions");
+  }
+  // The automatic pre-change snapshot system was replaced with per-delete
+  // undo toasts — drop the leftover store if present.
+  if (db.objectStoreNames.contains("deletionSnapshots")) {
+    db.deleteObjectStore("deletionSnapshots");
   }
 }
 
@@ -116,80 +118,12 @@ async function snapshotCurrentData() {
     runGroups: await dbGetAllRaw("runGroups"),
   };
 }
-// Not persisted to disk — just enough to undo your last restore within this
-// session, so it doesn't need to be very persistent.
-let lastPreRestoreSnapshot = null;
 // Full-state snapshots taken the moment Attachments/Runs editing starts, so
 // Cancel can revert every change made during the session (adds, edits,
 // deletes, reorders) — not just the drag order, which is all the Save/Cancel
 // buttons used to govern.
 let attachmentEditSessionSnapshot = null;
 let runsEditSessionSnapshot = null;
-
-// ---------- Pre-action safety snapshots ----------
-// A full snapshot taken right before any structural change — deleting
-// something, editing an attachment, or changing runs/missions/tasks (adding,
-// renaming, or reordering). This is the only backup mechanism: there's no
-// separate debounced "automatic" backup running in the background, just
-// these one-off snapshots taken at the moment something is about to change.
-const MAX_CHANGE_SNAPSHOTS = 20;
-async function snapshotBeforeChange(label) {
-  try {
-    const data = await snapshotCurrentData();
-    await dbPut("deletionSnapshots", { takenAt: Date.now(), label, data });
-    const all = await dbGetAll("deletionSnapshots");
-    if (all.length > MAX_CHANGE_SNAPSHOTS) {
-      all.sort((a, b) => a.takenAt - b.takenAt);
-      for (const old of all.slice(0, all.length - MAX_CHANGE_SNAPSHOTS)) await dbDelete("deletionSnapshots", old.id);
-    }
-  } catch (e) { /* best-effort — never block the actual change on this */ }
-}
-
-async function openBackupMenu() {
-  const items = (await dbGetAll("deletionSnapshots")).map((s) => ({ label: s.label, takenAt: s.takenAt, data: s.data }));
-  items.sort((a, b) => b.takenAt - a.takenAt);
-
-  openModal(`
-    <h2>Restore from automatic backup</h2>
-    ${lastPreRestoreSnapshot ? `<button type="button" class="btn btn-amber btn-full" id="btn-redo-restore" style="margin-bottom:14px;">&#8635; Redo (undo the last restore)</button>` : ""}
-    <p class="empty-sub">Pick a point in time to restore everything back to — a snapshot is saved automatically right before every deletion and every change to attachments, runs, missions, or tasks.</p>
-    <div id="backup-menu-list" class="mission-list">
-      ${items.length ? "" : `<p class="empty-sub">Nothing to restore yet.</p>`}
-    </div>
-    <div class="modal-actions"><button class="btn btn-ghost btn-full" id="m-close" type="button">Close</button></div>
-  `);
-  document.getElementById("m-close").addEventListener("click", closeModal);
-  const list = document.getElementById("backup-menu-list");
-  items.forEach((item) => {
-    const row = document.createElement("div");
-    row.className = "mission-row";
-    row.innerHTML = `
-      <div class="m-info">
-        <div class="m-name">${esc(item.label)}</div>
-        <div class="m-sub">${new Date(item.takenAt).toLocaleString()}</div>
-      </div>
-      <button class="btn btn-ghost" data-act="restore">Restore</button>
-    `;
-    row.querySelector('[data-act="restore"]').addEventListener("click", async () => {
-      if (!confirm(`Restore everything to "${item.label}" (${new Date(item.takenAt).toLocaleString()})? This replaces everything currently on this device.`)) return;
-      lastPreRestoreSnapshot = { label: `Before restoring "${item.label}"`, data: await snapshotCurrentData() };
-      await restoreFullData(item.data);
-      closeModal();
-      alert("Restored.");
-    });
-    list.appendChild(row);
-  });
-  const redoBtn = document.getElementById("btn-redo-restore");
-  if (redoBtn) redoBtn.addEventListener("click", async () => {
-    if (!lastPreRestoreSnapshot) return;
-    if (!confirm("Undo that restore and bring back what was there right before it?")) return;
-    const snap = lastPreRestoreSnapshot;
-    lastPreRestoreSnapshot = null;
-    await restoreFullData(snap.data);
-    closeModal();
-    alert("Redone.");
-  });
-}
 
 // ---------- App state ----------
 const state = {
@@ -209,20 +143,7 @@ const state = {
   interactiveScoringEnabled: true,
   interactiveIterationsEnabled: false,
   guidedRun: null, // { run, legIdx, missionIdxInLeg, taskIdx, matchStartTs, ... }
-  sessionCreated: { attachments: new Set(), runGroups: new Set(), missions: new Set(), tasks: new Set() },
 };
-
-// Call right after something new is created, and again right before it's
-// deleted. If it was created earlier in this same session, the "before
-// adding" snapshot already covers rolling that back, so the delete doesn't
-// need its own redundant restore point — e.g. add a task then immediately
-// delete it shouldn't log two backup entries for a change that nets to zero.
-function markCreatedThisSession(kind, id) { state.sessionCreated[kind].add(id); }
-async function snapshotBeforeDelete(kind, id, label) {
-  const set = state.sessionCreated[kind];
-  if (set.has(id)) { set.delete(id); return; }
-  await snapshotBeforeChange(label);
-}
 
 // ---------- Visible error reporting ----------
 // If a click handler throws, buttons can look "dead" (the CSS :active press
@@ -636,10 +557,18 @@ function renderAttachmentChips() {
 
 document.getElementById("sort-select").addEventListener("change", renderEntryList);
 
+function entryFieldHTML(label, text, uid) {
+  const truncatable = text.length > 60;
+  return `<div class="entry-field">
+    <span class="entry-field-label">${esc(label)}</span>
+    <span class="entry-field-value${truncatable ? " truncated" : ""}" id="${uid}">${esc(text)}</span>
+    ${truncatable ? `<button type="button" class="entry-showmore-btn" data-target="${uid}">Show more</button>` : ""}
+  </div>`;
+}
 function entryCardHTML(entry, attachmentLabel) {
   const sizeLabel = { small: "Small change", moderate: "Moderate change", major: "Major change" }[entry.size] || "";
-  const whatHTML = entry.whatChanged ? `<div class="entry-field"><span class="entry-field-label">What changed</span>${esc(entry.whatChanged)}</div>` : "";
-  const whyHTML = entry.whyChanged ? `<div class="entry-field"><span class="entry-field-label">Why changed</span>${esc(entry.whyChanged)}</div>` : "";
+  const whatHTML = entry.whatChanged ? entryFieldHTML("What changed", entry.whatChanged, `efv-${entry.id}-what`) : "";
+  const whyHTML = entry.whyChanged ? entryFieldHTML("Why changed", entry.whyChanged, `efv-${entry.id}-why`) : "";
   return `
     ${entry.photo ? `<img src="${entry.photo}" alt="">` : ""}
     <div class="entry-body">
@@ -688,7 +617,6 @@ async function renderEntryList() {
     card.innerHTML = entryCardHTML(entry, showTag ? (att ? `#${att.number} ${att.name}` : "deleted attachment") : null);
     card.querySelector(".btn-icon").addEventListener("click", () => {
       confirmDestructive("This removes the entry from the log. You'll have a few seconds to undo right after.", async () => {
-        await snapshotBeforeChange(`Before deleting a log entry`);
         entry.deleted = true;
         entry.deletedAt = Date.now();
         await dbPut("entries", entry);
@@ -703,6 +631,13 @@ async function renderEntryList() {
           await renderIterationTotal();
           renderAttachmentsSetup();
         });
+      });
+    });
+    card.querySelectorAll(".entry-showmore-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const target = document.getElementById(btn.dataset.target);
+        const stillTruncated = target.classList.toggle("truncated");
+        btn.textContent = stillTruncated ? "Show more" : "Show less";
       });
     });
     list.appendChild(card);
@@ -735,16 +670,29 @@ function renderAttachmentsSetup() {
           <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
         `;
         row.querySelector('[data-act="edit"]').addEventListener("click", () => openAttachmentModal(att));
-        row.querySelector('[data-act="del"]').addEventListener("click", async () => {
-          if (confirm(`Delete "${att.name}" and everything logged under it?`)) {
-            await snapshotBeforeDelete("attachments", att.id, `Before deleting attachment "${att.name}"`);
+        row.querySelector('[data-act="del"]').addEventListener("click", () => {
+          confirmDestructive(`Delete "${att.name}" and everything logged under it?`, async () => {
             const entries = await dbGetByIndex("entries", "byAttachment", att.id);
+            const entriesSnapshot = entries.map((e) => ({ ...e }));
+            const attSnapshot = { ...att };
+            const othersBefore = state.attachments
+              .filter((a) => a.id !== att.id)
+              .map((a) => ({ id: a.id, order: a.order, number: a.number }));
             for (const en of entries) await dbDelete("entries", en.id);
             await dbDelete("attachments", att.id);
             const remaining = (await dbGetAll("attachments")).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
             for (const [i, a] of remaining.entries()) { a.order = i; a.number = i + 1; await dbPut("attachments", a); }
             await loadAttachments();
-          }
+            showUndoToast(`Deleted "${attSnapshot.name}".`, async () => {
+              await dbPut("attachments", attSnapshot);
+              for (const en of entriesSnapshot) await dbPut("entries", en);
+              for (const o of othersBefore) {
+                const a = await dbGet("attachments", o.id);
+                if (a) { a.order = o.order; a.number = o.number; await dbPut("attachments", a); }
+              }
+              await loadAttachments();
+            });
+          });
         });
         list.appendChild(row);
         attachRowDrag(row, list, () => {
@@ -800,7 +748,6 @@ function wireAttachmentOrderToolbar() {
   });
   const saveBtn = document.getElementById("btn-save-order-attachments");
   if (saveBtn) saveBtn.addEventListener("click", async () => {
-    await snapshotBeforeChange("Before reordering attachments");
     for (const [idx, att] of state.attachments.entries()) { att.order = idx; att.number = idx + 1; await dbPut("attachments", att); }
     attachmentEditSessionSnapshot = null;
     state.editingAttachmentOrder = false;
@@ -855,9 +802,8 @@ function openAttachmentModal(att) {
     record.name = name;
     record.photo = pendingAttPhoto;
     if (!isEdit) record.createdAt = Date.now();
-    await snapshotBeforeChange(isEdit ? `Before editing attachment "${att.name}"` : "Before adding a new attachment");
     const id = await dbPut("attachments", record);
-    if (!isEdit) { state.selectedAttachmentIds.add(id); markCreatedThisSession("attachments", id); }
+    if (!isEdit) { state.selectedAttachmentIds.add(id); }
     closeModal();
     await loadAttachments();
   });
@@ -1365,42 +1311,6 @@ function renderOrderToolbarTop() {
 async function saveAllOrder() {
   const groupEls = [...document.querySelectorAll("#rungroup-list > [data-gid]")];
 
-  // Figure out whether anything was actually reordered/reassigned before
-  // touching the DB — adding/editing/deleting a mission or task already
-  // snapshots itself individually, so Save shouldn't also log a "reordering"
-  // change when the only thing that happened was, say, adding a task.
-  const beforeGroupOrder = [...state.runGroups].sort((a, b) => a.order - b.order).map((g) => g.id);
-  const beforeMissionOrder = [...state.missions]
-    .filter((m) => state.runGroups.some((g) => g.id === m.runGroupId))
-    .sort((a, b) => a.order - b.order)
-    .map((m) => [m.id, m.runGroupId]);
-  const beforeTaskOrder = state.missions.map((m) => [m.id, (m.tasks || []).map((t) => t.id)]);
-
-  const afterGroupOrder = groupEls.map((el) => Number(el.dataset.gid));
-  const afterMissionOrder = [];
-  const afterTaskOrderMap = {};
-  groupEls.forEach((groupEl) => {
-    const gid = Number(groupEl.dataset.gid);
-    const missionListContainer = groupEl.querySelector(":scope > .task-list");
-    if (!missionListContainer) return;
-    const missionEls = [...missionListContainer.querySelectorAll(":scope > [data-mid]")];
-    missionEls.forEach((mEl) => afterMissionOrder.push([Number(mEl.dataset.mid), gid]));
-  });
-  const allMissionEls = [...document.querySelectorAll("[data-mid]")];
-  for (const mEl of allMissionEls) {
-    const mid = Number(mEl.dataset.mid);
-    const taskEls = [...mEl.querySelectorAll(":scope > .task-list > [data-tid]")];
-    if (taskEls.length) afterTaskOrderMap[mid] = taskEls.map((te) => te.dataset.tid);
-  }
-  const afterTaskOrder = state.missions.map((m) => [m.id, afterTaskOrderMap[m.id] || (m.tasks || []).map((t) => t.id)]);
-
-  const orderChanged =
-    JSON.stringify(beforeGroupOrder) !== JSON.stringify(afterGroupOrder) ||
-    JSON.stringify(beforeMissionOrder) !== JSON.stringify(afterMissionOrder) ||
-    JSON.stringify(beforeTaskOrder) !== JSON.stringify(afterTaskOrder);
-
-  if (orderChanged) await snapshotBeforeChange("Before reordering runs, missions & tasks");
-
   groupEls.forEach((el, idx) => {
     const g = state.runGroups.find((x) => x.id === Number(el.dataset.gid));
     if (g) g.order = idx;
@@ -1418,6 +1328,7 @@ async function saveAllOrder() {
     });
   });
 
+  const allMissionEls = [...document.querySelectorAll("[data-mid]")];
   for (const mEl of allMissionEls) {
     const m = state.missions.find((x) => x.id === Number(mEl.dataset.mid));
     if (!m) continue;
@@ -1476,14 +1387,20 @@ function renderRunGroups() {
       const editBtn = wrap.querySelector('[data-act="edit"]');
       if (editBtn) editBtn.addEventListener("click", () => openRunGroupModal(g));
       const delBtn = wrap.querySelector('[data-act="del"]');
-      if (delBtn) delBtn.addEventListener("click", async () => {
-        if (confirm(`Delete "${g.name}"? Its missions move to "Unassigned" rather than being deleted.`)) {
-          await snapshotBeforeDelete("runGroups", g.id, `Before deleting run "${g.name}"`);
+      if (delBtn) delBtn.addEventListener("click", () => {
+        confirmDestructive(`Delete "${g.name}"? Its missions move to "Unassigned" rather than being deleted.`, async () => {
+          const gSnapshot = { ...g };
           await dbDelete("runGroups", g.id);
           await loadRunGroups();
           await loadMissions();
           renderRunGroups();
-        }
+          showUndoToast(`Deleted "${gSnapshot.name}".`, async () => {
+            await dbPut("runGroups", gSnapshot);
+            await loadRunGroups();
+            await loadMissions();
+            renderRunGroups();
+          });
+        });
       });
       attachRowDrag(wrap, list, undefined, true);
     }
@@ -1555,13 +1472,18 @@ function renderOrphanMissions(container, orphans) {
     });
     row.querySelector('[data-act="add-task"]').addEventListener("click", () => openTaskModal(m, null));
     row.querySelector('[data-act="edit"]').addEventListener("click", () => openMissionNameModal(m, null));
-    row.querySelector('[data-act="del"]').addEventListener("click", async () => {
-      if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
-        await snapshotBeforeDelete("missions", m.id, `Before deleting mission "${m.name}"`);
+    row.querySelector('[data-act="del"]').addEventListener("click", () => {
+      confirmDestructive(`Delete mission "${m.name}" and all its tasks?`, async () => {
+        const mSnapshot = { ...m, tasks: (m.tasks || []).map((t) => ({ ...t })) };
         await dbDelete("missions", m.id);
         await loadMissions();
         renderRunGroups();
-      }
+        showUndoToast(`Deleted mission "${mSnapshot.name}".`, async () => {
+          await dbPut("missions", mSnapshot);
+          await loadMissions();
+          renderRunGroups();
+        });
+      });
     });
     if (expanded) renderTaskList(row.querySelector(".task-list"), m);
     container.appendChild(row);
@@ -1582,12 +1504,11 @@ function openRunGroupModal(g) {
   document.getElementById("m-save").addEventListener("click", async () => {
     const name = document.getElementById("rg-name").value.trim();
     if (!name) { alert("Name this run."); return; }
-    await snapshotBeforeChange(isEdit ? `Before renaming run "${g.name}"` : "Before adding a new run");
     const record = isEdit ? g : { order: state.runGroups.length };
     record.name = name;
     const id = await dbPut("runGroups", record);
     closeModal();
-    if (!isEdit) { state.expandedRunGroups.add(id); markCreatedThisSession("runGroups", id); }
+    if (!isEdit) { state.expandedRunGroups.add(id); }
     await loadRunGroups();
   });
 }
@@ -1628,13 +1549,18 @@ function renderMissionsForGroup(container, group, missionRows) {
       const editBtn = row.querySelector('[data-act="edit"]');
       if (editBtn) editBtn.addEventListener("click", () => openMissionNameModal(m, group));
       const delBtn = row.querySelector('[data-act="del"]');
-      if (delBtn) delBtn.addEventListener("click", async () => {
-        if (confirm(`Delete mission "${m.name}" and all its tasks?`)) {
-          await snapshotBeforeDelete("missions", m.id, `Before deleting mission "${m.name}"`);
+      if (delBtn) delBtn.addEventListener("click", () => {
+        confirmDestructive(`Delete mission "${m.name}" and all its tasks?`, async () => {
+          const mSnapshot = { ...m, tasks: (m.tasks || []).map((t) => ({ ...t })) };
           await dbDelete("missions", m.id);
           await loadMissions();
           renderRunGroups();
-        }
+          showUndoToast(`Deleted mission "${mSnapshot.name}".`, async () => {
+            await dbPut("missions", mSnapshot);
+            await loadMissions();
+            renderRunGroups();
+          });
+        });
       });
       if (missionRows) missionRows.push({ row, mission: m });
     }
@@ -1651,7 +1577,8 @@ function openMissionNameModal(m, group) {
   const currentGroupId = isEdit ? m.runGroupId : group?.id;
   openModal(`
     <h2>${isEdit ? "Edit mission" : "New mission"}</h2>
-    <div class="field"><label>Mission name</label><input class="text-input" id="m-mission-name" value="${isEdit ? esc(m.name) : ""}" placeholder="e.g. M07 — Coral nursery"></div>
+    <div class="field"><label>Official mission number</label><input class="text-input" id="m-mission-number" type="number" value="${isEdit && m.number != null ? m.number : ""}" placeholder="e.g. 7"></div>
+    <div class="field"><label>Mission name</label><input class="text-input" id="m-mission-name" value="${isEdit ? esc(m.name) : ""}" placeholder="e.g. Coral nursery"></div>
     <div class="field"><label>Run</label>
       <select class="text-input" id="m-mission-run">
         ${state.runGroups.map((g) => `<option value="${g.id}" ${g.id === currentGroupId ? "selected" : ""}>${esc(g.name)}</option>`).join("")}
@@ -1666,14 +1593,15 @@ function openMissionNameModal(m, group) {
   document.getElementById("m-save").addEventListener("click", async () => {
     const name = document.getElementById("m-mission-name").value.trim();
     if (!name) { alert("Name this mission."); return; }
+    const numberVal = document.getElementById("m-mission-number").value.trim();
     const newGroupId = Number(document.getElementById("m-mission-run").value);
     const record = isEdit ? m : { order: 9999, tasks: [], taskSeq: 0 };
     record.name = name;
+    record.number = numberVal === "" ? null : Number(numberVal);
     record.runGroupId = newGroupId;
-    await snapshotBeforeChange(isEdit ? `Before editing mission "${m.name}"` : "Before adding a new mission");
     const id = await dbPut("missions", record);
     closeModal();
-    if (!isEdit) { state.expandedMissions.add(id); markCreatedThisSession("missions", id); }
+    if (!isEdit) { state.expandedMissions.add(id); }
     state.expandedRunGroups.add(newGroupId);
     await recomputeGlobalMissionOrder();
     await loadMissions();
@@ -1704,14 +1632,25 @@ function renderTaskList(container, mission) {
         <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
       `;
       row.querySelector('[data-act="edit"]').addEventListener("click", () => openTaskModal(mission, t));
-      row.querySelector('[data-act="del"]').addEventListener("click", async () => {
-        if (confirm(`Delete task "${t.name}"?`)) {
-          await snapshotBeforeDelete("tasks", t.id, `Before deleting task "${t.name}" from mission "${mission.name}"`);
+      row.querySelector('[data-act="del"]').addEventListener("click", () => {
+        confirmDestructive(`Delete task "${t.name}"?`, async () => {
+          const tSnapshot = { ...t };
+          const originalIndex = mission.tasks.findIndex((tt) => tt.id === t.id);
           mission.tasks = mission.tasks.filter((tt) => tt.id !== t.id);
           await dbPut("missions", mission);
           await loadMissions();
           renderRunGroups();
-        }
+          showUndoToast(`Deleted task "${tSnapshot.name}".`, async () => {
+            const freshMission = await dbGet("missions", mission.id);
+            if (freshMission) {
+              const idx = Math.min(originalIndex, freshMission.tasks.length);
+              freshMission.tasks.splice(idx, 0, tSnapshot);
+              await dbPut("missions", freshMission);
+            }
+            await loadMissions();
+            renderRunGroups();
+          });
+        });
       });
       container.appendChild(row);
       attachRowDrag(row, container);
@@ -1797,8 +1736,7 @@ function openTaskModal(mission, t) {
       }));
       delete record.points; delete record.max; delete record.pointsPerUnit;
     }
-    if (!isEdit) { mission.tasks.push(record); markCreatedThisSession("tasks", record.id); }
-    await snapshotBeforeChange(isEdit ? `Before editing task "${record.name}"` : `Before adding a task to "${mission.name}"`);
+    if (!isEdit) { mission.tasks.push(record); }
     await dbPut("missions", mission);
     closeModal();
     await loadMissions();
@@ -2118,45 +2056,15 @@ async function actuallyStartRun() {
     playedBuzzer: false,
     timeExpired: false,
   };
+  // Interactive mode walks through missions one task at a time; non-interactive
+  // goes straight to the (fully editable) overview with a live timer running
+  // on it — basically a plain scoresheet with a clock, fill it in as you go.
   if (state.interactiveScoringEnabled) renderCurrentTaskScreen();
-  else renderTimerOnlyScreen();
+  else renderGuidedOverview();
   state.guidedRun.timerHandle = setInterval(tickGuidedTimer, 200);
   // Scheduled precisely against the match clock (not the poll interval) so
   // the 30s tone and the buzzer fire exactly on time, not up to one poll late.
   scheduleGuidedAlarms(state.guidedRun);
-}
-
-// Non-interactive mode: skip the step-by-step mission/task prompts and the
-// "Robot returned" checkpoints entirely — just a running timer. The buzzer
-// still fires and still auto-advances to the (fully editable) overview when
-// time runs out, same as the interactive flow; this just adds a manual
-// "Finish" button for ending the timer early, since there's no other way to
-// signal the run is done without the step prompts.
-function renderTimerOnlyScreen() {
-  const { run } = state.guidedRun;
-  openGuidedFullscreen(`
-    <div class="gfs-header">
-      ${gfsHeaderTopHTML(esc(run.label), false, false)}
-      <div class="gfs-timer-row" style="justify-content:center; margin-top:24px;">
-        <div class="gfs-timer" id="grn-timer" style="font-size:4.4rem;">${liveTimerHTML()}</div>
-      </div>
-    </div>
-    <div class="gfs-body gfs-center">
-      <p class="empty-sub">Timing this run. Tap Finish when the robot returns, or let time run out.</p>
-      <button type="button" class="btn btn-primary btn-full gfs-big-action gfs-huge-action" id="grn-finish-noninteractive">Finish &amp; Review Scores</button>
-    </div>
-    <div class="gfs-footer"></div>
-  `);
-  wireCancelLink();
-  document.getElementById("grn-finish-noninteractive").addEventListener("click", async () => {
-    if (state.guidedRun.timeExpired) return; // buzzer already handling the transition
-    stopGuidedTimer();
-    const now = Date.now();
-    run.finishedAt = now;
-    run.totalTimeMs = now - state.guidedRun.matchStartTs;
-    await dbPut("runs", run);
-    renderGuidedOverview();
-  });
 }
 
 // ---- Continuous match clock (one clock for the whole game run, like a real FLL match) ----
@@ -2502,12 +2410,15 @@ function renderGuidedTransitionPhase() {
 
 function renderGuidedOverview() {
   const { run } = state.guidedRun;
+  const isLive = !run.finishedAt; // non-interactive mode reaches this screen while the clock is still running
   openGuidedFullscreen(`
     <div class="gfs-header">
-      ${gfsHeaderTopHTML("Final overview", false, false)}
+      ${gfsHeaderTopHTML(isLive ? "Scoring" : "Final overview", false, false)}
       <h2 class="gfs-mission-name">${esc(run.label)}</h2>
       <div class="gfs-timer" id="gfs-overview-total">${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}</div>
-      <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs)} total time &middot; review below or save now</div>
+      <div class="gfs-timer-label">${isLive
+        ? `<span id="grn-timer">${liveTimerHTML()}</span> remaining &middot; fill in scores below as you go`
+        : `${fmtDuration(run.totalTimeMs)} total time &middot; review below or save now`}</div>
       <button class="btn btn-primary btn-full" id="grn-save-top" type="button" style="margin-top:12px;">&#10003; Save &amp; Finish</button>
     </div>
     <div class="gfs-body" id="gfs-overview-body"></div>
@@ -2605,6 +2516,11 @@ function updateOverviewTotal() {
 async function finalizeGuidedRun() {
   stopGuidedTimer();
   const { run } = state.guidedRun;
+  if (!run.finishedAt) {
+    const now = Date.now();
+    run.finishedAt = now;
+    run.totalTimeMs = now - state.guidedRun.matchStartTs;
+  }
   run.inProgress = false;
   await dbPut("runs", run);
   state.guidedRun = null;
@@ -2670,12 +2586,16 @@ function renderRuns() {
         <button class="btn-icon rc-icon-btn" data-act="del" title="Delete">&#128465;&#65039;</button>
       </div>
     `;
-    card.querySelector('[data-act="del"]').addEventListener("click", async () => {
-      if (confirm(`Delete incomplete game run "${run.label}"?`)) {
-        await snapshotBeforeChange(`Before deleting incomplete run "${run.label}"`);
+    card.querySelector('[data-act="del"]').addEventListener("click", () => {
+      confirmDestructive(`Delete incomplete game run "${run.label}"?`, async () => {
+        const runSnapshot = { ...run };
         await dbDelete("runs", run.id);
         await loadRuns();
-      }
+        showUndoToast(`Deleted "${runSnapshot.label}".`, async () => {
+          await dbPut("runs", runSnapshot);
+          await loadRuns();
+        });
+      });
     });
     list.appendChild(card);
   });
@@ -2700,12 +2620,16 @@ function renderRuns() {
       </div>
     `;
     card.querySelector('[data-act="view"]').addEventListener("click", () => renderRunBreakdown(run));
-    card.querySelector('[data-act="del"]').addEventListener("click", async () => {
-      if (confirm(`Delete game run "${run.label}"?`)) {
-        await snapshotBeforeChange(`Before deleting run "${run.label}"`);
+    card.querySelector('[data-act="del"]').addEventListener("click", () => {
+      confirmDestructive(`Delete game run "${run.label}"?`, async () => {
+        const runSnapshot = { ...run };
         await dbDelete("runs", run.id);
         await loadRuns();
-      }
+        showUndoToast(`Deleted "${runSnapshot.label}".`, async () => {
+          await dbPut("runs", runSnapshot);
+          await loadRuns();
+        });
+      });
     });
     list.appendChild(card);
   });
@@ -2943,7 +2867,7 @@ function buildScoresheetCSV(runs) {
   // against that run's flags) — matches the template exactly, these are
   // live formulas, not just the run's label as plain text.
   const headerRunCells = runs.map((r, i) => `=SUMPRODUCT($D2:$D${lastDataRow},${colLetter(firstFlagCol + i)}2:${colLetter(firstFlagCol + i)}${lastDataRow})`);
-  const header = ["M#", "Official Name", "Notes", "Pts", "Name", "#", ...headerRunCells, "Success Rate", "", `=AVERAGE(${successRateColLetter}2:${successRateColLetter}${lastTaskRow})`];
+  const header = ["M#", "Official Name", "Task", "Pts", "Name", "#", ...headerRunCells, "Success Rate", "", `=AVERAGE(${successRateColLetter}2:${successRateColLetter}${lastTaskRow})`];
   const lines = [header.map(csvEscape).join(",")];
 
   rows.forEach((row, i) => {
@@ -2968,34 +2892,41 @@ function buildScoresheetCSV(runs) {
   return lines.join("\n");
 }
 
-async function buildScoresheetXLSX(runs) {
-  const rows = buildScoreRowDefs();
+const RUNS_PER_SHEET = 10; // matches the template's fixed 10 run columns (G:P)
 
+function sheetTitleForRuns(runsChunk, sheetIdx) {
+  if (!runsChunk.length) return "Runs";
+  const fmt = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}-${d.getDate()}`; };
+  const times = runsChunk.map((r) => r.startedAt || 0);
+  const lo = fmt(Math.min(...times)), hi = fmt(Math.max(...times));
+  const label = lo === hi ? lo : `${lo}_${hi}`;
+  return `Runs ${label}`.slice(0, 31); // Excel sheet name hard limit
+}
+
+function buildScoresheetSheet(wb, sheetName, rows, runsChunk) {
+  const ws = wb.addWorksheet(sheetName);
   const firstFlagCol = 7; // G
-  const lastFlagCol = firstFlagCol + runs.length - 1;
+  const lastFlagCol = firstFlagCol + RUNS_PER_SHEET - 1; // always P — fixed 10 columns
   const firstFlagLetter = colLetter(firstFlagCol);
-  const lastFlagLetter = colLetter(Math.max(firstFlagCol, lastFlagCol));
+  const lastFlagLetter = colLetter(lastFlagCol);
   const successRateCol = lastFlagCol + 1;
   const successRateLetter = colLetter(successRateCol);
   const bonusRowCount = 2;
   const lastDataRow = rows.length + 1 + bonusRowCount;
   const lastTaskRow = rows.length + 1;
 
-  const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet("Tracker Template");
-
-  const headerLabels = ["M#", "Official Name", "Notes", "Pts", "Name", "#"];
+  const headerLabels = ["M#", "Official Name", "Task", "Pts", "Name", "#"];
   headerLabels.forEach((label, i) => {
     const cell = ws.getCell(1, i + 1);
     cell.value = label;
     cell.font = { bold: true };
   });
-  runs.forEach((r, i) => {
+  for (let i = 0; i < RUNS_PER_SHEET; i++) {
     const col = firstFlagCol + i;
     const cell = ws.getCell(1, col);
     cell.value = { formula: `SUMPRODUCT($D2:$D${lastDataRow},${colLetter(col)}2:${colLetter(col)}${lastDataRow})` };
     cell.font = { bold: true, color: { argb: "FFFF0000" } };
-  });
+  }
   const rateHeaderCell = ws.getCell(1, successRateCol);
   rateHeaderCell.value = "Success Rate";
   rateHeaderCell.font = { bold: true };
@@ -3004,6 +2935,7 @@ async function buildScoresheetXLSX(runs) {
   avgCell.value = { formula: `AVERAGE(${successRateLetter}2:${successRateLetter}${lastTaskRow})` };
   avgCell.font = { bold: true, color: { argb: "FFFFFF00" } };
   avgCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFF0000" } };
+  avgCell.numFmt = "0%";
 
   rows.forEach((row, i) => {
     const { mission, notes, pts, runName, runNum, flagged } = row;
@@ -3014,14 +2946,15 @@ async function buildScoresheetXLSX(runs) {
     ws.getCell(rowNum, 4).value = pts;
     ws.getCell(rowNum, 5).value = runName;
     ws.getCell(rowNum, 6).value = runNum || null;
-    runs.forEach((r, ci) => {
-      ws.getCell(rowNum, firstFlagCol + ci).value = flagged(r) ? 1 : null;
-    });
-    if (runs.length) {
-      ws.getCell(rowNum, successRateCol).value = {
-        formula: `SUM(${firstFlagLetter}${rowNum}:${lastFlagLetter}${rowNum})/COUNTIF(${firstFlagLetter}$1:${lastFlagLetter}$1,">100")`,
-      };
+    for (let ci = 0; ci < RUNS_PER_SHEET; ci++) {
+      const r = runsChunk[ci]; // undefined past the actual run count — leave blank
+      ws.getCell(rowNum, firstFlagCol + ci).value = r && flagged(r) ? 1 : null;
     }
+    const rateCell = ws.getCell(rowNum, successRateCol);
+    rateCell.value = {
+      formula: `SUM(${firstFlagLetter}${rowNum}:${lastFlagLetter}${rowNum})/COUNTIF(${firstFlagLetter}$1:${lastFlagLetter}$1,">100")`,
+    };
+    rateCell.numFmt = "0%";
   });
 
   [["Precision Token Points", (r) => precisionTokenBonus(r.precisionTokensRemaining ?? 0)],
@@ -3030,7 +2963,10 @@ async function buildScoresheetXLSX(runs) {
       const rowNum = lastTaskRow + 1 + bi;
       ws.getCell(rowNum, 4).value = 1;
       ws.getCell(rowNum, 5).value = label;
-      runs.forEach((r, ci) => { ws.getCell(rowNum, firstFlagCol + ci).value = valueFn(r); });
+      for (let ci = 0; ci < RUNS_PER_SHEET; ci++) {
+        const r = runsChunk[ci];
+        ws.getCell(rowNum, firstFlagCol + ci).value = r ? valueFn(r) : null;
+      }
     });
 
   // Category-row banding: light blue across A:SuccessRate for every task row
@@ -3044,16 +2980,14 @@ async function buildScoresheetXLSX(runs) {
     }],
   });
   // Red-yellow-green heatmap on the Success Rate column.
-  if (runs.length) {
-    ws.addConditionalFormatting({
-      ref: `${successRateLetter}2:${successRateLetter}${lastTaskRow}`,
-      rules: [{
-        type: "colorScale",
-        cfvo: [{ type: "min" }, { type: "percentile", value: 50 }, { type: "max" }],
-        color: [{ argb: "FFF8696B" }, { argb: "FFFFEB84" }, { argb: "FF63BE7B" }],
-      }],
-    });
-  }
+  ws.addConditionalFormatting({
+    ref: `${successRateLetter}2:${successRateLetter}${lastTaskRow}`,
+    rules: [{
+      type: "colorScale",
+      cfvo: [{ type: "min" }, { type: "percentile", value: 50 }, { type: "max" }],
+      color: [{ argb: "FFF8696B" }, { argb: "FFFFEB84" }, { argb: "FF63BE7B" }],
+    }],
+  });
 
   ws.getColumn(1).width = 5;
   ws.getColumn(2).width = 18;
@@ -3061,8 +2995,25 @@ async function buildScoresheetXLSX(runs) {
   ws.getColumn(4).width = 5;
   ws.getColumn(5).width = 12;
   ws.getColumn(6).width = 5;
-  for (let i = 0; i < runs.length; i++) ws.getColumn(firstFlagCol + i).width = 6;
+  for (let i = 0; i < RUNS_PER_SHEET; i++) ws.getColumn(firstFlagCol + i).width = 6;
   ws.getColumn(successRateCol).width = 8;
+}
+
+async function buildScoresheetXLSX(runs) {
+  const rows = buildScoreRowDefs();
+  const sortedRuns = runs.slice().sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  const chunks = [];
+  for (let i = 0; i < sortedRuns.length; i += RUNS_PER_SHEET) chunks.push(sortedRuns.slice(i, i + RUNS_PER_SHEET));
+  if (!chunks.length) chunks.push([]); // still produce one (blank) sheet if there are zero runs
+
+  const wb = new ExcelJS.Workbook();
+  const usedNames = new Set();
+  chunks.forEach((runsChunk, i) => {
+    let name = sheetTitleForRuns(runsChunk, i);
+    while (usedNames.has(name)) name = `${name.slice(0, 28)} ${i}`; // guard against duplicate sheet names
+    usedNames.add(name);
+    buildScoresheetSheet(wb, name, rows, runsChunk);
+  });
 
   const buf = await wb.xlsx.writeBuffer();
   return buf;
@@ -3080,8 +3031,7 @@ async function importScoresheetXLSX(file) {
   const buf = await file.arrayBuffer();
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buf);
-  const ws = wb.worksheets[0];
-  if (!ws) throw new Error("No sheet found in that file.");
+  if (!wb.worksheets.length) throw new Error("No sheet found in that file.");
 
   const cellText = (row, col) => {
     const v = row.getCell(col).value;
@@ -3094,16 +3044,6 @@ async function importScoresheetXLSX(file) {
     return Number(n) || 0;
   };
 
-  const firstFlagCol = 7; // G
-  const headerRow = ws.getRow(1);
-  let successRateCol = null;
-  for (let c = firstFlagCol; c <= ws.columnCount + 1; c++) {
-    if (cellText(headerRow, c).toLowerCase() === "success rate") { successRateCol = c; break; }
-  }
-  if (!successRateCol) throw new Error('Could not find the "Success Rate" column — this doesn\'t look like a BARP scoresheet export.');
-  const runCount = successRateCol - firstFlagCol;
-  if (runCount <= 0) throw new Error("No run columns found in that file.");
-
   const taskLookup = new Map();
   state.missions.forEach((m) => {
     (m.tasks || []).forEach((t) => {
@@ -3113,67 +3053,88 @@ async function importScoresheetXLSX(file) {
   const unitPattern = /^(.*) \(unit (\d+) of \d+\)$/;
   const optionPattern = /^(.*) \(option: (.+)\)$/;
 
-  const taskGroups = new Map(); // task.id -> { task, subRows: [{ row, unit?, optionLabel? }] }
-  let tokenRow = null, inspectionRow = null, unmatchedCount = 0;
-  for (let r = 2; r <= ws.rowCount; r++) {
-    const row = ws.getRow(r);
-    const nameColText = cellText(row, 5).toLowerCase();
-    if (nameColText === "precision token points") { tokenRow = row; continue; }
-    if (nameColText === "equipment inspection") { inspectionRow = row; continue; }
-    const notes = cellText(row, 3);
-    if (!notes) continue;
-    const missionName = cellText(row, 2).toLowerCase();
-
-    let baseTaskName = notes, unit = null, optionLabel = null;
-    const unitMatch = notes.match(unitPattern);
-    const optionMatch = notes.match(optionPattern);
-    if (unitMatch) { baseTaskName = unitMatch[1]; unit = Number(unitMatch[2]); }
-    else if (optionMatch) { baseTaskName = optionMatch[1]; optionLabel = optionMatch[2]; }
-
-    const task = taskLookup.get(`${missionName}|||${baseTaskName.trim().toLowerCase()}`);
-    if (!task) { unmatchedCount++; continue; }
-    if (!taskGroups.has(task.id)) taskGroups.set(task.id, { task, subRows: [] });
-    taskGroups.get(task.id).subRows.push({ row, unit, optionLabel });
-  }
-
   const importedAt = Date.now();
   const todayStr = new Date(importedAt).toLocaleDateString();
   const newRuns = [];
-  for (let ci = 0; ci < runCount; ci++) {
-    const col = firstFlagCol + ci;
-    const rawScores = {};
-    taskGroups.forEach(({ task, subRows }) => {
-      if (task.type === "number") {
-        const count = subRows.filter((sr) => cellNumber(sr.row, col) > 0).length;
-        if (count > 0) rawScores[task.id] = count;
-      } else if (task.type === "choice") {
-        const hit = subRows.find((sr) => cellNumber(sr.row, col) > 0);
-        if (hit) {
-          const idx = (task.options || []).findIndex((o) => o.label === hit.optionLabel);
-          if (idx >= 0) rawScores[task.id] = idx;
+  let unmatchedCount = 0;
+  let sheetsUsed = 0;
+
+  for (const ws of wb.worksheets) {
+    const firstFlagCol = 7; // G
+    const headerRow = ws.getRow(1);
+    let successRateCol = null;
+    for (let c = firstFlagCol; c <= ws.columnCount + 1; c++) {
+      if (cellText(headerRow, c).toLowerCase() === "success rate") { successRateCol = c; break; }
+    }
+    if (!successRateCol) continue; // not a scoresheet-shaped sheet — skip it rather than failing the whole import
+    const runCount = successRateCol - firstFlagCol;
+    if (runCount <= 0) continue;
+    sheetsUsed++;
+
+    const taskGroups = new Map(); // task.id -> { task, subRows: [{ row, unit?, optionLabel? }] }
+    let tokenRow = null, inspectionRow = null;
+    for (let r = 2; r <= ws.rowCount; r++) {
+      const row = ws.getRow(r);
+      const nameColText = cellText(row, 5).toLowerCase();
+      if (nameColText === "precision token points") { tokenRow = row; continue; }
+      if (nameColText === "equipment inspection") { inspectionRow = row; continue; }
+      const notes = cellText(row, 3);
+      if (!notes) continue;
+      const missionName = cellText(row, 2).toLowerCase();
+
+      let baseTaskName = notes, unit = null, optionLabel = null;
+      const unitMatch = notes.match(unitPattern);
+      const optionMatch = notes.match(optionPattern);
+      if (unitMatch) { baseTaskName = unitMatch[1]; unit = Number(unitMatch[2]); }
+      else if (optionMatch) { baseTaskName = optionMatch[1]; optionLabel = optionMatch[2]; }
+
+      const task = taskLookup.get(`${missionName}|||${baseTaskName.trim().toLowerCase()}`);
+      if (!task) { unmatchedCount++; continue; }
+      if (!taskGroups.has(task.id)) taskGroups.set(task.id, { task, subRows: [] });
+      taskGroups.get(task.id).subRows.push({ row, unit, optionLabel });
+    }
+
+    for (let ci = 0; ci < runCount; ci++) {
+      const col = firstFlagCol + ci;
+      const rawScores = {};
+      taskGroups.forEach(({ task, subRows }) => {
+        if (task.type === "number") {
+          const count = subRows.filter((sr) => cellNumber(sr.row, col) > 0).length;
+          if (count > 0) rawScores[task.id] = count;
+        } else if (task.type === "choice") {
+          const hit = subRows.find((sr) => cellNumber(sr.row, col) > 0);
+          if (hit) {
+            const idx = (task.options || []).findIndex((o) => o.label === hit.optionLabel);
+            if (idx >= 0) rawScores[task.id] = idx;
+          }
+        } else {
+          if (cellNumber(subRows[0].row, col) > 0) rawScores[task.id] = true;
         }
-      } else {
-        if (cellNumber(subRows[0].row, col) > 0) rawScores[task.id] = true;
-      }
-    });
-    const tokenBonusVal = tokenRow ? cellNumber(tokenRow, col) : 0;
-    const inspectionVal = inspectionRow ? cellNumber(inspectionRow, col) : 0;
-    newRuns.push({
-      order: state.runs.length + newRuns.length,
-      label: `Imported Run ${ci + 1}`,
-      date: todayStr,
-      startedAt: importedAt + ci,
-      finishedAt: importedAt + ci,
-      inProgress: false,
-      precisionTokensRemaining: tokensFromPrecisionBonus(tokenBonusVal),
-      equipmentInspectionPassed: inspectionVal > 0,
-      rawScores,
-      totalTimeMs: 0,
-      missionTimings: [],
-      transitionTimings: [],
-      notes: "Imported from scoresheet XLSX",
-    });
+      });
+      const tokenBonusVal = tokenRow ? cellNumber(tokenRow, col) : 0;
+      const inspectionVal = inspectionRow ? cellNumber(inspectionRow, col) : 0;
+      // Skip fully-blank columns — these are unused padding slots (a sheet
+      // always has 10 run columns even if fewer real runs filled it), not
+      // actual runs, so don't manufacture an empty run for them.
+      if (!Object.keys(rawScores).length && tokenBonusVal <= 0 && inspectionVal <= 0) continue;
+      newRuns.push({
+        order: state.runs.length + newRuns.length,
+        label: `Imported Run ${newRuns.length + 1}`,
+        date: todayStr,
+        startedAt: importedAt + newRuns.length,
+        finishedAt: importedAt + newRuns.length,
+        inProgress: false,
+        precisionTokensRemaining: tokensFromPrecisionBonus(tokenBonusVal),
+        equipmentInspectionPassed: inspectionVal > 0,
+        rawScores,
+        totalTimeMs: 0,
+        missionTimings: [],
+        transitionTimings: [],
+        notes: "Imported from scoresheet XLSX",
+      });
+    }
   }
+  if (!sheetsUsed) throw new Error('Could not find a "Success Rate" column on any sheet — this doesn\'t look like a BARP scoresheet export.');
   for (const run of newRuns) await dbPut("runs", run);
   await loadRuns();
   return { importedCount: newRuns.length, unmatchedCount };
@@ -3195,10 +3156,10 @@ document.getElementById("btn-export-runs-csv").addEventListener("click", () => {
     <div class="field"><label>From</label><input type="datetime-local" id="export-from" class="text-input" value="${toLocalInput(earliest)}"></div>
     <div class="field"><label>To</label><input type="datetime-local" id="export-to" class="text-input" value="${toLocalInput(latest)}"></div>
     <p class="empty-sub" id="export-run-count"></p>
-    <div class="modal-actions">
-      <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
-      <button class="btn btn-ghost" id="m-export-csv" type="button">Export CSV</button>
-      <button class="btn btn-primary" id="m-export-xlsx" type="button">Export XLSX</button>
+    <div class="modal-actions" style="gap:6px;">
+      <button class="btn btn-ghost btn-sm" id="m-cancel" type="button" style="flex:1; padding:10px 4px;">Cancel</button>
+      <button class="btn btn-ghost btn-sm" id="m-export-csv" type="button" style="flex:1; padding:10px 4px;">CSV</button>
+      <button class="btn btn-primary btn-sm" id="m-export-xlsx" type="button" style="flex:1; padding:10px 4px;">XLSX</button>
     </div>
   `);
   function inRangeRuns() {
@@ -3242,7 +3203,7 @@ document.getElementById("btn-export-runs-csv").addEventListener("click", () => {
       closeModal();
     } catch (e) {
       showErrorBanner(`XLSX export failed: ${e.name} — ${e.message}`);
-      btn.disabled = false; btn.textContent = "Export XLSX";
+      btn.disabled = false; btn.textContent = "XLSX";
     }
   });
 });
@@ -3282,7 +3243,6 @@ document.getElementById("btn-export-backup").addEventListener("click", async () 
 });
 
 document.getElementById("btn-import-backup").addEventListener("click", () => document.getElementById("file-import-backup").click());
-document.getElementById("btn-restore-shadow").addEventListener("click", () => openBackupMenu());
 document.getElementById("btn-reset-db").addEventListener("click", () => {
   if (confirm("This permanently erases every attachment, entry, mission, and run stored on this device. This can't be undone. Continue?")) {
     resetLocalDatabase();

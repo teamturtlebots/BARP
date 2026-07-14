@@ -335,12 +335,22 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   display: block; font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.03em;
   color: var(--text-soft); margin-bottom: 1px;
 }
+.entry-field-value { display: block; word-break: break-word; }
+.entry-field-value.truncated {
+  display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;
+  overflow: hidden; white-space: normal;
+}
+.entry-showmore-btn {
+  display: block; background: none; border: none; padding: 2px 0 0;
+  color: var(--moss); font-weight: 700; font-size: 0.78rem; cursor: pointer;
+}
 
 /* --- Added: mission groups with nested tasks --- */
 .mission-group-head { margin-bottom: 0; }
 .mission-expand-target { cursor: pointer; }
 .mission-expand-target:active { background: var(--paper-3); }
 .mission-expand-chevron { font-size: 1.1rem; flex: none; color: var(--moss); width: 24px; text-align: center; }
+.task-list[hidden] { display: none; }
 .task-list { margin: 8px 0 0 20px; display: flex; flex-direction: column; gap: 8px; }
 .btn-icon-add { color: var(--moss); font-size: 1.3rem; font-weight: 700; }
 .btn-icon-add:hover { color: var(--moss-light); }
