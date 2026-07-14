@@ -165,30 +165,22 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .stat-box .stat-num { font-family: var(--mono); font-size: 1.3rem; color: var(--amber); display: block; }
 .stat-box .stat-label { font-size: 0.68rem; color: var(--moss-light); text-transform: uppercase; letter-spacing: 0.04em; }
 
-.run-list { display: flex; flex-direction: column; gap: 12px; }
+.run-list { display: flex; flex-direction: column; gap: 8px; }
 .run-card {
   background: var(--paper-2);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 12px 14px 14px;
+  padding: 8px 10px;
   position: relative;
 }
-.run-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
-.run-title { font-family: var(--display); font-weight: 700; font-size: 1.02rem; }
-.run-date { font-family: var(--mono); font-size: 0.85rem; color: var(--text-soft); font-weight: 600; }
-.run-stamp {
-  flex: none;
-  width: 54px; height: 54px;
-  border-radius: 50%;
-  border: 2px solid var(--amber-dark);
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  transform: rotate(6deg);
-  font-family: var(--mono);
-}
-.run-stamp .rs-score { font-weight: 700; font-size: 1.05rem; color: var(--ink-deep); line-height: 1; }
-.run-stamp .rs-label { font-size: 0.5rem; color: var(--text-soft); text-transform: uppercase; }
-.run-meta-row { display: flex; gap: 14px; margin-top: 8px; font-family: var(--mono); font-size: 0.78rem; color: var(--text-soft); }
-.run-card-actions { display: flex; gap: 8px; margin-top: 10px; }
+.rc-row { display: flex; align-items: center; gap: 10px; }
+.rc-title-block { flex: 1; min-width: 0; }
+.run-title { font-family: var(--display); font-weight: 700; font-size: 0.92rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-date { font-family: var(--mono); font-size: 0.7rem; color: var(--text-soft); font-weight: 600; }
+.rc-stat { flex: none; display: flex; flex-direction: column; align-items: center; font-family: var(--mono); line-height: 1.15; }
+.rc-stat-val { font-weight: 700; font-size: 0.8rem; color: var(--ink-deep); white-space: nowrap; }
+.rc-stat-label { font-size: 0.52rem; color: var(--text-soft); text-transform: uppercase; letter-spacing: 0.02em; }
+.rc-icon-btn { flex: none; font-size: 1.05rem; padding: 2px 4px; }
 
 /* Mission editor list */
 .mission-list { display: flex; flex-direction: column; gap: 8px; }
@@ -306,8 +298,8 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   color: var(--text);
 }
 .textarea-input { min-height: 90px; resize: vertical; font-family: var(--body); }
-.modal-actions { display: flex; gap: 10px; margin-top: 16px; }
-.modal-actions .btn { flex: 1; }
+.modal-actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+.modal-actions .btn { flex: 1; min-width: 100px; }
 
 .photo-preview-wrap { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
 .photo-preview { width: 84px; height: 84px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); }
@@ -436,7 +428,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .size-picker-big { flex-direction: column; gap: 12px; width: 100%; }
 .size-picker-big .size-btn { padding: 20px; font-size: 1.1rem; }
 #iter-camera-video { width: 100%; border-radius: 12px; background: #000; display: block; }
-.iter-shutter-row { display: flex; align-items: center; justify-content: space-between; padding: 0 24px; margin: 16px 0; }
+.iter-shutter-row { display: flex; align-items: center; justify-content: space-between; padding: 0 24px; margin: 16px 0; gap: 14px; }
 .iter-shutter-btn {
   width: 68px; height: 68px; border-radius: 50%; flex: none;
   background: var(--paper); border: 4px solid var(--ink-deep); cursor: pointer;
@@ -448,6 +440,17 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   color: var(--paper); font-size: 1.1rem; cursor: pointer;
 }
 .iter-shutter-spacer { width: 40px; flex: none; }
+.iter-photo-preview-big { width: 100%; }
+.iter-photo-preview-big img { width: 100%; max-height: 60vh; object-fit: contain; border-radius: 12px; background: #000; display: block; }
+.iter-dictate-btn {
+  width: 150px; height: 150px; border-radius: 50%; flex: none;
+  background: var(--moss); border: none; color: var(--paper); cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  font-size: 2.6rem; margin: 10px auto 4px; box-shadow: 0 6px 18px rgba(63,107,79,0.35);
+}
+.iter-dictate-btn span { font-size: 0.85rem; font-weight: 700; font-family: var(--body); }
+.iter-dictate-btn.recording { background: var(--coral); box-shadow: 0 6px 18px rgba(193,80,62,0.4); }
+.iter-fallback-textarea { margin-top: 18px; }
 
 /* --- Added: disabled button state (used by type-to-confirm delete) --- */
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -507,6 +510,12 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .gfs-subsection { margin-bottom: 16px; margin-left: 4px; }
 .gfs-subsection h4 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-soft); margin: 0 0 6px; }
 .brk-tabs { display: flex; gap: 6px; margin-top: 12px; }
+.brk-edit-icon-btn {
+  background: rgba(255,255,255,0.14); border: none; border-radius: 14px; cursor: pointer;
+  color: var(--amber); font-size: 0.78rem; font-family: var(--body); padding: 5px 12px;
+  display: flex; align-items: center; gap: 5px; flex: none;
+}
+.brk-edit-icon-btn:hover { background: rgba(255,255,255,0.22); }
 .brk-tab-btn {
   flex: 1; background: rgba(255,255,255,0.1); border: none; border-radius: 8px 8px 0 0;
   color: var(--moss-light); font-family: var(--body); font-weight: 600; font-size: 0.85rem;
@@ -514,7 +523,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 }
 .brk-tab-btn.active { background: var(--paper); color: var(--ink-deep); }
 .brk-readonly button { pointer-events: none; }
-.brk-transition-row { font-style: italic; margin: 6px 0 18px; }
+.brk-transition-row { font-style: normal; font-size: 1.05rem; font-weight: 600; color: var(--text); margin: 6px 0 18px; }
 .gfs-task-list { display: flex; flex-direction: column; gap: 8px; }
 
 .gfs-task-row {
@@ -562,7 +571,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   font-size: 1.1rem; cursor: pointer; display: flex; align-items: center; justify-content: center;
   flex: none;
 }
-.gfs-back-btn { font-size: 1.2rem; position: relative; top: -3px; }
+.gfs-back-btn { font-size: 1.2rem; }
 
 .guided-fullscreen.gfs-frozen .gfs-body,
 .guided-fullscreen.gfs-frozen .precision-token-btn,

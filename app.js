@@ -530,6 +530,12 @@ function missionScoreForRun(m, run) {
 // every run starts with 6, and how many are left over scores extra.
 const PRECISION_TOKEN_BONUS = { 0: 0, 1: 10, 2: 15, 3: 25, 4: 35, 5: 50, 6: 50 };
 function precisionTokenBonus(remaining) { return PRECISION_TOKEN_BONUS[remaining] ?? 0; }
+// Reverse of the above, for importing scoresheets — bonus point values aren't
+// unique (5 and 6 tokens both score 50), so ties resolve to the higher count.
+function tokensFromPrecisionBonus(bonusValue) {
+  const matches = Object.entries(PRECISION_TOKEN_BONUS).filter(([, v]) => v === bonusValue).map(([k]) => Number(k));
+  return matches.length ? Math.max(...matches) : 0;
+}
 const PRECISION_TOKENS_START = 6;
 
 // Bonus points for passing the equipment inspection (attachments fit within
@@ -853,7 +859,7 @@ function openRecordIterationModalClassic() {
     </div>
     <div class="field"><label>Size of this iteration</label>
       <div class="size-picker" id="ri-size-picker">
-        <button type="button" class="size-btn active" data-size="small">Small<span>bug fix</span></button>
+        <button type="button" class="size-btn" data-size="small">Small<span>bug fix</span></button>
         <button type="button" class="size-btn" data-size="moderate">Moderate<span>a real change</span></button>
         <button type="button" class="size-btn" data-size="major">Major<span>strategy change</span></button>
       </div>
@@ -941,7 +947,7 @@ function startInteractiveIterationFlow() {
   state.iterFlow = {
     step: 0,
     attachmentId: state.selectedAttachmentIds.size === 1 ? [...state.selectedAttachmentIds][0] : state.attachments[0].id,
-    size: "small",
+    size: null,
     photo: null,
     what: "",
     why: "",
@@ -1044,41 +1050,49 @@ function iterCapturePhoto() {
   canvas.width = width; canvas.height = height;
   canvas.getContext("2d").drawImage(video, 0, 0, width, height);
   state.iterFlow.photo = canvas.toDataURL("image/jpeg", 0.72);
-  const wrap = document.getElementById("iter-photo-preview");
-  if (wrap) wrap.innerHTML = `<img class="photo-preview" src="${state.iterFlow.photo}">`;
-  const nextBtn = document.getElementById("iter-photo-next");
-  if (nextBtn) nextBtn.textContent = "Next";
+  iterStopCameraStream();
+  renderIterPhotoStep(); // switch straight into the review/preview screen
 }
 function renderIterPhotoStep() {
+  const hasPhoto = !!state.iterFlow.photo;
   openGuidedFullscreen(`
-    ${iterHeaderHTML("Take a photo")}
+    ${iterHeaderHTML(hasPhoto ? "Review photo" : "Take a photo")}
     <div class="gfs-body gfs-center">
-      <div class="photo-preview-wrap" id="iter-photo-preview">${state.iterFlow.photo ? `<img class="photo-preview" src="${state.iterFlow.photo}">` : ""}</div>
-      <div class="camera-view" id="iter-camera-view"><video id="iter-camera-video" autoplay playsinline muted></video></div>
-      <div class="iter-shutter-row">
-        <button type="button" class="iter-upload-btn" id="iter-upload-btn" title="Upload a photo instead">&#128193;</button>
-        <button type="button" class="iter-shutter-btn" id="iter-shutter-btn" title="Capture"></button>
-        <span class="iter-shutter-spacer"></span>
-      </div>
-      <input type="file" accept="image/*" id="iter-photo-file" hidden>
+      ${hasPhoto ? `
+        <div class="iter-photo-preview-big"><img src="${state.iterFlow.photo}"></div>
+        <button type="button" class="btn btn-ghost btn-full" id="iter-retake-btn" style="margin-top:14px;">&#8635; Retake</button>
+      ` : `
+        <div class="camera-view" id="iter-camera-view"><video id="iter-camera-video" autoplay playsinline muted></video></div>
+        <div class="iter-shutter-row">
+          <button type="button" class="iter-upload-btn" id="iter-upload-btn" title="Upload a photo instead">&#128193;</button>
+          <button type="button" class="iter-shutter-btn" id="iter-shutter-btn" title="Capture"></button>
+          <span class="iter-shutter-spacer"></span>
+        </div>
+        <input type="file" accept="image/*" id="iter-photo-file" hidden>
+      `}
     </div>
     <div class="gfs-footer">
-      <button type="button" class="btn btn-primary btn-full" id="iter-photo-next">${state.iterFlow.photo ? "Next" : "Skip photo"}</button>
+      <button type="button" class="btn btn-primary btn-full" id="iter-photo-next">${hasPhoto ? "Next" : "Skip photo"}</button>
     </div>
   `);
   wireIterNav();
-  iterStartCamera(); // camera opens immediately — this step is camera-first, not a choice screen
-  document.getElementById("iter-shutter-btn").addEventListener("click", iterCapturePhoto);
-  document.getElementById("iter-upload-btn").addEventListener("click", () => document.getElementById("iter-photo-file").click());
-  document.getElementById("iter-photo-file").addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    iterStopCameraStream();
-    state.iterFlow.photo = await resizeImageToDataURL(file, 900, 0.72);
-    const wrap = document.getElementById("iter-photo-preview");
-    if (wrap) wrap.innerHTML = `<img class="photo-preview" src="${state.iterFlow.photo}">`;
-    document.getElementById("iter-photo-next").textContent = "Next";
-  });
+  if (hasPhoto) {
+    document.getElementById("iter-retake-btn").addEventListener("click", () => {
+      state.iterFlow.photo = null;
+      renderIterPhotoStep(); // back to the camera
+    });
+  } else {
+    iterStartCamera(); // camera opens immediately — this step is camera-first, not a choice screen
+    document.getElementById("iter-shutter-btn").addEventListener("click", iterCapturePhoto);
+    document.getElementById("iter-upload-btn").addEventListener("click", () => document.getElementById("iter-photo-file").click());
+    document.getElementById("iter-photo-file").addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      iterStopCameraStream();
+      state.iterFlow.photo = await resizeImageToDataURL(file, 900, 0.72);
+      renderIterPhotoStep(); // switch straight into the review/preview screen
+    });
+  }
   document.getElementById("iter-photo-next").addEventListener("click", () => {
     state.iterFlow.step++;
     renderIterStep();
@@ -1089,8 +1103,11 @@ function renderIterWhatStep() {
   openGuidedFullscreen(`
     ${iterHeaderHTML("What changed?")}
     <div class="gfs-body gfs-center">
-      ${SpeechRec ? `<div class="voice-row"><button class="btn btn-ghost" id="iter-voice-1" type="button">&#127908; Dictate</button><span class="voice-status" id="iter-voice-status-1"></span></div>` : ""}
-      <textarea class="textarea-input" id="iter-what" placeholder="e.g. Swapped the claw's gear ratio from 1:1 to 3:1">${esc(state.iterFlow.what)}</textarea>
+      ${SpeechRec ? `
+        <button type="button" class="iter-dictate-btn" id="iter-voice-1">&#127908;<span>Dictate</span></button>
+        <div class="voice-status" id="iter-voice-status-1"></div>
+      ` : ""}
+      <textarea class="textarea-input iter-fallback-textarea" id="iter-what" placeholder="e.g. Swapped the claw's gear ratio from 1:1 to 3:1">${esc(state.iterFlow.what)}</textarea>
     </div>
     <div class="gfs-footer">
       <button type="button" class="btn btn-primary btn-full" id="iter-what-next">Next</button>
@@ -1110,8 +1127,11 @@ function renderIterWhyStep() {
   openGuidedFullscreen(`
     ${iterHeaderHTML("Why changed?")}
     <div class="gfs-body gfs-center">
-      ${SpeechRec ? `<div class="voice-row"><button class="btn btn-ghost" id="iter-voice-2" type="button">&#127908; Dictate</button><span class="voice-status" id="iter-voice-status-2"></span></div>` : ""}
-      <textarea class="textarea-input" id="iter-why" placeholder="e.g. It was stalling under load on the last run">${esc(state.iterFlow.why)}</textarea>
+      ${SpeechRec ? `
+        <button type="button" class="iter-dictate-btn" id="iter-voice-2">&#127908;<span>Dictate</span></button>
+        <div class="voice-status" id="iter-voice-status-2"></div>
+      ` : ""}
+      <textarea class="textarea-input iter-fallback-textarea" id="iter-why" placeholder="e.g. It was stalling under load on the last run">${esc(state.iterFlow.why)}</textarea>
     </div>
     <div class="gfs-footer">
       <button type="button" class="btn btn-primary btn-full" id="iter-save">Save entry</button>
@@ -1206,9 +1226,18 @@ function toggleVoiceNote(SpeechRec, textareaId, statusId, btnId) {
   if (recognizer) { stopRecognizer(); return; }
   recognizer = new SpeechRec();
   recognizer.lang = "en-US"; recognizer.continuous = true; recognizer.interimResults = false;
-  recognizer.onstart = () => { statusEl.textContent = "listening…"; statusEl.classList.add("listening"); btn.textContent = "⏹ Stop"; };
+  recognizer.onstart = () => {
+    statusEl.textContent = "listening…"; statusEl.classList.add("listening");
+    if (btn.classList.contains("iter-dictate-btn")) { btn.classList.add("recording"); btn.innerHTML = "&#9209;<span>Stop</span>"; }
+    else btn.textContent = "⏹ Stop";
+  };
   recognizer.onerror = () => { statusEl.textContent = "mic error — try again"; };
-  recognizer.onend = () => { statusEl.classList.remove("listening"); statusEl.textContent = "stopped"; btn.textContent = "🎙 Dictate"; recognizer = null; };
+  recognizer.onend = () => {
+    statusEl.classList.remove("listening"); statusEl.textContent = "stopped";
+    if (btn.classList.contains("iter-dictate-btn")) { btn.classList.remove("recording"); btn.innerHTML = "&#127908;<span>Dictate</span>"; }
+    else btn.textContent = "🎙 Dictate";
+    recognizer = null;
+  };
   recognizer.onresult = (event) => {
     let transcript = "";
     for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -1924,6 +1953,8 @@ async function usePrecisionToken() {
   await dbPut("runs", run);
   const el = document.getElementById("grn-token-count");
   if (el) el.textContent = run.precisionTokensRemaining;
+  const pointsEl = document.getElementById("grn-points");
+  if (pointsEl) pointsEl.textContent = `${liveScoreHTML()} pts`;
   const overviewLabel = document.querySelector(".gfs-timer-label");
   if (overviewLabel && overviewLabel.textContent.includes("tokens left")) {
     overviewLabel.textContent = `${fmtDuration(run.totalTimeMs)} total time · ${run.precisionTokensRemaining} tokens left · inspection ${run.equipmentInspectionPassed ? `passed (+${EQUIPMENT_INSPECTION_BONUS})` : "not passed"} · review below or save now`;
@@ -2562,10 +2593,13 @@ function renderRuns() {
     const card = document.createElement("div");
     card.className = "run-card run-card-incomplete";
     card.innerHTML = `
-      <div class="run-card-head">
-        <div><div class="run-title">${esc(run.label)}</div><div class="run-date">incomplete run</div></div>
+      <div class="rc-row">
+        <div class="rc-title-block">
+          <div class="run-title">${esc(run.label)}</div>
+          <div class="run-date">incomplete run</div>
+        </div>
+        <button class="btn-icon rc-icon-btn" data-act="del" title="Delete">&#128465;&#65039;</button>
       </div>
-      <div class="run-card-actions"><button class="btn btn-danger" data-act="del">Delete</button></div>
     `;
     card.querySelector('[data-act="del"]').addEventListener("click", async () => {
       if (confirm(`Delete incomplete game run "${run.label}"?`)) {
@@ -2580,23 +2614,21 @@ function renderRuns() {
   completed.slice().reverse().forEach((run) => {
     const total = runTotal(run, state.missions);
     const maxTotal = runMaxPoints(state.missions);
+    const runCount = new Set((run.missionTimings || []).map((mt) => mt.runGroupId)).size;
+    const missionCount = (run.missionTimings || []).length;
     const card = document.createElement("div");
     card.className = "run-card";
     card.innerHTML = `
-      <div class="run-card-head">
-        <div>
+      <div class="rc-row">
+        <div class="rc-title-block">
           <div class="run-title">${esc(run.label)}</div>
           <div class="run-date">${esc(run.date || "")}</div>
         </div>
-        <div class="run-stamp"><span class="rs-score">${total}</span><span class="rs-label">/ ${maxTotal}</span></div>
-      </div>
-      <div class="run-meta-row">
-        <span>${fmtDuration(run.totalTimeMs || 0)} total</span>
-        <span>${new Set((run.missionTimings || []).map(mt => mt.runGroupId)).size} run${new Set((run.missionTimings || []).map(mt => mt.runGroupId)).size === 1 ? "" : "s"} &middot; ${(run.missionTimings || []).length} mission${(run.missionTimings || []).length === 1 ? "" : "s"}</span>
-      </div>
-      <div class="run-card-actions">
-        <button class="btn btn-ghost" data-act="view">View breakdown</button>
-        <button class="btn btn-danger" data-act="del">Delete</button>
+        <div class="rc-stat"><span class="rc-stat-val">${total}/${maxTotal}</span><span class="rc-stat-label">pts</span></div>
+        <div class="rc-stat"><span class="rc-stat-val">${fmtDuration(run.totalTimeMs || 0)}</span><span class="rc-stat-label">time</span></div>
+        <div class="rc-stat"><span class="rc-stat-val">${runCount}&middot;${missionCount}</span><span class="rc-stat-label">run&middot;msn</span></div>
+        <button class="btn-icon rc-icon-btn" data-act="view" title="View breakdown">&#128065;&#65039;</button>
+        <button class="btn-icon rc-icon-btn" data-act="del" title="Delete">&#128465;&#65039;</button>
       </div>
     `;
     card.querySelector('[data-act="view"]').addEventListener("click", () => renderRunBreakdown(run));
@@ -2611,16 +2643,23 @@ function renderRuns() {
   });
 }
 
+function breakdownAvgOpTime(run) {
+  const transitions = run.transitionTimings || [];
+  if (!transitions.length) return null;
+  return transitions.reduce((s, t) => s + t.durationMs, 0) / transitions.length;
+}
 function renderRunBreakdown(run) {
   state.breakdown = { run, editing: false, tab: "scores" };
+  const avgOp = breakdownAvgOpTime(run);
   openGuidedFullscreen(`
     <div class="gfs-header">
       <div class="gfs-header-top">
         <button type="button" class="gfs-back-btn" id="brk-back">&#8592;</button>
+        <button type="button" class="brk-edit-icon-btn" id="brk-edit-btn">&#9998;&#65039; Edit</button>
         <div class="guided-phase-badge">${esc(run.label)}</div>
       </div>
       <div class="gfs-timer" id="brk-total">${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}</div>
-      <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs || 0)} total time</div>
+      <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs || 0)} total time &middot; avg operation time ${avgOp !== null ? fmtDuration(avgOp) : "&mdash;"}</div>
       <div class="brk-tabs">
         <button type="button" class="brk-tab-btn" data-tab="scores">Scores</button>
         <button type="button" class="brk-tab-btn" data-tab="timing">Timing</button>
@@ -2628,10 +2667,11 @@ function renderRunBreakdown(run) {
     </div>
     <div class="gfs-body" id="brk-body"></div>
     <div class="gfs-footer">
-      <button type="button" class="btn btn-ghost btn-full" id="brk-edit-btn">Edit</button>
+      <button type="button" class="btn btn-primary btn-full" id="brk-close-btn">Close</button>
     </div>
   `);
   document.getElementById("brk-back").addEventListener("click", closeGuidedFullscreen);
+  document.getElementById("brk-close-btn").addEventListener("click", closeGuidedFullscreen);
   document.getElementById("brk-edit-btn").addEventListener("click", async () => {
     const b = state.breakdown;
     if (b.editing) {
@@ -2653,7 +2693,7 @@ function renderBreakdownTabs() {
   const editBtn = document.getElementById("brk-edit-btn");
   if (editBtn) {
     editBtn.hidden = b.tab !== "scores";
-    editBtn.textContent = b.editing ? "Save changes" : "Edit";
+    editBtn.innerHTML = b.editing ? "&#10003; Save changes" : "&#9998;&#65039; Edit";
   }
   if (b.tab === "scores") renderBreakdownScoresTab();
   else renderBreakdownTimingTab();
@@ -2753,7 +2793,7 @@ function renderBreakdownTimingTab() {
     if (lastGroupId !== undefined && mt.runGroupId !== lastGroupId) {
       flushGroup();
       if (transitions[transIdx]) {
-        html += `<p class="empty-sub brk-transition-row">Transition to "${esc(mt.runGroupName || "next run")}": ${fmtDuration(transitions[transIdx].durationMs)}</p>`;
+        html += `<p class="empty-sub brk-transition-row">Operation time: ${fmtDuration(transitions[transIdx].durationMs)}</p>`;
         transIdx++;
       }
       groupRows = "";
@@ -2767,7 +2807,7 @@ function renderBreakdownTimingTab() {
   flushGroup();
   const avgOpTime = transitions.length ? transitions.reduce((s, t) => s + t.durationMs, 0) / transitions.length : 0;
   body.className = "gfs-body";
-  body.innerHTML = `<p class="empty-sub">Avg operation (transition) time: ${transitions.length ? fmtDuration(avgOpTime) : "—"}</p>`
+  body.innerHTML = `<p class="empty-sub">Avg operation time: ${transitions.length ? fmtDuration(avgOpTime) : "—"}</p>`
     + (html || `<p class="empty-sub">No timing data recorded for this run.</p>`);
 }
 
@@ -2782,49 +2822,293 @@ function colLetter(n) {
   }
   return s;
 }
-function buildScoresheetCSV(runs) {
+// Shared by the CSV and XLSX exporters/importer. A "Number" task (e.g. up to
+// 4 objects delivered) becomes one row per unit; a "Choice" task becomes one
+// row per option. Each resulting row is a genuine binary flag — lossless,
+// unlike a single row trying to represent a count or a selection.
+function buildScoreRowDefs() {
   const sortedGroups = state.runGroups.slice().sort((a, b) => a.order - b.order);
   const groupNumberById = Object.fromEntries(sortedGroups.map((g, i) => [g.id, i + 1]));
   const groupsById = Object.fromEntries(sortedGroups.map((g) => [g.id, g]));
 
-  const taskRows = [];
+  const rows = [];
   state.missions.forEach((mission) => {
     const group = groupsById[mission.runGroupId];
     const runName = group ? group.name : "Unassigned";
     const runNum = group ? groupNumberById[group.id] : "";
-    (mission.tasks || []).forEach((task) => taskRows.push({ mission, task, runName, runNum }));
+    (mission.tasks || []).forEach((task) => {
+      const base = { mission, task, runName, runNum };
+      if (task.type === "number") {
+        const max = task.max || 0;
+        for (let unit = 1; unit <= max; unit++) {
+          rows.push({ ...base, notes: `${task.name} (unit ${unit} of ${max})`, pts: task.pointsPerUnit || 1,
+            flagged: (run) => (Number((run.rawScores || {})[task.id]) || 0) >= unit });
+        }
+      } else if (task.type === "choice") {
+        (task.options || []).forEach((opt, idx) => {
+          rows.push({ ...base, notes: `${task.name} (option: ${opt.label})`, pts: opt.points || 0,
+            flagged: (run) => (run.rawScores || {})[task.id] === idx });
+        });
+      } else {
+        rows.push({ ...base, notes: task.name, pts: taskMaxPoints(task),
+          flagged: (run) => !!(run.rawScores || {})[task.id] });
+      }
+    });
   });
+  return rows;
+}
+
+function buildScoresheetCSV(runs) {
+  const rows = buildScoreRowDefs();
 
   // Run-flag columns start right after "M#,Official Name,Notes,Pts,Name,#"
   // (6 columns), so the first flag column is G, matching the template.
   const firstFlagCol = 7;
   const lastFlagCol = firstFlagCol + runs.length - 1;
   const flagRangeFor = (rowNum) => `${colLetter(firstFlagCol)}${rowNum}:${colLetter(lastFlagCol)}${rowNum}`;
+  const bonusRowCount = 2; // Precision Token Points, Equipment Inspection
+  const lastDataRow = rows.length + 1 + bonusRowCount; // +1 for header row
+  const lastTaskRow = rows.length + 1; // last row that has a Success Rate formula
+  const successRateColLetter = colLetter(lastFlagCol + 1);
 
-  const header = ["M#", "Official Name", "Notes", "Pts", "Name", "#", ...runs.map((r) => r.label), "Success Rate", "", "Run #", "Score"];
+  // Row 1: per-run total-score formulas (SUMPRODUCT of each row's points
+  // against that run's flags) — matches the template exactly, these are
+  // live formulas, not just the run's label as plain text.
+  const headerRunCells = runs.map((r, i) => `=SUMPRODUCT($D2:$D${lastDataRow},${colLetter(firstFlagCol + i)}2:${colLetter(firstFlagCol + i)}${lastDataRow})`);
+  const header = ["M#", "Official Name", "Notes", "Pts", "Name", "#", ...headerRunCells, "Success Rate", "", `=AVERAGE(${successRateColLetter}2:${successRateColLetter}${lastTaskRow})`];
   const lines = [header.map(csvEscape).join(",")];
 
-  taskRows.forEach((row, i) => {
-    const { mission, task, runName, runNum } = row;
+  rows.forEach((row, i) => {
+    const { mission, notes, pts, runName, runNum, flagged } = row;
     const rowNum = i + 2; // +2: header is row 1, data starts at row 2
-    const flags = runs.map((r) => (isTaskComplete(task, r.rawScores || {}) ? "1" : ""));
+    const flags = runs.map((r) => (flagged(r) ? "1" : ""));
     // A real spreadsheet formula (not a pre-computed number) so it recalculates
-    // if the flags are ever edited after export/import — matches how the
-    // original tracker computes Success Rate live off the flag cells.
+    // if the flags are ever edited after export/import — matches the
+    // template's own Success Rate formula pattern exactly.
     const successRateFormula = runs.length
-      ? `=TEXT(COUNTIF(${flagRangeFor(rowNum)},1)/${runs.length},"0%")`
+      ? `=SUM(${flagRangeFor(rowNum)})/COUNTIF(${colLetter(firstFlagCol)}$1:${colLetter(lastFlagCol)}$1,">100")`
       : "";
-    const sideTable = i < runs.length ? [String(i + 1), String(runTotal(runs[i], state.missions))] : ["", ""];
-    const rowVals = ["", mission.name, task.name, taskMaxPoints(task), runName, runNum, ...flags, successRateFormula, "", ...sideTable];
+    const rowVals = [mission.number ?? "", mission.name, notes, pts, runName, runNum, ...flags, successRateFormula];
     lines.push(rowVals.map(csvEscape).join(","));
   });
 
-  const tokenRow = ["", "", "", 1, "Precision Token Points", "", ...runs.map((r) => String(precisionTokenBonus(r.precisionTokensRemaining ?? 0))), "", "", "", ""];
+  const tokenRow = ["", "", "", 1, "Precision Token Points", "", ...runs.map((r) => String(precisionTokenBonus(r.precisionTokensRemaining ?? 0)))];
   lines.push(tokenRow.map(csvEscape).join(","));
-  const inspectionRow = ["", "", "", 1, "Equipment Inspection", "", ...runs.map((r) => String(r.equipmentInspectionPassed ? EQUIPMENT_INSPECTION_BONUS : 0)), "", "", "", ""];
+  const inspectionRow = ["", "", "", 1, "Equipment Inspection", "", ...runs.map((r) => String(r.equipmentInspectionPassed ? EQUIPMENT_INSPECTION_BONUS : 0))];
   lines.push(inspectionRow.map(csvEscape).join(","));
 
   return lines.join("\n");
+}
+
+async function buildScoresheetXLSX(runs) {
+  const rows = buildScoreRowDefs();
+
+  const firstFlagCol = 7; // G
+  const lastFlagCol = firstFlagCol + runs.length - 1;
+  const firstFlagLetter = colLetter(firstFlagCol);
+  const lastFlagLetter = colLetter(Math.max(firstFlagCol, lastFlagCol));
+  const successRateCol = lastFlagCol + 1;
+  const successRateLetter = colLetter(successRateCol);
+  const bonusRowCount = 2;
+  const lastDataRow = rows.length + 1 + bonusRowCount;
+  const lastTaskRow = rows.length + 1;
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Tracker Template");
+
+  const headerLabels = ["M#", "Official Name", "Notes", "Pts", "Name", "#"];
+  headerLabels.forEach((label, i) => {
+    const cell = ws.getCell(1, i + 1);
+    cell.value = label;
+    cell.font = { bold: true };
+  });
+  runs.forEach((r, i) => {
+    const col = firstFlagCol + i;
+    const cell = ws.getCell(1, col);
+    cell.value = { formula: `SUMPRODUCT($D2:$D${lastDataRow},${colLetter(col)}2:${colLetter(col)}${lastDataRow})` };
+    cell.font = { bold: true, color: { argb: "FFFF0000" } };
+  });
+  const rateHeaderCell = ws.getCell(1, successRateCol);
+  rateHeaderCell.value = "Success Rate";
+  rateHeaderCell.font = { bold: true };
+  rateHeaderCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF00FF00" } };
+  const avgCell = ws.getCell(1, successRateCol + 2);
+  avgCell.value = { formula: `AVERAGE(${successRateLetter}2:${successRateLetter}${lastTaskRow})` };
+  avgCell.font = { bold: true, color: { argb: "FFFFFF00" } };
+  avgCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFF0000" } };
+
+  rows.forEach((row, i) => {
+    const { mission, notes, pts, runName, runNum, flagged } = row;
+    const rowNum = i + 2;
+    ws.getCell(rowNum, 1).value = mission.number ?? null;
+    ws.getCell(rowNum, 2).value = mission.name;
+    ws.getCell(rowNum, 3).value = notes;
+    ws.getCell(rowNum, 4).value = pts;
+    ws.getCell(rowNum, 5).value = runName;
+    ws.getCell(rowNum, 6).value = runNum || null;
+    runs.forEach((r, ci) => {
+      ws.getCell(rowNum, firstFlagCol + ci).value = flagged(r) ? 1 : null;
+    });
+    if (runs.length) {
+      ws.getCell(rowNum, successRateCol).value = {
+        formula: `SUM(${firstFlagLetter}${rowNum}:${lastFlagLetter}${rowNum})/COUNTIF(${firstFlagLetter}$1:${lastFlagLetter}$1,">100")`,
+      };
+    }
+  });
+
+  [["Precision Token Points", (r) => precisionTokenBonus(r.precisionTokensRemaining ?? 0)],
+   ["Equipment Inspection", (r) => (r.equipmentInspectionPassed ? EQUIPMENT_INSPECTION_BONUS : 0)]]
+    .forEach(([label, valueFn], bi) => {
+      const rowNum = lastTaskRow + 1 + bi;
+      ws.getCell(rowNum, 4).value = 1;
+      ws.getCell(rowNum, 5).value = label;
+      runs.forEach((r, ci) => { ws.getCell(rowNum, firstFlagCol + ci).value = valueFn(r); });
+    });
+
+  // Category-row banding: light blue across A:SuccessRate for every task row
+  // whose "#" (category number) is odd — matches the template exactly.
+  ws.addConditionalFormatting({
+    ref: `A2:${successRateLetter}${lastTaskRow}`,
+    rules: [{
+      type: "expression",
+      formulae: ["ISODD($F2)"],
+      style: { fill: { type: "pattern", pattern: "solid", bgColor: { argb: "FFCFE2F3" } } },
+    }],
+  });
+  // Red-yellow-green heatmap on the Success Rate column.
+  if (runs.length) {
+    ws.addConditionalFormatting({
+      ref: `${successRateLetter}2:${successRateLetter}${lastTaskRow}`,
+      rules: [{
+        type: "colorScale",
+        cfvo: [{ type: "min" }, { type: "percentile", value: 50 }, { type: "max" }],
+        color: [{ argb: "FFF8696B" }, { argb: "FFFFEB84" }, { argb: "FF63BE7B" }],
+      }],
+    });
+  }
+
+  ws.getColumn(1).width = 5;
+  ws.getColumn(2).width = 18;
+  ws.getColumn(3).width = 20;
+  ws.getColumn(4).width = 5;
+  ws.getColumn(5).width = 12;
+  ws.getColumn(6).width = 5;
+  for (let i = 0; i < runs.length; i++) ws.getColumn(firstFlagCol + i).width = 6;
+  ws.getColumn(successRateCol).width = 8;
+
+  const buf = await wb.xlsx.writeBuffer();
+  return buf;
+}
+
+// Reads a scoresheet .xlsx in exactly the shape buildScoresheetXLSX produces:
+// header row with M#/Official Name/Notes/Pts/Name/#, one column per run up to
+// a "Success Rate" column, then two bonus rows (Precision Token Points,
+// Equipment Inspection). Rows are matched back to real tasks by (mission
+// name, task name); Number tasks are split into one row per unit
+// ("Task (unit N of MAX)") and Choice tasks into one row per option
+// ("Task (option: LABEL)") — this makes the round trip fully lossless for
+// every task type, not just Yes/No.
+async function importScoresheetXLSX(file) {
+  const buf = await file.arrayBuffer();
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buf);
+  const ws = wb.worksheets[0];
+  if (!ws) throw new Error("No sheet found in that file.");
+
+  const cellText = (row, col) => {
+    const v = row.getCell(col).value;
+    if (v && typeof v === "object" && "result" in v) return String(v.result ?? "").trim();
+    return String(v ?? "").trim();
+  };
+  const cellNumber = (row, col) => {
+    const v = row.getCell(col).value;
+    const n = v && typeof v === "object" && "result" in v ? v.result : v;
+    return Number(n) || 0;
+  };
+
+  const firstFlagCol = 7; // G
+  const headerRow = ws.getRow(1);
+  let successRateCol = null;
+  for (let c = firstFlagCol; c <= ws.columnCount + 1; c++) {
+    if (cellText(headerRow, c).toLowerCase() === "success rate") { successRateCol = c; break; }
+  }
+  if (!successRateCol) throw new Error('Could not find the "Success Rate" column — this doesn\'t look like a BARP scoresheet export.');
+  const runCount = successRateCol - firstFlagCol;
+  if (runCount <= 0) throw new Error("No run columns found in that file.");
+
+  const taskLookup = new Map();
+  state.missions.forEach((m) => {
+    (m.tasks || []).forEach((t) => {
+      taskLookup.set(`${(m.name || "").trim().toLowerCase()}|||${(t.name || "").trim().toLowerCase()}`, t);
+    });
+  });
+  const unitPattern = /^(.*) \(unit (\d+) of \d+\)$/;
+  const optionPattern = /^(.*) \(option: (.+)\)$/;
+
+  const taskGroups = new Map(); // task.id -> { task, subRows: [{ row, unit?, optionLabel? }] }
+  let tokenRow = null, inspectionRow = null, unmatchedCount = 0;
+  for (let r = 2; r <= ws.rowCount; r++) {
+    const row = ws.getRow(r);
+    const nameColText = cellText(row, 5).toLowerCase();
+    if (nameColText === "precision token points") { tokenRow = row; continue; }
+    if (nameColText === "equipment inspection") { inspectionRow = row; continue; }
+    const notes = cellText(row, 3);
+    if (!notes) continue;
+    const missionName = cellText(row, 2).toLowerCase();
+
+    let baseTaskName = notes, unit = null, optionLabel = null;
+    const unitMatch = notes.match(unitPattern);
+    const optionMatch = notes.match(optionPattern);
+    if (unitMatch) { baseTaskName = unitMatch[1]; unit = Number(unitMatch[2]); }
+    else if (optionMatch) { baseTaskName = optionMatch[1]; optionLabel = optionMatch[2]; }
+
+    const task = taskLookup.get(`${missionName}|||${baseTaskName.trim().toLowerCase()}`);
+    if (!task) { unmatchedCount++; continue; }
+    if (!taskGroups.has(task.id)) taskGroups.set(task.id, { task, subRows: [] });
+    taskGroups.get(task.id).subRows.push({ row, unit, optionLabel });
+  }
+
+  const importedAt = Date.now();
+  const todayStr = new Date(importedAt).toLocaleDateString();
+  const newRuns = [];
+  for (let ci = 0; ci < runCount; ci++) {
+    const col = firstFlagCol + ci;
+    const rawScores = {};
+    taskGroups.forEach(({ task, subRows }) => {
+      if (task.type === "number") {
+        const count = subRows.filter((sr) => cellNumber(sr.row, col) > 0).length;
+        if (count > 0) rawScores[task.id] = count;
+      } else if (task.type === "choice") {
+        const hit = subRows.find((sr) => cellNumber(sr.row, col) > 0);
+        if (hit) {
+          const idx = (task.options || []).findIndex((o) => o.label === hit.optionLabel);
+          if (idx >= 0) rawScores[task.id] = idx;
+        }
+      } else {
+        if (cellNumber(subRows[0].row, col) > 0) rawScores[task.id] = true;
+      }
+    });
+    const tokenBonusVal = tokenRow ? cellNumber(tokenRow, col) : 0;
+    const inspectionVal = inspectionRow ? cellNumber(inspectionRow, col) : 0;
+    newRuns.push({
+      order: state.runs.length + newRuns.length,
+      label: `Imported Run ${ci + 1}`,
+      date: todayStr,
+      startedAt: importedAt + ci,
+      finishedAt: importedAt + ci,
+      inProgress: false,
+      precisionTokensRemaining: tokensFromPrecisionBonus(tokenBonusVal),
+      equipmentInspectionPassed: inspectionVal > 0,
+      rawScores,
+      totalTimeMs: 0,
+      missionTimings: [],
+      transitionTimings: [],
+      notes: "Imported from scoresheet XLSX",
+    });
+  }
+  for (const run of newRuns) await dbPut("runs", run);
+  await loadRuns();
+  return { importedCount: newRuns.length, unmatchedCount };
 }
 
 document.getElementById("btn-export-runs-csv").addEventListener("click", () => {
@@ -2838,14 +3122,15 @@ document.getElementById("btn-export-runs-csv").addEventListener("click", () => {
   const earliest = (completedRuns[0].startedAt || Date.now()) - 60000;
   const latest = (completedRuns[completedRuns.length - 1].startedAt || Date.now()) + 60000;
   openModal(`
-    <h2>Export scoresheet CSV</h2>
+    <h2>Export scoresheet</h2>
     <p class="empty-sub">Choose a date/time range — every completed run started in that window becomes one column.</p>
     <div class="field"><label>From</label><input type="datetime-local" id="export-from" class="text-input" value="${toLocalInput(earliest)}"></div>
     <div class="field"><label>To</label><input type="datetime-local" id="export-to" class="text-input" value="${toLocalInput(latest)}"></div>
     <p class="empty-sub" id="export-run-count"></p>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
-      <button class="btn btn-primary" id="m-export" type="button">Export</button>
+      <button class="btn btn-ghost" id="m-export-csv" type="button">Export CSV</button>
+      <button class="btn btn-primary" id="m-export-xlsx" type="button">Export XLSX</button>
     </div>
   `);
   function inRangeRuns() {
@@ -2863,7 +3148,7 @@ document.getElementById("btn-export-runs-csv").addEventListener("click", () => {
   document.getElementById("export-to").addEventListener("change", updateCount);
   updateCount();
   document.getElementById("m-cancel").addEventListener("click", closeModal);
-  document.getElementById("m-export").addEventListener("click", () => {
+  document.getElementById("m-export-csv").addEventListener("click", () => {
     const runs = inRangeRuns();
     if (!runs.length) { alert("No runs in that range."); return; }
     if (!state.missions.some((m) => (m.tasks || []).length)) { alert("Add missions and tasks in Setup first."); return; }
@@ -2871,6 +3156,44 @@ document.getElementById("btn-export-runs-csv").addEventListener("click", () => {
     closeModal();
     download(`barp-scoresheet-${Date.now()}.csv`, csv, "text/csv");
   });
+  document.getElementById("m-export-xlsx").addEventListener("click", async () => {
+    const runs = inRangeRuns();
+    if (!runs.length) { alert("No runs in that range."); return; }
+    if (!state.missions.some((m) => (m.tasks || []).length)) { alert("Add missions and tasks in Setup first."); return; }
+    if (typeof ExcelJS === "undefined") { alert("Couldn't load the Excel export library — check your internet connection and try again."); return; }
+    const btn = document.getElementById("m-export-xlsx");
+    btn.disabled = true; btn.textContent = "Building…";
+    try {
+      const buf = await buildScoresheetXLSX(runs);
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `barp-scoresheet-${Date.now()}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      closeModal();
+    } catch (e) {
+      showErrorBanner(`XLSX export failed: ${e.name} — ${e.message}`);
+      btn.disabled = false; btn.textContent = "Export XLSX";
+    }
+  });
+});
+
+document.getElementById("btn-import-runs-xlsx").addEventListener("click", () => document.getElementById("file-import-runs-xlsx").click());
+document.getElementById("file-import-runs-xlsx").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  if (typeof ExcelJS === "undefined") { alert("Couldn't load the Excel library — check your internet connection and try again."); return; }
+  if (!state.missions.some((m) => (m.tasks || []).length)) { alert("Add missions and tasks in Setup first, so imported scores have something to match against."); return; }
+  try {
+    const result = await importScoresheetXLSX(file);
+    let msg = `Imported ${result.importedCount} run${result.importedCount === 1 ? "" : "s"}.`;
+    if (result.unmatchedCount) msg += ` ${result.unmatchedCount} row${result.unmatchedCount === 1 ? "" : "s"} in the file didn't match any mission/task in Setup and were skipped.`;
+    alert(msg);
+  } catch (err) {
+    showErrorBanner(`Import failed: ${err.name} — ${err.message}`);
+  }
 });
 
 // ==========================================================

@@ -55,7 +55,9 @@
   <!-- RUNS VIEW -->
   <section class="view" id="view-runs" hidden>
     <button class="btn btn-amber btn-full btn-start-run" id="btn-start-run">&#9654; Start New Practice Game Run</button>
-    <button class="btn btn-ghost btn-full" id="btn-export-runs-csv" style="margin-bottom:16px;">Export scoresheet CSV</button>
+    <button class="btn btn-ghost btn-full" id="btn-export-runs-csv">Export scoresheet</button>
+    <button class="btn btn-ghost btn-full" id="btn-import-runs-xlsx" style="margin-bottom:16px;">Import scoresheet XLSX</button>
+    <input type="file" accept=".xlsx" id="file-import-runs-xlsx" hidden>
 
     <div id="run-stats" class="stat-strip"></div>
 
@@ -134,6 +136,7 @@
 <input type="file" id="file-import-missions" accept=".csv,text/csv" hidden />
 <input type="file" id="file-import-backup" accept="application/json" hidden />
 
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
