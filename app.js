@@ -206,6 +206,7 @@ const state = {
   editingAllOrder: false,
   skipEquipmentInspectionAsk: true,
   keepGoingAfterBuzzer: false,
+  interactiveScoringEnabled: true,
   interactiveIterationsEnabled: false,
   guidedRun: null, // { run, legIdx, missionIdxInLeg, taskIdx, matchStartTs, ... }
   sessionCreated: { attachments: new Set(), runGroups: new Set(), missions: new Set(), tasks: new Set() },
@@ -637,19 +638,19 @@ document.getElementById("sort-select").addEventListener("change", renderEntryLis
 
 function entryCardHTML(entry, attachmentLabel) {
   const sizeLabel = { small: "Small change", moderate: "Moderate change", major: "Major change" }[entry.size] || "";
+  const whatHTML = entry.whatChanged ? `<div class="entry-field"><span class="entry-field-label">What changed</span>${esc(entry.whatChanged)}</div>` : "";
+  const whyHTML = entry.whyChanged ? `<div class="entry-field"><span class="entry-field-label">Why changed</span>${esc(entry.whyChanged)}</div>` : "";
   return `
     ${entry.photo ? `<img src="${entry.photo}" alt="">` : ""}
     <div class="entry-body">
       <div class="entry-time">
-        ${fmtDate(entry.timestamp)}
-        ${attachmentLabel ? ` &middot; <span class="entry-att-tag">${esc(attachmentLabel)}</span>` : ""}
-        ${sizeLabel ? ` &middot; <span class="size-badge size-${entry.size}">${esc(sizeLabel)}</span>` : ""}
+        <span class="entry-time-text">${fmtDate(entry.timestamp)}
+          ${attachmentLabel ? ` &middot; <span class="entry-att-tag">${esc(attachmentLabel)}</span>` : ""}
+          ${sizeLabel ? ` &middot; <span class="size-badge size-${entry.size}">${esc(sizeLabel)}</span>` : ""}
+        </span>
+        <button class="btn-icon entry-del-btn" data-id="${entry.id}" title="Delete">&#128465;&#65039;</button>
       </div>
-      <div class="entry-field"><span class="entry-field-label">What changed</span>${esc(entry.whatChanged) || "<em>&mdash;</em>"}</div>
-      <div class="entry-field"><span class="entry-field-label">Why changed</span>${esc(entry.whyChanged) || "<em>&mdash;</em>"}</div>
-      <div class="entry-actions">
-        <button class="btn-icon" data-id="${entry.id}" title="Delete">&#128465;&#65039;</button>
-      </div>
+      ${whatHTML}${whyHTML}
     </div>`;
 }
 
@@ -2011,7 +2012,7 @@ let pendingEquipmentInspection = false;
 async function startGuidedRun() {
   const legsWithMissions = state.runGroups.filter((g) => getLegMissions(g).some((m) => (m.tasks || []).length));
   if (!legsWithMissions.length) {
-    openModal(`<h2>No missions yet</h2><p class="empty-sub">Add runs, missions, and tasks in the Setup tab first, matching the official scoresheet.</p>
+    openModal(`<h2>No missions yet</h2><p class="empty-sub">Add runs, missions, and tasks in the Settings tab first, matching the official scoresheet.</p>
       <div class="modal-actions"><button class="btn btn-primary" id="m-close">Got it</button></div>`);
     document.getElementById("m-close").addEventListener("click", closeModal);
     return;
@@ -2117,11 +2118,45 @@ async function actuallyStartRun() {
     playedBuzzer: false,
     timeExpired: false,
   };
-  renderCurrentTaskScreen();
+  if (state.interactiveScoringEnabled) renderCurrentTaskScreen();
+  else renderTimerOnlyScreen();
   state.guidedRun.timerHandle = setInterval(tickGuidedTimer, 200);
   // Scheduled precisely against the match clock (not the poll interval) so
   // the 30s tone and the buzzer fire exactly on time, not up to one poll late.
   scheduleGuidedAlarms(state.guidedRun);
+}
+
+// Non-interactive mode: skip the step-by-step mission/task prompts and the
+// "Robot returned" checkpoints entirely — just a running timer. The buzzer
+// still fires and still auto-advances to the (fully editable) overview when
+// time runs out, same as the interactive flow; this just adds a manual
+// "Finish" button for ending the timer early, since there's no other way to
+// signal the run is done without the step prompts.
+function renderTimerOnlyScreen() {
+  const { run } = state.guidedRun;
+  openGuidedFullscreen(`
+    <div class="gfs-header">
+      ${gfsHeaderTopHTML(esc(run.label), false, false)}
+      <div class="gfs-timer-row" style="justify-content:center; margin-top:24px;">
+        <div class="gfs-timer" id="grn-timer" style="font-size:4.4rem;">${liveTimerHTML()}</div>
+      </div>
+    </div>
+    <div class="gfs-body gfs-center">
+      <p class="empty-sub">Timing this run. Tap Finish when the robot returns, or let time run out.</p>
+      <button type="button" class="btn btn-primary btn-full gfs-big-action gfs-huge-action" id="grn-finish-noninteractive">Finish &amp; Review Scores</button>
+    </div>
+    <div class="gfs-footer"></div>
+  `);
+  wireCancelLink();
+  document.getElementById("grn-finish-noninteractive").addEventListener("click", async () => {
+    if (state.guidedRun.timeExpired) return; // buzzer already handling the transition
+    stopGuidedTimer();
+    const now = Date.now();
+    run.finishedAt = now;
+    run.totalTimeMs = now - state.guidedRun.matchStartTs;
+    await dbPut("runs", run);
+    renderGuidedOverview();
+  });
 }
 
 // ---- Continuous match clock (one clock for the whole game run, like a real FLL match) ----
@@ -3184,7 +3219,7 @@ document.getElementById("btn-export-runs-csv").addEventListener("click", () => {
   document.getElementById("m-export-csv").addEventListener("click", () => {
     const runs = inRangeRuns();
     if (!runs.length) { alert("No runs in that range."); return; }
-    if (!state.missions.some((m) => (m.tasks || []).length)) { alert("Add missions and tasks in Setup first."); return; }
+    if (!state.missions.some((m) => (m.tasks || []).length)) { alert("Add missions and tasks in Settings first."); return; }
     const csv = buildScoresheetCSV(runs);
     closeModal();
     download(`barp-scoresheet-${Date.now()}.csv`, csv, "text/csv");
@@ -3192,7 +3227,7 @@ document.getElementById("btn-export-runs-csv").addEventListener("click", () => {
   document.getElementById("m-export-xlsx").addEventListener("click", async () => {
     const runs = inRangeRuns();
     if (!runs.length) { alert("No runs in that range."); return; }
-    if (!state.missions.some((m) => (m.tasks || []).length)) { alert("Add missions and tasks in Setup first."); return; }
+    if (!state.missions.some((m) => (m.tasks || []).length)) { alert("Add missions and tasks in Settings first."); return; }
     if (typeof ExcelJS === "undefined") { alert("Couldn't load the Excel export library — check your internet connection and try again."); return; }
     const btn = document.getElementById("m-export-xlsx");
     btn.disabled = true; btn.textContent = "Building…";
@@ -3218,11 +3253,11 @@ document.getElementById("file-import-runs-xlsx").addEventListener("change", asyn
   e.target.value = "";
   if (!file) return;
   if (typeof ExcelJS === "undefined") { alert("Couldn't load the Excel library — check your internet connection and try again."); return; }
-  if (!state.missions.some((m) => (m.tasks || []).length)) { alert("Add missions and tasks in Setup first, so imported scores have something to match against."); return; }
+  if (!state.missions.some((m) => (m.tasks || []).length)) { alert("Add missions and tasks in Settings first, so imported scores have something to match against."); return; }
   try {
     const result = await importScoresheetXLSX(file);
     let msg = `Imported ${result.importedCount} run${result.importedCount === 1 ? "" : "s"}.`;
-    if (result.unmatchedCount) msg += ` ${result.unmatchedCount} row${result.unmatchedCount === 1 ? "" : "s"} in the file didn't match any mission/task in Setup and were skipped.`;
+    if (result.unmatchedCount) msg += ` ${result.unmatchedCount} row${result.unmatchedCount === 1 ? "" : "s"} in the file didn't match any mission/task in Settings and were skipped.`;
     alert(msg);
   } catch (err) {
     showErrorBanner(`Import failed: ${err.name} — ${err.message}`);
@@ -3315,6 +3350,16 @@ async function loadKeepGoingAfterBuzzerSetting() {
   state.keepGoingAfterBuzzer = rec?.value ?? false;
   keepGoingAfterBuzzerInput.checked = state.keepGoingAfterBuzzer;
 }
+const interactiveScoringInput = document.getElementById("input-interactive-scoring");
+interactiveScoringInput.addEventListener("change", async () => {
+  state.interactiveScoringEnabled = interactiveScoringInput.checked;
+  await dbPut("meta", { key: "interactiveScoringEnabled", value: state.interactiveScoringEnabled });
+});
+async function loadInteractiveScoringSetting() {
+  const rec = await dbGet("meta", "interactiveScoringEnabled");
+  state.interactiveScoringEnabled = rec?.value ?? true;
+  interactiveScoringInput.checked = state.interactiveScoringEnabled;
+}
 const interactiveIterationsInput = document.getElementById("input-interactive-iterations");
 interactiveIterationsInput.addEventListener("change", async () => {
   state.interactiveIterationsEnabled = interactiveIterationsInput.checked;
@@ -3336,6 +3381,7 @@ async function initAll() {
   await loadSeasonName();
   await loadEquipmentInspectionSetting();
   await loadKeepGoingAfterBuzzerSetting();
+  await loadInteractiveScoringSetting();
   await loadInteractiveIterationsSetting();
   document.getElementById("log-empty-state").hidden = state.attachments.length === 0 ? false : true;
 }
