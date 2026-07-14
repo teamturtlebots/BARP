@@ -636,7 +636,7 @@ function renderAttachmentChips() {
 document.getElementById("sort-select").addEventListener("change", renderEntryList);
 
 function entryCardHTML(entry, attachmentLabel) {
-  const sizeLabel = { small: "Small — bug fix", moderate: "Moderate change", major: "Major — strategy change" }[entry.size] || "";
+  const sizeLabel = { small: "Small change", moderate: "Moderate change", major: "Major change" }[entry.size] || "";
   return `
     ${entry.photo ? `<img src="${entry.photo}" alt="">` : ""}
     <div class="entry-body">
@@ -2726,7 +2726,7 @@ function renderBreakdownTabs() {
   const editBtn = document.getElementById("brk-edit-btn");
   if (editBtn) {
     editBtn.hidden = b.tab !== "scores";
-    editBtn.innerHTML = b.editing ? "&#10003; Save changes" : "&#9998;&#65039; Edit";
+    editBtn.innerHTML = b.editing ? "&#10003; Save" : "&#9998;&#65039; Edit";
   }
   if (b.tab === "scores") renderBreakdownScoresTab();
   else renderBreakdownTimingTab();
