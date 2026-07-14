@@ -413,7 +413,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 
 /* --- Added: in-app camera capture --- */
 .camera-view { margin-bottom: 8px; }
-#camera-video { width: 100%; border-radius: 8px; background: #000; display: block; }
+.camera-view video, #camera-video, #att-camera-video { width: 100%; max-height: 40vh; object-fit: cover; border-radius: 8px; background: #000; display: block; }
 .camera-controls { display: flex; gap: 8px; margin-top: 8px; }
 .camera-controls .btn { flex: 1; }
 

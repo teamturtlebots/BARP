@@ -119,6 +119,12 @@ async function snapshotCurrentData() {
 // Not persisted to disk — just enough to undo your last restore within this
 // session, so it doesn't need to be very persistent.
 let lastPreRestoreSnapshot = null;
+// Full-state snapshots taken the moment Attachments/Runs editing starts, so
+// Cancel can revert every change made during the session (adds, edits,
+// deletes, reorders) — not just the drag order, which is all the Save/Cancel
+// buttons used to govern.
+let attachmentEditSessionSnapshot = null;
+let runsEditSessionSnapshot = null;
 
 // ---------- Pre-action safety snapshots ----------
 // A full snapshot taken right before any structural change — deleting
@@ -198,7 +204,7 @@ const state = {
   expandedRunGroups: new Set(),
   editingAttachmentOrder: false,
   editingAllOrder: false,
-  equipmentInspectionEnabled: true,
+  skipEquipmentInspectionAsk: true,
   keepGoingAfterBuzzer: false,
   interactiveIterationsEnabled: false,
   guidedRun: null, // { run, legIdx, missionIdxInLeg, taskIdx, matchStartTs, ... }
@@ -444,10 +450,27 @@ function showUndoToast(message, onUndo) {
   });
   undoToastTimer = setTimeout(() => { toast.hidden = true; }, 8000);
 }
+function showSimpleToast(message) {
+  let toast = document.getElementById("simple-toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "simple-toast";
+    toast.className = "undo-toast";
+    document.body.appendChild(toast);
+  }
+  clearTimeout(toast._timer);
+  toast.innerHTML = `<span>${esc(message)}</span>`;
+  toast.hidden = false;
+  toast._timer = setTimeout(() => { toast.hidden = true; }, 3000);
+}
 
 // ---------- Tab navigation ----------
 document.querySelectorAll(".tab-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
+    if (state.editingAttachmentOrder || state.editingAllOrder) {
+      showSimpleToast("Save or cancel your changes first");
+      return;
+    }
     document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
     document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
     btn.classList.add("active");
@@ -758,17 +781,27 @@ function wireAttachmentOrderToolbar() {
   const addBtn = document.getElementById("btn-add-attachment");
   if (addBtn) addBtn.addEventListener("click", () => openAttachmentModal(null));
   const editBtn = document.getElementById("btn-edit-order-attachments");
-  if (editBtn) editBtn.addEventListener("click", () => { state.editingAttachmentOrder = true; renderAttachmentsSetup(); });
+  if (editBtn) editBtn.addEventListener("click", async () => {
+    attachmentEditSessionSnapshot = await snapshotCurrentData();
+    state.editingAttachmentOrder = true;
+    renderAttachmentsSetup();
+  });
   const cancelBtn = document.getElementById("btn-cancel-order-attachments");
   if (cancelBtn) cancelBtn.addEventListener("click", async () => {
     state.editingAttachmentOrder = false;
-    state.attachments = (await dbGetAll("attachments")).sort((a, b) => (a.order ?? a.number ?? 0) - (b.order ?? b.number ?? 0));
-    renderAttachmentsSetup();
+    if (attachmentEditSessionSnapshot) {
+      await restoreFullData(attachmentEditSessionSnapshot);
+      attachmentEditSessionSnapshot = null;
+    } else {
+      state.attachments = (await dbGetAll("attachments")).sort((a, b) => (a.order ?? a.number ?? 0) - (b.order ?? b.number ?? 0));
+      renderAttachmentsSetup();
+    }
   });
   const saveBtn = document.getElementById("btn-save-order-attachments");
   if (saveBtn) saveBtn.addEventListener("click", async () => {
     await snapshotBeforeChange("Before reordering attachments");
     for (const [idx, att] of state.attachments.entries()) { att.order = idx; att.number = idx + 1; await dbPut("attachments", att); }
+    attachmentEditSessionSnapshot = null;
     state.editingAttachmentOrder = false;
     await loadAttachments();
   });
@@ -946,7 +979,7 @@ const ITER_STEPS = ["attachment", "size", "photo", "what", "why"];
 function startInteractiveIterationFlow() {
   state.iterFlow = {
     step: 0,
-    attachmentId: state.selectedAttachmentIds.size === 1 ? [...state.selectedAttachmentIds][0] : state.attachments[0].id,
+    attachmentId: null,
     size: null,
     photo: null,
     what: "",
@@ -1259,15 +1292,6 @@ async function loadRunGroups() {
   state.runGroups = (await dbGetAll("runGroups")).sort((a, b) => a.order - b.order);
   renderRunGroups();
 }
-// Only for genuinely first-ever use — NOT called by loadRunGroups() itself,
-// so deleting your last remaining Run doesn't silently bring one back.
-async function ensureDefaultRunGroup() {
-  const existing = await dbGetAll("runGroups");
-  if (!existing.length) {
-    const id = await dbPut("runGroups", { name: "Run 1", order: 0 });
-    state.expandedRunGroups.add(id);
-  }
-}
 
 // Missions carry a global .order spanning every run group, so guided-run
 // traversal and CSV export can just sort state.missions and get the right
@@ -1316,11 +1340,20 @@ function renderOrderToolbarTop() {
     document.getElementById("btn-save-order-all").addEventListener("click", saveAllOrder);
     document.getElementById("btn-cancel-order-all").addEventListener("click", async () => {
       state.editingAllOrder = false;
-      await loadMissions();
-      await loadRunGroups();
+      if (runsEditSessionSnapshot) {
+        await restoreFullData(runsEditSessionSnapshot);
+        runsEditSessionSnapshot = null;
+      } else {
+        await loadMissions();
+        await loadRunGroups();
+      }
     });
   } else {
-    document.getElementById("btn-edit-order-all").addEventListener("click", () => { state.editingAllOrder = true; renderRunGroups(); });
+    document.getElementById("btn-edit-order-all").addEventListener("click", async () => {
+      runsEditSessionSnapshot = await snapshotCurrentData();
+      state.editingAllOrder = true;
+      renderRunGroups();
+    });
   }
 }
 
@@ -1396,6 +1429,7 @@ async function saveAllOrder() {
 
   await recomputeGlobalMissionOrder();
   state.editingAllOrder = false;
+  runsEditSessionSnapshot = null;
   await loadMissions();
   await loadRunGroups();
 }
@@ -1983,11 +2017,11 @@ async function startGuidedRun() {
     return;
   }
   pendingEquipmentInspection = false;
-  if (state.equipmentInspectionEnabled) {
-    renderEquipmentInspectionScreen();
-  } else {
+  if (state.skipEquipmentInspectionAsk) {
     pendingEquipmentInspection = true; // not asking means it always counts as passed
     renderPreRunScreen();
+  } else {
+    renderEquipmentInspectionScreen();
   }
 }
 
@@ -2614,8 +2648,7 @@ function renderRuns() {
   completed.slice().reverse().forEach((run) => {
     const total = runTotal(run, state.missions);
     const maxTotal = runMaxPoints(state.missions);
-    const runCount = new Set((run.missionTimings || []).map((mt) => mt.runGroupId)).size;
-    const missionCount = (run.missionTimings || []).length;
+    const avgOp = breakdownAvgOpTime(run);
     const card = document.createElement("div");
     card.className = "run-card";
     card.innerHTML = `
@@ -2626,7 +2659,7 @@ function renderRuns() {
         </div>
         <div class="rc-stat"><span class="rc-stat-val">${total}/${maxTotal}</span><span class="rc-stat-label">pts</span></div>
         <div class="rc-stat"><span class="rc-stat-val">${fmtDuration(run.totalTimeMs || 0)}</span><span class="rc-stat-label">time</span></div>
-        <div class="rc-stat"><span class="rc-stat-val">${runCount}&middot;${missionCount}</span><span class="rc-stat-label">run&middot;msn</span></div>
+        <div class="rc-stat"><span class="rc-stat-val">${avgOp !== null ? fmtDuration(avgOp) : "&mdash;"}</span><span class="rc-stat-label">avg op</span></div>
         <button class="btn-icon rc-icon-btn" data-act="view" title="View breakdown">&#128065;&#65039;</button>
         <button class="btn-icon rc-icon-btn" data-act="del" title="Delete">&#128465;&#65039;</button>
       </div>
@@ -3210,7 +3243,7 @@ document.getElementById("btn-export-backup").addEventListener("click", async () 
     meta: await dbGetAll("meta"),
     runGroups: await dbGetAll("runGroups"),
   };
-  download(`barp-backup-${Date.now()}.json`, JSON.stringify(data, null, 2), "application/json");
+  download(`BARP-backups/barp-backup-${Date.now()}.json`, JSON.stringify(data, null, 2), "application/json");
 });
 
 document.getElementById("btn-import-backup").addEventListener("click", () => document.getElementById("file-import-backup").click());
@@ -3262,15 +3295,15 @@ async function purgeOldTrash() {
     if (e.deleted && e.deletedAt && e.deletedAt < cutoff) await dbDelete("entries", e.id);
   }
 }
-const equipmentInspectionInput = document.getElementById("input-equipment-inspection-enabled");
+const equipmentInspectionInput = document.getElementById("input-skip-equipment-inspection");
 equipmentInspectionInput.addEventListener("change", async () => {
-  state.equipmentInspectionEnabled = equipmentInspectionInput.checked;
-  await dbPut("meta", { key: "equipmentInspectionEnabled", value: state.equipmentInspectionEnabled });
+  state.skipEquipmentInspectionAsk = equipmentInspectionInput.checked;
+  await dbPut("meta", { key: "skipEquipmentInspectionAsk", value: state.skipEquipmentInspectionAsk });
 });
 async function loadEquipmentInspectionSetting() {
-  const rec = await dbGet("meta", "equipmentInspectionEnabled");
-  state.equipmentInspectionEnabled = rec?.value ?? true;
-  equipmentInspectionInput.checked = state.equipmentInspectionEnabled;
+  const rec = await dbGet("meta", "skipEquipmentInspectionAsk");
+  state.skipEquipmentInspectionAsk = rec?.value ?? true;
+  equipmentInspectionInput.checked = state.skipEquipmentInspectionAsk;
 }
 const keepGoingAfterBuzzerInput = document.getElementById("input-keep-going-after-buzzer");
 keepGoingAfterBuzzerInput.addEventListener("change", async () => {
@@ -3298,7 +3331,6 @@ async function initAll() {
   await purgeOldTrash();
   await loadAttachments();
   await loadMissions();
-  await ensureDefaultRunGroup();
   await loadRunGroups();
   await loadRuns();
   await loadSeasonName();
