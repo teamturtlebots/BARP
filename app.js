@@ -370,7 +370,7 @@ function showUndoToast(message, onUndo) {
     clearTimeout(undoToastTimer);
     onUndo();
   });
-  undoToastTimer = setTimeout(() => { toast.hidden = true; }, 4000);
+  undoToastTimer = setTimeout(() => { toast.hidden = true; }, 8000);
 }
 function showSimpleToast(message) {
   let toast = document.getElementById("simple-toast");
@@ -532,6 +532,7 @@ async function restoreDeletedAttachment(id) {
   }
   await renumberAttachments();
   await loadAttachments();
+  syncToTeamDrive();
 }
 
 async function iterationCount(attachmentId) {
@@ -645,6 +646,7 @@ async function renderEntryList() {
         await renderEntryList();
         await renderIterationTotal();
         renderAttachmentsSetup();
+        syncToTeamDrive();
         showUndoToast("Entry deleted.", () => restoreDeletedEntry(entry));
       });
     });
@@ -695,6 +697,7 @@ function renderAttachmentsSetup() {
             await dbPut("attachments", att);
             await renumberAttachments();
             await loadAttachments();
+            syncToTeamDrive();
             showUndoToast(`Deleted "${att.name}".`, async () => {
               await restoreDeletedAttachment(att.id);
             });
@@ -758,6 +761,7 @@ function wireAttachmentOrderToolbar() {
     attachmentEditSessionSnapshot = null;
     state.editingAttachmentOrder = false;
     await loadAttachments();
+    syncToTeamDrive();
   });
 }
 
@@ -812,6 +816,7 @@ function openAttachmentModal(att) {
     if (!isEdit) { state.selectedAttachmentIds.add(id); }
     closeModal();
     await loadAttachments();
+    syncToTeamDrive();
   });
 }
 
@@ -924,6 +929,7 @@ function openRecordIterationModalClassic() {
     await renderEntryList();
     await renderIterationTotal();
     renderAttachmentsSetup();
+    syncToTeamDrive();
   });
 }
 
@@ -1138,6 +1144,7 @@ function renderIterWhyStep() {
     await renderEntryList();
     await renderIterationTotal();
     renderAttachmentsSetup();
+    syncToTeamDrive();
   });
 }
 
@@ -1254,6 +1261,7 @@ async function restoreDeletedRunGroup(id) {
   await loadRunGroups();
   await loadMissions();
   renderRunGroups();
+  syncToTeamDrive();
 }
 
 // Missions carry a global .order spanning every run group, so guided-run
@@ -1290,6 +1298,7 @@ async function restoreDeletedMission(id) {
   await recomputeGlobalMissionOrder();
   await loadMissions();
   renderRunGroups();
+  syncToTeamDrive();
 }
 async function restoreDeletedTask(missionId, taskId) {
   const m = await dbGet("missions", missionId);
@@ -1301,6 +1310,7 @@ async function restoreDeletedTask(missionId, taskId) {
   await dbPut("missions", m);
   await loadMissions();
   renderRunGroups();
+  syncToTeamDrive();
 }
 
 function taskSubLabel(t) {
@@ -1386,6 +1396,7 @@ async function saveAllOrder() {
   runsEditSessionSnapshot = null;
   await loadMissions();
   await loadRunGroups();
+  syncToTeamDrive();
 }
 
 function renderRunGroups() {
@@ -1437,6 +1448,7 @@ function renderRunGroups() {
           await loadRunGroups();
           await loadMissions();
           renderRunGroups();
+          syncToTeamDrive();
           showUndoToast(`Deleted "${g.name}".`, async () => {
             await restoreDeletedRunGroup(g.id);
           });
@@ -1519,6 +1531,7 @@ function renderOrphanMissions(container, orphans) {
         await dbPut("missions", m);
         await loadMissions();
         renderRunGroups();
+        syncToTeamDrive();
         showUndoToast(`Deleted mission "${m.name}".`, async () => {
           await restoreDeletedMission(m.id);
         });
@@ -1549,6 +1562,7 @@ function openRunGroupModal(g) {
     closeModal();
     if (!isEdit) { state.expandedRunGroups.add(id); }
     await loadRunGroups();
+    syncToTeamDrive();
   });
 }
 
@@ -1595,6 +1609,7 @@ function renderMissionsForGroup(container, group, missionRows) {
           await dbPut("missions", m);
           await loadMissions();
           renderRunGroups();
+          syncToTeamDrive();
           showUndoToast(`Deleted mission "${m.name}".`, async () => {
             await restoreDeletedMission(m.id);
           });
@@ -1644,6 +1659,7 @@ function openMissionNameModal(m, group) {
     await recomputeGlobalMissionOrder();
     await loadMissions();
     renderRunGroups();
+    syncToTeamDrive();
   });
 }
 
@@ -1677,6 +1693,7 @@ function renderTaskList(container, mission) {
           await dbPut("missions", mission);
           await loadMissions();
           renderRunGroups();
+          syncToTeamDrive();
           showUndoToast(`Deleted task "${t.name}".`, async () => {
             await restoreDeletedTask(mission.id, t.id);
           });
@@ -1772,6 +1789,7 @@ function openTaskModal(mission, t) {
     await loadMissions();
     state.expandedMissions.add(mission.id);
     renderRunGroups();
+    syncToTeamDrive();
   });
 }
 
@@ -1853,6 +1871,7 @@ document.getElementById("file-import-missions").addEventListener("change", async
   await recomputeGlobalMissionOrder();
   await loadMissions();
   await loadRunGroups();
+  syncToTeamDrive();
   alert(`Imported ${tasksAdded} task${tasksAdded === 1 ? "" : "s"} across ${missionsAdded} new mission${missionsAdded === 1 ? "" : "s"} and ${runsAdded} new run${runsAdded === 1 ? "" : "s"} (plus any matched into existing ones).`);
 });
 
@@ -2567,6 +2586,7 @@ async function finalizeGuidedRun() {
   state.guidedRun = null;
   closeGuidedFullscreen();
   await loadRuns();
+  syncToTeamDrive();
 }
 // ---- Saved game runs / analysis ----
 async function loadRuns() {
@@ -2580,6 +2600,7 @@ async function restoreDeletedRun(id) {
   delete run.deletedAt;
   await dbPut("runs", run);
   await loadRuns();
+  syncToTeamDrive();
 }
 async function restoreDeletedEntry(entry) {
   delete entry.deleted;
@@ -2590,6 +2611,7 @@ async function restoreDeletedEntry(entry) {
   await renderEntryList();
   await renderIterationTotal();
   renderAttachmentsSetup();
+  syncToTeamDrive();
 }
 
 // ---- Recently Deleted (cloud-restorable trash) ----
@@ -2713,6 +2735,7 @@ function renderRuns() {
         run.deletedAt = Date.now();
         await dbPut("runs", run);
         await loadRuns();
+        syncToTeamDrive();
         showUndoToast(`Deleted "${run.label}".`, async () => {
           await restoreDeletedRun(run.id);
         });
@@ -2747,6 +2770,7 @@ function renderRuns() {
         run.deletedAt = Date.now();
         await dbPut("runs", run);
         await loadRuns();
+        syncToTeamDrive();
         showUndoToast(`Deleted "${run.label}".`, async () => {
           await restoreDeletedRun(run.id);
         });
@@ -2790,6 +2814,7 @@ function renderRunBreakdown(run) {
     if (b.editing) {
       await dbPut("runs", b.run);
       await loadRuns();
+      syncToTeamDrive();
     }
     b.editing = !b.editing;
     renderBreakdownTabs();
@@ -3393,14 +3418,18 @@ document.getElementById("file-import-backup").addEventListener("change", async (
 });
 
 // ---------- Google sign-in (browser-only OAuth, no backend/client-secret involved) ----------
-// The access token this gets back is scoped to drive.file only (files this
-// app creates/opens, not the whole Drive) and lives in memory for roughly an
-// hour — it's never written to IndexedDB, so signing in again after a reload
-// is expected, not a bug.
+// Uses the full "drive" scope (not the narrower drive.file) because
+// drive.file's Picker can only ever list files the app itself created — a
+// teammate picking a team file someone *else's* BARP made would see an empty
+// list. Full drive scope lets Picker show every file the signed-in account
+// can see, so teammates can actually find and connect to the shared file.
+// The token still lives only in memory (roughly an hour), never written to
+// IndexedDB — signing in again after a reload is expected, not a bug.
 const GOOGLE_CLIENT_ID = "789158300035-6otaah2007lt8t60g3mtgr3tqu48rl7l.apps.googleusercontent.com";
-const GOOGLE_SCOPES = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile";
+const GOOGLE_SCOPES = "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile";
 state.google = { accessToken: null, tokenExpiresAt: 0, email: null, name: null };
 let googleTokenClient = null;
+let silentSignInAttempt = false; // true while auto-retrying quietly on load, so a failure there doesn't show an error banner
 
 function initGoogleAuth() {
   if (typeof google === "undefined" || !google.accounts || !google.accounts.oauth2) {
@@ -3411,13 +3440,31 @@ function initGoogleAuth() {
     client_id: GOOGLE_CLIENT_ID,
     scope: GOOGLE_SCOPES,
     callback: async (resp) => {
-      if (resp.error) { showErrorBanner(`Google sign-in failed: ${resp.error}`); return; }
+      const wasSilent = silentSignInAttempt;
+      silentSignInAttempt = false;
+      if (resp.error) {
+        if (!wasSilent) showErrorBanner(`Google sign-in failed: ${resp.error}`);
+        return; // a failed silent attempt just quietly leaves the Sign in button showing
+      }
       state.google.accessToken = resp.access_token;
       state.google.tokenExpiresAt = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
+      await dbPut("meta", { key: "wasSignedInWithGoogle", value: true });
       await fetchGoogleUserInfo();
       renderGoogleSignInStatus();
     },
   });
+  attemptSilentGoogleSignIn();
+}
+async function attemptSilentGoogleSignIn() {
+  const rec = await dbGet("meta", "wasSignedInWithGoogle");
+  if (!rec?.value) return; // never successfully signed in on this browser — nothing to silently refresh
+  silentSignInAttempt = true;
+  // prompt:'' asks Google to reissue a token with no popup/UI at all if this
+  // browser still has an active Google session and already approved BARP —
+  // this is what makes reopening the app not require a manual re-click every
+  // time. If that's not possible (session expired, revoked, browser privacy
+  // settings blocking it), it just fails quietly and the Sign in button stays.
+  googleTokenClient.requestAccessToken({ prompt: "" });
 }
 async function fetchGoogleUserInfo() {
   try {
@@ -3445,10 +3492,11 @@ document.getElementById("btn-google-signin").addEventListener("click", () => {
   if (!googleTokenClient) { showErrorBanner("Google sign-in isn't ready yet — check your internet connection and try again."); return; }
   googleTokenClient.requestAccessToken();
 });
-document.getElementById("btn-google-signout").addEventListener("click", () => {
+document.getElementById("btn-google-signout").addEventListener("click", async () => {
   if (state.google.accessToken && typeof google !== "undefined" && google.accounts) {
     google.accounts.oauth2.revoke(state.google.accessToken, () => {});
   }
+  await dbPut("meta", { key: "wasSignedInWithGoogle", value: false });
   state.google = { accessToken: null, tokenExpiresAt: 0, email: null, name: null };
   renderGoogleSignInStatus();
 });
@@ -3526,20 +3574,95 @@ async function loadTeamDriveFileSetting() {
 function renderDriveFileStatus() {
   const statusEl = document.getElementById("drive-file-status");
   const actionsEl = document.getElementById("drive-file-actions");
+  const syncEl = document.getElementById("drive-sync-status");
   if (!statusEl || !actionsEl) return;
   const signedIn = !!state.google.accessToken && Date.now() < state.google.tokenExpiresAt;
   if (!signedIn) {
     statusEl.textContent = "Sign in with Google first.";
     actionsEl.hidden = true;
+    if (syncEl) syncEl.hidden = true;
     return;
   }
   actionsEl.hidden = false;
   statusEl.textContent = state.teamDrive.fileId
     ? `Connected to "${state.teamDrive.fileName || "team file"}".`
     : "No team file connected yet — create one (first time ever) or choose the one your team already made.";
+  if (syncEl) syncEl.hidden = !state.teamDrive.fileId;
 }
 document.getElementById("btn-drive-pick-file").addEventListener("click", openTeamFilePicker);
-document.getElementById("btn-drive-create-file").addEventListener("click", createTeamDriveFile);
+
+// ---------- Team Drive sync ----------
+// Every save that changes real data (an attachment, an iteration log entry,
+// a run/mission/task edit, a finished game run) calls this. Drive's simple
+// file-content API doesn't offer a clean atomic "only write if unchanged"
+// check the way some REST APIs do, so this uses read-merge-write instead:
+// pull whatever's currently on Drive, merge in local changes by record id
+// (your just-made local edit wins on a same-id conflict, anything cloud-only
+// from a teammate is kept), and write the merged result back. Combined with
+// every record already having a stable id (from the UUID work) and deletes
+// being soft-deletes, this makes a sync that runs twice in a row — or two
+// people syncing near the same moment — safe rather than duplicating data.
+let driveSyncInFlight = false;
+let driveSyncQueued = false;
+function setSyncStatus(text) {
+  const el = document.getElementById("drive-sync-status");
+  if (el) el.textContent = text;
+}
+function syncToTeamDrive() {
+  if (!state.google.accessToken || Date.now() >= state.google.tokenExpiresAt) return; // not signed in — nothing to do
+  if (!state.teamDrive.fileId) return; // no team file connected yet — nothing to do
+  if (driveSyncInFlight) { driveSyncQueued = true; return; } // a sync is already running — one more pass will follow it
+  driveSyncInFlight = true;
+  setSyncStatus("Syncing…");
+  performDriveSync()
+    .then(() => setSyncStatus(`Synced ${new Date().toLocaleTimeString()}`))
+    .catch((e) => { setSyncStatus("Sync failed — will retry on the next change."); showErrorBanner(`Team Drive sync failed: ${e.message}`); })
+    .finally(() => {
+      driveSyncInFlight = false;
+      if (driveSyncQueued) { driveSyncQueued = false; syncToTeamDrive(); }
+    });
+}
+async function performDriveSync() {
+  const fileId = state.teamDrive.fileId;
+  const getRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+    headers: { Authorization: `Bearer ${state.google.accessToken}` },
+  });
+  if (!getRes.ok) throw new Error(`couldn't read the team file (${getRes.status})`);
+  let cloudData = {};
+  try { cloudData = await getRes.json(); } catch (e) { /* empty/blank file — treat as empty */ }
+
+  const localData = {
+    attachments: await dbGetAll("attachments"),
+    entries: await dbGetAll("entries"),
+    runGroups: await dbGetAll("runGroups"),
+    missions: await dbGetAll("missions"),
+    runs: await dbGetAll("runs"),
+  };
+  const merged = {
+    schemaVersion: 1,
+    attachments: mergeById(cloudData.attachments, localData.attachments),
+    entries: mergeById(cloudData.entries, localData.entries),
+    runGroups: mergeById(cloudData.runGroups, localData.runGroups),
+    missions: mergeById(cloudData.missions, localData.missions),
+    runs: mergeById(cloudData.runs, localData.runs),
+  };
+
+  const putRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${state.google.accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify(merged, null, 2),
+  });
+  if (!putRes.ok) throw new Error(`couldn't save to the team file (${putRes.status})`);
+}
+// Union of cloud + local records by id — local wins on a same-id conflict
+// (this device just made the change that triggered the sync), anything only
+// on the cloud side (a teammate's data this device hasn't seen) is kept.
+function mergeById(cloudList, localList) {
+  const map = new Map();
+  (Array.isArray(cloudList) ? cloudList : []).forEach((r) => map.set(String(r.id), r));
+  (Array.isArray(localList) ? localList : []).forEach((r) => map.set(String(r.id), r));
+  return [...map.values()];
+}
 
 // ---------- Init ----------
 async function purgeOldTrash() {
