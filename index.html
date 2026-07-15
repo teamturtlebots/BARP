@@ -108,9 +108,9 @@
     <p class="empty-sub">Only reset if the app is stuck (e.g. a database error banner). This permanently erases everything stored on this device — export a manual backup first if you can.</p>
 
     <div class="section-row" style="margin-top:28px;">
-      <h2>Match Settings</h2>
+      <h2>App Settings</h2>
     </div>
-    <p class="empty-sub">Sound effects play automatically during a guided run — see the README for details.</p>
+    <p class="empty-sub">Controls how practice game runs are scored and timed, and how attachment iterations get logged.</p>
     <label class="checkbox-row checkbox-row-standalone"><input type="checkbox" id="input-skip-equipment-inspection" checked> Don't ask about the Equipment Inspection bonus before each run (it will always count as passed)</label>
     <label class="checkbox-row checkbox-row-standalone"><input type="checkbox" id="input-keep-going-after-buzzer"> Keep scoring after time runs out (timer keeps counting instead of ending the run)</label>
     <label class="checkbox-row checkbox-row-standalone"><input type="checkbox" id="input-interactive-scoring" checked> Interactive mode for scoring runs (step-by-step mission prompts; off just shows the timer, then the overview to fill in scores)</label>
@@ -126,11 +126,12 @@
     <div class="section-row" style="margin-top:28px;">
       <h2>Team Drive File</h2>
     </div>
+    <p class="empty-sub">One shared file on your team's Drive that everyone's BARP connects to — it's used both as a cloud backup and to let the whole team see each other's attachments, iterations, and runs, not just what's on this one device.</p>
     <p class="empty-sub" id="drive-file-status">Sign in with Google first.</p>
     <div class="btn-group" id="drive-file-actions" hidden>
-      <button class="btn btn-ghost" id="btn-drive-pick-file">Choose existing team file</button>
-      <button class="btn btn-amber" id="btn-drive-create-file">Create new team file</button>
+      <button class="btn btn-ghost" id="btn-drive-pick-file">Choose team file</button>
     </div>
+    <p class="empty-sub" id="drive-sync-status" hidden>Not synced yet.</p>
   </section>
 
 </main>
