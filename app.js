@@ -3417,191 +3417,67 @@ document.getElementById("file-import-backup").addEventListener("change", async (
   }
 });
 
-// ---------- Google sign-in (browser-only OAuth, no backend/client-secret involved) ----------
-// Uses the full "drive" scope (not the narrower drive.file) because
-// drive.file's Picker can only ever list files the app itself created — a
-// teammate picking a team file someone *else's* BARP made would see an empty
-// list. Full drive scope lets Picker show every file the signed-in account
-// can see, so teammates can actually find and connect to the shared file.
-// The token still lives only in memory (roughly an hour), never written to
-// IndexedDB — signing in again after a reload is expected, not a bug.
-const GOOGLE_CLIENT_ID = "789158300035-6otaah2007lt8t60g3mtgr3tqu48rl7l.apps.googleusercontent.com";
-const GOOGLE_SCOPES = "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile";
-state.google = { accessToken: null, tokenExpiresAt: 0, email: null, name: null };
-let googleTokenClient = null;
-let silentSignInAttempt = false; // true while auto-retrying quietly on load, so a failure there doesn't show an error banner
+// ---------- Firebase sign-in + Firestore sync ----------
+// Firebase Auth handles the whole Google sign-in flow itself (popup, token,
+// persistence) — unlike the old hand-rolled Google Identity Services setup,
+// it persists sign-in across reloads on its own (stored in IndexedDB by the
+// SDK), so there's no more manual silent-reissue logic needed here.
+state.firebaseUser = null;
+const FIRESTORE_COLLECTIONS = ["attachments", "entries", "runGroups", "missions", "runs"];
+let firestoreListenersStarted = false;
 
-function initGoogleAuth() {
-  if (typeof google === "undefined" || !google.accounts || !google.accounts.oauth2) {
-    setTimeout(initGoogleAuth, 500); // library still loading over the network — retry shortly
+function initFirebaseAuth() {
+  if (!window.firebaseAuth) {
+    window.addEventListener("firebase-ready", initFirebaseAuth, { once: true });
     return;
   }
-  googleTokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: GOOGLE_CLIENT_ID,
-    scope: GOOGLE_SCOPES,
-    callback: async (resp) => {
-      const wasSilent = silentSignInAttempt;
-      silentSignInAttempt = false;
-      if (resp.error) {
-        if (!wasSilent) showErrorBanner(`Google sign-in failed: ${resp.error}`);
-        return; // a failed silent attempt just quietly leaves the Sign in button showing
-      }
-      state.google.accessToken = resp.access_token;
-      state.google.tokenExpiresAt = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
-      await dbPut("meta", { key: "wasSignedInWithGoogle", value: true });
-      await fetchGoogleUserInfo();
-      renderGoogleSignInStatus();
-    },
+  window.firebaseFns.onAuthStateChanged(window.firebaseAuth, (user) => {
+    state.firebaseUser = user;
+    renderGoogleSignInStatus();
+    if (user && !firestoreListenersStarted) {
+      firestoreListenersStarted = true;
+      startFirestoreListeners();
+    }
   });
-  attemptSilentGoogleSignIn();
-}
-async function attemptSilentGoogleSignIn() {
-  const rec = await dbGet("meta", "wasSignedInWithGoogle");
-  if (!rec?.value) return; // never successfully signed in on this browser — nothing to silently refresh
-  silentSignInAttempt = true;
-  // prompt:'' asks Google to reissue a token with no popup/UI at all if this
-  // browser still has an active Google session and already approved BARP —
-  // this is what makes reopening the app not require a manual re-click every
-  // time. If that's not possible (session expired, revoked, browser privacy
-  // settings blocking it), it just fails quietly and the Sign in button stays.
-  googleTokenClient.requestAccessToken({ prompt: "" });
-}
-async function fetchGoogleUserInfo() {
-  try {
-    const res = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-      headers: { Authorization: `Bearer ${state.google.accessToken}` },
-    });
-    const info = await res.json();
-    state.google.email = info.email || null;
-    state.google.name = info.name || null;
-  } catch (e) {
-    showErrorBanner(`Couldn't fetch Google account info: ${e.message}`);
-  }
 }
 function renderGoogleSignInStatus() {
   const statusEl = document.getElementById("google-signin-status");
   const signInBtn = document.getElementById("btn-google-signin");
   const signOutBtn = document.getElementById("btn-google-signout");
-  const signedIn = !!state.google.accessToken && Date.now() < state.google.tokenExpiresAt;
-  if (statusEl) statusEl.textContent = signedIn ? `Signed in as ${state.google.name || state.google.email}.` : "Not signed in.";
+  const syncEl = document.getElementById("drive-sync-status");
+  const signedIn = !!state.firebaseUser;
+  if (statusEl) statusEl.textContent = signedIn ? `Signed in as ${state.firebaseUser.displayName || state.firebaseUser.email}.` : "Not signed in.";
   if (signInBtn) signInBtn.hidden = signedIn;
   if (signOutBtn) signOutBtn.hidden = !signedIn;
-  renderDriveFileStatus();
+  if (syncEl) syncEl.hidden = !signedIn;
 }
-document.getElementById("btn-google-signin").addEventListener("click", () => {
-  if (!googleTokenClient) { showErrorBanner("Google sign-in isn't ready yet — check your internet connection and try again."); return; }
-  googleTokenClient.requestAccessToken();
+document.getElementById("btn-google-signin").addEventListener("click", async () => {
+  if (!window.firebaseAuth) { showErrorBanner("Sign-in isn't ready yet — check your internet connection and try again."); return; }
+  try {
+    await window.firebaseFns.signInWithPopup(window.firebaseAuth, new window.firebaseFns.GoogleAuthProvider());
+  } catch (e) {
+    if (e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request") {
+      showErrorBanner(`Sign-in failed: ${e.message}`);
+    }
+  }
 });
 document.getElementById("btn-google-signout").addEventListener("click", async () => {
-  if (state.google.accessToken && typeof google !== "undefined" && google.accounts) {
-    google.accounts.oauth2.revoke(state.google.accessToken, () => {});
-  }
-  await dbPut("meta", { key: "wasSignedInWithGoogle", value: false });
-  state.google = { accessToken: null, tokenExpiresAt: 0, email: null, name: null };
-  renderGoogleSignInStatus();
+  if (window.firebaseAuth) await window.firebaseFns.signOut(window.firebaseAuth);
 });
 
-// ---------- Team Drive file (Picker connect + create) ----------
-// The Picker API is separate from the Drive API — the API key below only
-// authorizes the picker *widget* (browsing/selecting a file); actually
-// reading or writing that file's contents happens through the Drive API,
-// authorized by the OAuth access token above, not this key.
-const GOOGLE_API_KEY = "AIzaSyD2l23YVuS2S7xDaqH5E3MFDTh4FtU8qKc";
-state.teamDrive = { fileId: null, fileName: null };
-let pickerLibLoaded = false;
-
-function ensurePickerLoaded(cb) {
-  if (pickerLibLoaded) { cb(); return; }
-  if (typeof gapi === "undefined") { setTimeout(() => ensurePickerLoaded(cb), 300); return; }
-  gapi.load("picker", () => { pickerLibLoaded = true; cb(); });
-}
-
-function openTeamFilePicker() {
-  if (!state.google.accessToken) { showErrorBanner("Sign in with Google first."); return; }
-  ensurePickerLoaded(() => {
-    const view = new google.picker.DocsView(google.picker.ViewId.DOCS).setMimeTypes("application/json");
-    const picker = new google.picker.PickerBuilder()
-      .setOAuthToken(state.google.accessToken)
-      .setDeveloperKey(GOOGLE_API_KEY)
-      .addView(view)
-      .setCallback(pickerCallback)
-      .build();
-    picker.setVisible(true);
-  });
-}
-async function pickerCallback(data) {
-  if (data.action !== google.picker.Action.PICKED) return;
-  const doc = data.docs[0];
-  await setTeamDriveFile(doc.id, doc.name);
-}
-
-async function createTeamDriveFile() {
-  if (!state.google.accessToken) { showErrorBanner("Sign in with Google first."); return; }
-  const metadata = { name: "BARP Team Data.json", mimeType: "application/json" };
-  const initialContent = JSON.stringify({ version: 1, attachments: [], entries: [], missions: [], runs: [], runGroups: [] }, null, 2);
-  const boundary = "barp-" + Date.now();
-  const body =
-    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
-    `--${boundary}\r\nContent-Type: application/json\r\n\r\n${initialContent}\r\n` +
-    `--${boundary}--`;
-  try {
-    const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${state.google.accessToken}`, "Content-Type": `multipart/related; boundary=${boundary}` },
-      body,
-    });
-    if (!res.ok) throw new Error(`Drive API returned ${res.status}`);
-    const file = await res.json();
-    await setTeamDriveFile(file.id, file.name);
-  } catch (e) {
-    showErrorBanner(`Couldn't create the team file: ${e.message}`);
-  }
-}
-
-async function setTeamDriveFile(fileId, fileName) {
-  state.teamDrive.fileId = fileId;
-  state.teamDrive.fileName = fileName;
-  await dbPut("meta", { key: "teamDriveFileId", value: fileId });
-  await dbPut("meta", { key: "teamDriveFileName", value: fileName });
-  renderDriveFileStatus();
-}
-async function loadTeamDriveFileSetting() {
-  const idRec = await dbGet("meta", "teamDriveFileId");
-  const nameRec = await dbGet("meta", "teamDriveFileName");
-  state.teamDrive.fileId = idRec?.value || null;
-  state.teamDrive.fileName = nameRec?.value || null;
-}
-function renderDriveFileStatus() {
-  const statusEl = document.getElementById("drive-file-status");
-  const actionsEl = document.getElementById("drive-file-actions");
-  const syncEl = document.getElementById("drive-sync-status");
-  if (!statusEl || !actionsEl) return;
-  const signedIn = !!state.google.accessToken && Date.now() < state.google.tokenExpiresAt;
-  if (!signedIn) {
-    statusEl.textContent = "Sign in with Google first.";
-    actionsEl.hidden = true;
-    if (syncEl) syncEl.hidden = true;
-    return;
-  }
-  actionsEl.hidden = false;
-  statusEl.textContent = state.teamDrive.fileId
-    ? `Connected to "${state.teamDrive.fileName || "team file"}".`
-    : "No team file connected yet — create one (first time ever) or choose the one your team already made.";
-  if (syncEl) syncEl.hidden = !state.teamDrive.fileId;
-}
-document.getElementById("btn-drive-pick-file").addEventListener("click", openTeamFilePicker);
-
-// ---------- Team Drive sync ----------
-// Every save that changes real data (an attachment, an iteration log entry,
-// a run/mission/task edit, a finished game run) calls this. Drive's simple
-// file-content API doesn't offer a clean atomic "only write if unchanged"
-// check the way some REST APIs do, so this uses read-merge-write instead:
-// pull whatever's currently on Drive, merge in local changes by record id
-// (your just-made local edit wins on a same-id conflict, anything cloud-only
-// from a teammate is kept), and write the merged result back. Combined with
-// every record already having a stable id (from the UUID work) and deletes
-// being soft-deletes, this makes a sync that runs twice in a row — or two
-// people syncing near the same moment — safe rather than duplicating data.
+// ---- Firestore sync ----
+// Each record type is its own Firestore collection, one document per record,
+// keyed by the same id already used locally (UUIDs going forward). Pushing a
+// change is just "set this exact document" — safe to repeat, never
+// duplicates. Pulling happens continuously via live listeners below, not on
+// a schedule: a teammate's change shows up automatically, no manual refresh.
+//
+// Known limit worth knowing: Firestore rejects any single document over 1MB.
+// Attachment/entry records carry a base64 photo, which is compressed on
+// capture (900px, quality 0.72) and normally stays well under that — but an
+// unusually large photo could occasionally fail to sync even though it still
+// saved fine locally. Worth revisiting with Firebase Storage for photos
+// specifically if that ever actually happens in practice.
 let driveSyncInFlight = false;
 let driveSyncQueued = false;
 function setSyncStatus(text) {
@@ -3609,59 +3485,55 @@ function setSyncStatus(text) {
   if (el) el.textContent = text;
 }
 function syncToTeamDrive() {
-  if (!state.google.accessToken || Date.now() >= state.google.tokenExpiresAt) return; // not signed in — nothing to do
-  if (!state.teamDrive.fileId) return; // no team file connected yet — nothing to do
-  if (driveSyncInFlight) { driveSyncQueued = true; return; } // a sync is already running — one more pass will follow it
+  if (!state.firebaseUser) return; // not signed in — nothing to do
+  if (driveSyncInFlight) { driveSyncQueued = true; return; }
   driveSyncInFlight = true;
   setSyncStatus("Syncing…");
-  performDriveSync()
+  performFirestoreSync()
     .then(() => setSyncStatus(`Synced ${new Date().toLocaleTimeString()}`))
-    .catch((e) => { setSyncStatus("Sync failed — will retry on the next change."); showErrorBanner(`Team Drive sync failed: ${e.message}`); })
+    .catch((e) => { setSyncStatus("Sync failed — will retry on the next change."); showErrorBanner(`Sync failed: ${e.message}`); })
     .finally(() => {
       driveSyncInFlight = false;
       if (driveSyncQueued) { driveSyncQueued = false; syncToTeamDrive(); }
     });
 }
-async function performDriveSync() {
-  const fileId = state.teamDrive.fileId;
-  const getRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-    headers: { Authorization: `Bearer ${state.google.accessToken}` },
-  });
-  if (!getRes.ok) throw new Error(`couldn't read the team file (${getRes.status})`);
-  let cloudData = {};
-  try { cloudData = await getRes.json(); } catch (e) { /* empty/blank file — treat as empty */ }
-
-  const localData = {
-    attachments: await dbGetAll("attachments"),
-    entries: await dbGetAll("entries"),
-    runGroups: await dbGetAll("runGroups"),
-    missions: await dbGetAll("missions"),
-    runs: await dbGetAll("runs"),
-  };
-  const merged = {
-    schemaVersion: 1,
-    attachments: mergeById(cloudData.attachments, localData.attachments),
-    entries: mergeById(cloudData.entries, localData.entries),
-    runGroups: mergeById(cloudData.runGroups, localData.runGroups),
-    missions: mergeById(cloudData.missions, localData.missions),
-    runs: mergeById(cloudData.runs, localData.runs),
-  };
-
-  const putRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
-    method: "PATCH",
-    headers: { Authorization: `Bearer ${state.google.accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify(merged, null, 2),
-  });
-  if (!putRes.ok) throw new Error(`couldn't save to the team file (${putRes.status})`);
+async function performFirestoreSync() {
+  const { collection, doc, setDoc } = window.firebaseFns;
+  const db = window.firebaseDb;
+  const writes = [];
+  for (const storeName of FIRESTORE_COLLECTIONS) {
+    const records = await dbGetAll(storeName);
+    for (const rec of records) {
+      writes.push(setDoc(doc(collection(db, storeName), String(rec.id)), rec));
+    }
+  }
+  await Promise.all(writes);
 }
-// Union of cloud + local records by id — local wins on a same-id conflict
-// (this device just made the change that triggered the sync), anything only
-// on the cloud side (a teammate's data this device hasn't seen) is kept.
-function mergeById(cloudList, localList) {
-  const map = new Map();
-  (Array.isArray(cloudList) ? cloudList : []).forEach((r) => map.set(String(r.id), r));
-  (Array.isArray(localList) ? localList : []).forEach((r) => map.set(String(r.id), r));
-  return [...map.values()];
+// Live listeners: a teammate's change lands here automatically, no polling.
+// This also fires once immediately with everything already in the
+// collection (Firestore's normal snapshot behavior), which is what pulls in
+// a brand-new device's very first sync from the team's existing data.
+function startFirestoreListeners() {
+  const { collection, onSnapshot } = window.firebaseFns;
+  const db = window.firebaseDb;
+  FIRESTORE_COLLECTIONS.forEach((storeName) => {
+    onSnapshot(collection(db, storeName), async (snapshot) => {
+      let changed = false;
+      for (const change of snapshot.docChanges()) {
+        if (change.type === "removed") continue; // deletes are soft-deletes stored as normal docs, not real Firestore removals
+        await dbPut(storeName, change.doc.data());
+        changed = true;
+      }
+      if (changed) await refreshAfterRemoteChange(storeName);
+    }, (e) => showErrorBanner(`Team sync listener failed: ${e.message}`));
+  });
+}
+async function refreshAfterRemoteChange(storeName) {
+  if (storeName === "attachments") { await loadAttachments(); }
+  else if (storeName === "entries") { renderAttachmentChips(); await renderEntryList(); await renderIterationTotal(); renderAttachmentsSetup(); }
+  else if (storeName === "runGroups") { await loadRunGroups(); await loadMissions(); }
+  else if (storeName === "missions") { await loadMissions(); renderRunGroups(); }
+  else if (storeName === "runs") { await loadRuns(); }
 }
 
 // ---------- Init ----------
@@ -3723,7 +3595,7 @@ async function loadInteractiveIterationsSetting() {
 
 async function initAll() {
   preloadAllSounds(); // fire-and-forget, decoding well ahead of any run starting
-  initGoogleAuth(); // fire-and-forget, retries on its own if the library hasn't loaded yet
+  initFirebaseAuth(); // fire-and-forget, waits for the Firebase module script if needed
   await purgeOldTrash();
   await loadAttachments();
   await loadMissions();
@@ -3733,7 +3605,6 @@ async function initAll() {
   await loadKeepGoingAfterBuzzerSetting();
   await loadInteractiveScoringSetting();
   await loadInteractiveIterationsSetting();
-  await loadTeamDriveFileSetting();
   renderGoogleSignInStatus();
   document.getElementById("log-empty-state").hidden = state.attachments.length === 0 ? false : true;
 }

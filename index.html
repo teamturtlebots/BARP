@@ -117,20 +117,12 @@
     <label class="checkbox-row checkbox-row-standalone"><input type="checkbox" id="input-interactive-iterations"> Interactive mode for logging attachment iterations (one step at a time, camera-first)</label>
 
     <div class="section-row" style="margin-top:28px;">
-      <h2>Google Account</h2>
+      <h2>Team Sync</h2>
     </div>
+    <p class="empty-sub">Signing in connects this device to your team's shared cloud database — it's used both as a backup and to let the whole team see each other's attachments, iterations, and runs, not just what's on this one device. No extra setup needed beyond signing in.</p>
     <p class="empty-sub" id="google-signin-status">Not signed in.</p>
     <button class="btn btn-primary" id="btn-google-signin">Sign in with Google</button>
     <button class="btn btn-ghost" id="btn-google-signout" hidden>Sign out</button>
-
-    <div class="section-row" style="margin-top:28px;">
-      <h2>Team Drive File</h2>
-    </div>
-    <p class="empty-sub">One shared file on your team's Drive that everyone's BARP connects to — it's used both as a cloud backup and to let the whole team see each other's attachments, iterations, and runs, not just what's on this one device.</p>
-    <p class="empty-sub" id="drive-file-status">Sign in with Google first.</p>
-    <div class="btn-group" id="drive-file-actions" hidden>
-      <button class="btn btn-ghost" id="btn-drive-pick-file">Choose team file</button>
-    </div>
     <p class="empty-sub" id="drive-sync-status" hidden>Not synced yet.</p>
   </section>
 
@@ -156,8 +148,34 @@
 <input type="file" id="file-import-missions" accept=".csv,text/csv" hidden />
 <input type="file" id="file-import-backup" accept="application/json" hidden />
 
-<script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="https://apis.google.com/js/api.js"></script>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
+  import {
+    getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged
+  } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
+  import {
+    getFirestore, collection, doc, setDoc, onSnapshot
+  } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyDsBz2vPqKQDy3kQvp7XXz3loUAj9yVEcc",
+    authDomain: "barp-db.firebaseapp.com",
+    projectId: "barp-db",
+    storageBucket: "barp-db.firebasestorage.app",
+    messagingSenderId: "363678146989",
+    appId: "1:363678146989:web:7ef20173392cd82ec2c124"
+  };
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  // app.js is a plain classic script (not a module), so hand it what it
+  // needs this way rather than restructuring the whole file into a module.
+  window.firebaseAuth = auth;
+  window.firebaseDb = db;
+  window.firebaseFns = { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, collection, doc, setDoc, onSnapshot };
+  window.dispatchEvent(new Event("firebase-ready"));
+</script>
 <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <script src="app.js"></script>
 </body>
