@@ -370,7 +370,7 @@ function showUndoToast(message, onUndo) {
     clearTimeout(undoToastTimer);
     onUndo();
   });
-  undoToastTimer = setTimeout(() => { toast.hidden = true; }, 8000);
+  undoToastTimer = setTimeout(() => { toast.hidden = true; }, 4000);
 }
 function showSimpleToast(message) {
   let toast = document.getElementById("simple-toast");
