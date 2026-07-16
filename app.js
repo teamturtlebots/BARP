@@ -260,7 +260,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
     document.querySelectorAll(".view").forEach((v) => (v.hidden = true));
     btn.classList.add("active");
     document.getElementById(btn.dataset.view).hidden = false;
-    // (nothing to refresh here now — Settings has no live-updating backup timestamp)
+    if (btn.dataset.view === "view-analysis") renderAnalysisTab();
   });
 });
 
@@ -1313,7 +1313,7 @@ function renderRunGroups() {
         ${editing ? `<span class="drag-handle">&#9776;</span>` : ""}
         <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
-          <div class="m-name">${esc(g.name)}</div>
+          <div class="m-name">${esc(runGroupDisplayName(g))}</div>
           <div class="m-sub">${groupMissions.length} mission${groupMissions.length === 1 ? "" : "s"}</div>
         </div>
         ${editing ? `<button class="btn-icon btn-icon-add" data-act="add-mission" title="Add a mission">&#43;</button><button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>` : ""}
@@ -1332,7 +1332,8 @@ function renderRunGroups() {
       if (editBtn) editBtn.addEventListener("click", () => openRunGroupModal(g));
       const delBtn = wrap.querySelector('[data-act="del"]');
       if (delBtn) delBtn.addEventListener("click", async () => {
-        if (!confirm(`Delete "${g.name}"? Its missions move to "Unassigned" rather than being deleted.`)) return;
+        const displayName = runGroupDisplayName(g);
+        if (!confirm(`Delete "${displayName}"? Its missions move to "Unassigned" rather than being deleted.`)) return;
         g.deleted = true;
         g.deletedAt = Date.now();
         await dbPut("runGroups", g);
@@ -1340,7 +1341,7 @@ function renderRunGroups() {
         await loadMissions();
         renderRunGroups();
         syncToTeamDrive();
-        showUndoToast(`Deleted "${g.name}".`, async () => {
+        showUndoToast(`Deleted "${displayName}".`, async () => {
           await restoreDeletedRunGroup(g.id);
         });
       });
@@ -1435,9 +1436,11 @@ function renderOrphanMissions(container, orphans) {
 
 function openRunGroupModal(g) {
   const isEdit = !!g;
+  const previewNum = isEdit ? runGroupNumber(g) : state.runGroups.length + 1;
   openModal(`
     <h2>${isEdit ? "Rename run" : "New run"}</h2>
-    <div class="field"><label>Name</label><input class="text-input" id="rg-name" value="${isEdit ? esc(g.name) : `Run ${state.runGroups.length + 1}`}"></div>
+    <p class="empty-sub">This will be <strong>Run ${previewNum}</strong> — the number is automatic based on order. Give it a nickname if you want one.</p>
+    <div class="field"><label>Nickname (optional)</label><input class="text-input" id="rg-name" value="${isEdit ? esc(g.name || "") : ""}" placeholder="e.g. Flower"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
       <button class="btn btn-primary" id="m-save" type="button">Save</button>
@@ -1446,7 +1449,6 @@ function openRunGroupModal(g) {
   document.getElementById("m-cancel").addEventListener("click", closeModal);
   document.getElementById("m-save").addEventListener("click", async () => {
     const name = document.getElementById("rg-name").value.trim();
-    if (!name) { alert("Name this run."); return; }
     const record = isEdit ? g : { id: crypto.randomUUID(), order: state.runGroups.length };
     record.name = name;
     const id = await dbPut("runGroups", record);
@@ -1708,7 +1710,7 @@ document.getElementById("file-import-missions").addEventListener("change", async
   if (iMission === -1 || iTask === -1 || iType === -1) { alert("CSV needs at least Mission, Task, and Type columns."); return; }
   if (!state.runGroups.length) {
     const gid = crypto.randomUUID();
-    await dbPut("runGroups", { id: gid, name: "Run 1", order: 0 });
+    await dbPut("runGroups", { id: gid, name: "", order: 0 });
     state.runGroups = await dbGetAll("runGroups");
   }
   const dataRows = rows.slice(1);
@@ -1868,6 +1870,20 @@ async function usePrecisionToken() {
 // ---- Helpers for navigating Run groups (legs) and their missions ----
 function getLegMissions(leg) {
   return state.missions.filter((m) => m.runGroupId === leg.id).sort((a, b) => a.order - b.order);
+}
+// The run number is never stored — it's always derived from current order,
+// so it stays correct automatically as runs get added, deleted, or reordered.
+// The name field is just a nickname on top of that ("Flower", "Spinny"),
+// not a replacement for it.
+function runGroupNumber(g) {
+  const sorted = state.runGroups.slice().sort((a, b) => a.order - b.order);
+  const idx = sorted.findIndex((x) => x.id === g.id);
+  return idx >= 0 ? idx + 1 : null;
+}
+function runGroupDisplayName(g) {
+  const num = runGroupNumber(g);
+  const label = num != null ? `Run ${num}` : "Run";
+  return g.name ? `${label} - ${g.name}` : label;
 }
 function nextGameRunLabel() {
   const todayStr = new Date().toLocaleDateString();
@@ -2196,7 +2212,7 @@ function renderCurrentTaskScreen() {
   const canGoBack = taskIdx > 0 || missionIdxInLeg > 0;
   openGuidedFullscreen(`
     <div class="gfs-header">
-      ${gfsHeaderTopHTML(esc(leg.name), true, canGoBack)}
+      ${gfsHeaderTopHTML(esc(runGroupDisplayName(leg)), true, canGoBack)}
       ${precisionTokenWidgetHTML()}
       <h2 class="gfs-mission-name">${esc(mission.name)}</h2>
       <div class="gfs-timer-row">
@@ -2269,7 +2285,7 @@ function renderRobotReturnedScreen() {
   const leg = state.runGroups[legIdx];
   openGuidedFullscreen(`
     <div class="gfs-header">
-      ${gfsHeaderTopHTML(esc(leg.name), true, true)}
+      ${gfsHeaderTopHTML(esc(runGroupDisplayName(leg)), true, true)}
       ${precisionTokenWidgetHTML()}
       <h2 class="gfs-mission-name">All missions done for this run</h2>
       <div class="gfs-timer-row">
@@ -2278,7 +2294,7 @@ function renderRobotReturnedScreen() {
       </div>
     </div>
     <div class="gfs-body gfs-center">
-      <p class="empty-sub">Every mission in "${esc(leg.name)}" is marked.</p>
+      <p class="empty-sub">Every mission in "${esc(runGroupDisplayName(leg))}" is marked.</p>
       <button type="button" class="btn btn-primary btn-full gfs-big-action gfs-huge-action" id="grn-done">Robot returned</button>
     </div>
     <div class="gfs-footer"></div>
@@ -2320,7 +2336,7 @@ function renderGuidedTransitionPhase() {
     <div class="gfs-header">
       ${gfsHeaderTopHTML("Transition", false, false)}
       ${precisionTokenWidgetHTML()}
-      <h2 class="gfs-mission-name">Heading to: ${esc(nextLeg.name)}</h2>
+      <h2 class="gfs-mission-name">Heading to: ${esc(runGroupDisplayName(nextLeg))}</h2>
       <div class="gfs-timer-row">
         <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
         <div class="gfs-points" id="grn-points">${liveScoreHTML()} pts</div>
@@ -2407,7 +2423,7 @@ function renderOverviewBody() {
       </div>`;
     }).join("");
     return `<div class="gfs-section">
-      <h3>${esc(leg.name)}</h3>
+      <h3>${esc(runGroupDisplayName(leg))}</h3>
       ${missionsHTML || `<p class="empty-sub">No missions in this run.</p>`}
     </div>`;
   }).join("");
@@ -2750,7 +2766,7 @@ function renderBreakdownScoresTab() {
       </div>`;
     }).join("");
     return `<div class="gfs-section">
-      <h3>${esc(leg.name)}</h3>
+      <h3>${esc(runGroupDisplayName(leg))}</h3>
       ${missionsHTML || `<p class="empty-sub">No missions in this run.</p>`}
     </div>`;
   }).join("");
@@ -2826,6 +2842,161 @@ function renderBreakdownTimingTab() {
   body.className = "gfs-body";
   body.innerHTML = `<p class="empty-sub">Avg operation time: ${transitions.length ? fmtDuration(avgOpTime) : "—"}</p>`
     + (html || `<p class="empty-sub">No timing data recorded for this run.</p>`);
+}
+
+// ==========================================================
+// ANALYSIS TAB — across every completed run, not just one
+// ==========================================================
+state.analysis = { subTab: "trend", missionSortKey: "order", expandedMissionIds: new Set() };
+
+function renderAnalysisTab() {
+  document.querySelectorAll(".analysis-tab-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.tab === state.analysis.subTab);
+    btn.onclick = () => { state.analysis.subTab = btn.dataset.tab; renderAnalysisTab(); };
+  });
+  const trendBody = document.getElementById("analysis-trend-body");
+  const missionsBody = document.getElementById("analysis-missions-body");
+  if (state.analysis.subTab === "trend") {
+    trendBody.hidden = false;
+    missionsBody.hidden = true;
+    renderScoreTrendChart();
+  } else {
+    trendBody.hidden = true;
+    missionsBody.hidden = false;
+    renderMissionsAnalysisTable();
+  }
+}
+
+function fmtPct(x) { return x == null ? "—" : `${Math.round(x * 100)}%`; }
+function fmtPPS(x) { return x == null ? "—" : x.toFixed(2); }
+
+// A task/mission's "success rate" is its average earned points as a percent
+// of max — this handles partial-credit tasks (number/choice) properly, not
+// just plain achieved/not-achieved.
+function computeMissionAnalytics() {
+  const completed = state.runs.filter((r) => !r.inProgress);
+  return state.missions.map((m) => {
+    const max = missionMaxPoints(m);
+    const scores = completed.map((r) => missionScoreForRun(m, r));
+    const successRate = max > 0 && completed.length ? (scores.reduce((a, b) => a + b, 0) / completed.length) / max : null;
+    const timings = completed.flatMap((r) => (r.missionTimings || []).filter((t) => t.missionId === m.id).map((t) => t.durationMs));
+    const avgTimeMs = timings.length ? timings.reduce((a, b) => a + b, 0) / timings.length : null;
+    const avgPoints = completed.length ? scores.reduce((a, b) => a + b, 0) / completed.length : null;
+    const pointsPerSec = avgTimeMs && avgPoints != null ? avgPoints / (avgTimeMs / 1000) : null;
+    return { mission: m, successRate, avgTimeMs, pointsPerSec, order: m.order };
+  });
+}
+function computeTaskAnalytics(mission) {
+  const completed = state.runs.filter((r) => !r.inProgress);
+  return visibleTasks(mission).map((t, idx) => {
+    const max = taskMaxPoints(t);
+    const scores = completed.map((r) => pointsFromRawTask(t, (r.rawScores || {})[t.id]));
+    const successRate = max > 0 && completed.length ? (scores.reduce((a, b) => a + b, 0) / completed.length) / max : null;
+    return { task: t, successRate, order: idx };
+  });
+}
+
+function renderScoreTrendChart() {
+  const container = document.getElementById("analysis-trend-body");
+  const completed = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  if (completed.length < 2) {
+    container.innerHTML = `<p class="empty-sub">Need at least 2 completed game runs to show a trend.</p>`;
+    return;
+  }
+  const scores = completed.map((r) => runTotal(r, state.missions));
+  const maxScore = Math.max(...scores, 1);
+  const W = 340, H = 200, padL = 34, padR = 12, padT = 14, padB = 26;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const stepX = scores.length > 1 ? plotW / (scores.length - 1) : 0;
+  const points = scores.map((s, i) => [padL + i * stepX, padT + plotH - (s / maxScore) * plotH]);
+  const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+  const dots = points.map((p, i) =>
+    `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="4" fill="var(--moss)" stroke="var(--paper)" stroke-width="1.5"><title>${esc(completed[i].label)}: ${scores[i]} pts</title></circle>`
+  ).join("");
+  const gridFracs = [0, 0.5, 1];
+  const gridLines = gridFracs.map((f) => {
+    const y = padT + plotH - f * plotH;
+    return `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`;
+  }).join("");
+  const gridLabels = gridFracs.map((f) => {
+    const y = padT + plotH - f * plotH;
+    return `<text x="${padL - 6}" y="${(y + 3).toFixed(1)}" font-size="9" text-anchor="end" fill="var(--text-soft)">${Math.round(maxScore * f)}</text>`;
+  }).join("");
+  container.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; display:block;">
+      ${gridLines}${gridLabels}
+      <path d="${pathD}" fill="none" stroke="var(--moss)" stroke-width="2.5"/>
+      ${dots}
+    </svg>
+    <p class="empty-sub" style="text-align:center;">${completed.length} completed runs &middot; tap a point for details</p>
+  `;
+}
+
+function renderMissionsAnalysisTable() {
+  const body = document.getElementById("analysis-missions-body");
+  const sortKey = state.analysis.missionSortKey;
+  const data = computeMissionAnalytics().sort((a, b) => {
+    if (sortKey === "order") return a.order - b.order;
+    if (sortKey === "successRate") return (b.successRate ?? -1) - (a.successRate ?? -1);
+    if (sortKey === "pointsPerSec") return (b.pointsPerSec ?? -1) - (a.pointsPerSec ?? -1);
+    if (sortKey === "time") return (b.avgTimeMs ?? -1) - (a.avgTimeMs ?? -1);
+    return 0;
+  });
+  if (!state.runs.some((r) => !r.inProgress)) {
+    body.innerHTML = `<p class="empty-sub">No completed game runs yet.</p>`;
+    return;
+  }
+  body.innerHTML = `
+    <div class="field"><label>Sort by</label>
+      <select class="text-input" id="analysis-sort-select">
+        <option value="order" ${sortKey === "order" ? "selected" : ""}>Game run order</option>
+        <option value="successRate" ${sortKey === "successRate" ? "selected" : ""}>Success rate</option>
+        <option value="pointsPerSec" ${sortKey === "pointsPerSec" ? "selected" : ""}>Points per second</option>
+        <option value="time" ${sortKey === "time" ? "selected" : ""}>Time taken</option>
+      </select>
+    </div>
+    <div class="mission-list" id="analysis-mission-rows"></div>
+  `;
+  document.getElementById("analysis-sort-select").addEventListener("change", (e) => {
+    state.analysis.missionSortKey = e.target.value;
+    renderMissionsAnalysisTable();
+  });
+  const rowsContainer = document.getElementById("analysis-mission-rows");
+  data.forEach(({ mission, successRate, pointsPerSec, avgTimeMs }) => {
+    const expanded = state.analysis.expandedMissionIds.has(mission.id);
+    const row = document.createElement("div");
+    row.className = "mission-group";
+    row.innerHTML = `
+      <div class="analysis-mission-row-head mission-row">
+        <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
+        <div class="m-info"><div class="m-name">${esc(mission.name)}</div></div>
+        <div class="analysis-stat"><span class="analysis-stat-val">${fmtPct(successRate)}</span><span class="analysis-stat-label">Success</span></div>
+        <div class="analysis-stat"><span class="analysis-stat-val">${fmtPPS(pointsPerSec)}</span><span class="analysis-stat-label">Pts/sec</span></div>
+        <div class="analysis-stat"><span class="analysis-stat-val">${avgTimeMs != null ? fmtDuration(avgTimeMs) : "—"}</span><span class="analysis-stat-label">Time</span></div>
+      </div>
+      <div class="analysis-task-rows" ${expanded ? "" : "hidden"}></div>
+    `;
+    row.querySelector(".analysis-mission-row-head").addEventListener("click", () => {
+      if (expanded) state.analysis.expandedMissionIds.delete(mission.id);
+      else state.analysis.expandedMissionIds.add(mission.id);
+      renderMissionsAnalysisTable();
+    });
+    if (expanded) {
+      const taskContainer = row.querySelector(".analysis-task-rows");
+      const taskData = computeTaskAnalytics(mission).sort((a, b) => {
+        if (sortKey === "successRate") return (b.successRate ?? -1) - (a.successRate ?? -1);
+        return a.order - b.order; // pointsPerSec/time don't exist per-task — fall back to task order
+      });
+      if (!taskData.length) {
+        taskContainer.innerHTML = `<p class="empty-sub">No tasks in this mission.</p>`;
+      } else {
+        taskContainer.innerHTML = taskData.map(({ task, successRate }) =>
+          `<div class="analysis-task-row"><span>${esc(task.name)}</span><span>${fmtPct(successRate)}</span></div>`
+        ).join("");
+      }
+    }
+    rowsContainer.appendChild(row);
+  });
 }
 
 // ---- Scoresheet-style CSV export ----

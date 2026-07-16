@@ -76,6 +76,20 @@
     <div id="run-list" class="run-list"></div>
   </section>
 
+  <!-- ANALYSIS VIEW -->
+  <section class="view" id="view-analysis" hidden>
+    <div class="section-row">
+      <h2>Analysis</h2>
+    </div>
+    <p class="empty-sub">Breakdown (in Game Runs) looks at one run in detail — this looks across every completed run together.</p>
+    <div class="analysis-tabs">
+      <button type="button" class="analysis-tab-btn" data-tab="trend">Score Trend</button>
+      <button type="button" class="analysis-tab-btn" data-tab="missions">Missions</button>
+    </div>
+    <div id="analysis-trend-body"></div>
+    <div id="analysis-missions-body" hidden></div>
+  </section>
+
   <!-- SETUP VIEW -->
   <section class="view" id="view-setup" hidden>
     <div class="section-row">
@@ -134,6 +148,9 @@
   </button>
   <button class="tab-btn" data-view="view-runs">
     <span class="tab-icon">&#127919;</span><span>Game Runs</span>
+  </button>
+  <button class="tab-btn" data-view="view-analysis">
+    <span class="tab-icon">&#128202;</span><span>Analysis</span>
   </button>
   <button class="tab-btn" data-view="view-setup">
     <span class="tab-icon">&#9881;&#65039;</span><span>Settings</span>
