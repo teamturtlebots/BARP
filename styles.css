@@ -650,24 +650,17 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   padding: 4px 2px;
 }
 .btn-small-link:active { color: var(--moss); }
-.drag-row {
-  display: flex; align-items: center; gap: 12px;
-  touch-action: none; user-select: none;
-  background: var(--paper-2); border: 1.5px solid var(--line); border-radius: 8px;
-  padding: 10px 12px;
-}
-.drag-row.dragging { z-index: 30; box-shadow: 0 4px 14px rgba(0,0,0,0.25); border-color: var(--moss); background: #fff; }
-.drag-group {
-  touch-action: none; user-select: none; position: relative;
-}
-.drag-group.dragging {
-  z-index: 30; box-shadow: 0 4px 14px rgba(0,0,0,0.25); border-radius: 8px; background: var(--paper);
-}
 .drag-handle {
   font-size: 1.3rem; color: var(--text-soft); cursor: grab; flex: none;
   padding: 4px 8px; touch-action: none;
 }
-.drag-row .m-info { flex: 1; min-width: 0; }
+/* SortableJS's own state classes — .sortable-chosen/.sortable-drag are on the
+   real item while it's actively being dragged; .sortable-ghost is the
+   placeholder left behind showing where it'll land. */
+.sortable-chosen, .sortable-drag {
+  box-shadow: 0 4px 14px rgba(0,0,0,0.25); border-color: var(--moss) !important; background: #fff !important;
+}
+.sortable-ghost { opacity: 0.4; }
 
 /* --- Added: attachment picture thumbnail --- */
 .att-thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); flex: none; }

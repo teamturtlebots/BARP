@@ -177,148 +177,20 @@ window.addEventListener("error", (e) => showErrorBanner(e.message || String(e.er
 window.addEventListener("unhandledrejection", (e) => showErrorBanner(e.reason?.message || String(e.reason)));
 
 // ---------- Drag-to-reorder (touch-friendly, works with mouse too) ----------
-// Attach to a row that has a ".drag-handle" element inside it. `itemsArray`
-// is the live array being reordered (mutated in place via splice/swap) and
-// `container` is the row's parent. Rows keep their real DOM nodes throughout
-// the drag (swapped via insertBefore, never recreated), so pointer capture on
-// the handle stays valid for the whole gesture.
-// ---------- Drag-to-reorder (touch-friendly, works with mouse too) ----------
-// Same-container version: used for attachments, run groups, and tasks — none
-// of which are allowed to move into a different parent list.
-function attachRowDrag(row, container, onSwap, groupMode = false) {
-  row.setAttribute("data-draggable", "1");
-  row.classList.add(groupMode ? "drag-group" : "drag-row");
-  const handle = row.querySelector(".drag-handle");
-  if (!handle) return;
-  handle.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    row.classList.add("dragging");
-    let startY = e.clientY;
-    let latestY = e.clientY;
-    let rafPending = false;
-
-    function evaluate() {
-      rafPending = false;
-      const dy = latestY - startY;
-      row.style.transform = `translateY(${dy}px)`;
-      const rect = row.getBoundingClientRect();
-      const midY = rect.top + rect.height / 2;
-
-      const prev = row.previousElementSibling;
-      if (prev && prev.hasAttribute("data-draggable")) {
-        const prevRect = prev.getBoundingClientRect();
-        if (midY < prevRect.top + prevRect.height / 2) {
-          container.insertBefore(row, prev);
-          if (onSwap) onSwap();
-          startY = latestY;
-          row.style.transform = "translateY(0px)";
-          return;
-        }
-      }
-      const next = row.nextElementSibling;
-      if (next && next.hasAttribute("data-draggable")) {
-        const nextRect = next.getBoundingClientRect();
-        if (midY > nextRect.top + nextRect.height / 2) {
-          container.insertBefore(next, row);
-          if (onSwap) onSwap();
-          startY = latestY;
-          row.style.transform = "translateY(0px)";
-        }
-      }
-    }
-    function onMove(ev) {
-      latestY = ev.clientY;
-      if (!rafPending) { rafPending = true; requestAnimationFrame(evaluate); }
-    }
-    function onUp() {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
-      row.classList.remove("dragging");
-      row.style.transform = "";
-    }
-    // Listening on window (rather than capturing on the handle) means the
-    // drag always ends cleanly even if the row gets moved to a different
-    // parent mid-drag — pointer capture can silently drop on reparenting.
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
-  });
-}
-
-// Cross-container version: used only for missions, which are allowed to move
-// between any of the currently-visible runs' mission lists — but nothing
-// deeper, a mission can only ever land inside a run's own list.
-function attachMissionDrag(row, allContainers) {
-  row.setAttribute("data-draggable", "1");
-  row.classList.add("drag-group");
-  const handle = row.querySelector(".drag-handle");
-  if (!handle) return;
-  handle.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    row.classList.add("dragging");
-    let startY = e.clientY;
-    let latestY = e.clientY;
-    let rafPending = false;
-
-    function evaluate() {
-      rafPending = false;
-      const dy = latestY - startY;
-      row.style.transform = `translateY(${dy}px)`;
-      const rect = row.getBoundingClientRect();
-      const midY = rect.top + rect.height / 2;
-
-      let targetContainer = null;
-      for (const c of allContainers) {
-        if (c === row.parentElement) continue;
-        const cRect = c.getBoundingClientRect();
-        if (cRect.width === 0 && cRect.height === 0) continue; // hidden/collapsed
-        if (midY >= cRect.top && midY <= cRect.bottom) { targetContainer = c; break; }
-      }
-      if (targetContainer) {
-        targetContainer.appendChild(row);
-        startY = latestY;
-        row.style.transform = "translateY(0px)";
-        return;
-      }
-
-      const prev = row.previousElementSibling;
-      if (prev && prev.hasAttribute("data-draggable")) {
-        const prevRect = prev.getBoundingClientRect();
-        if (midY < prevRect.top + prevRect.height / 2) {
-          row.parentElement.insertBefore(row, prev);
-          startY = latestY;
-          row.style.transform = "translateY(0px)";
-          return;
-        }
-      }
-      const next = row.nextElementSibling;
-      if (next && next.hasAttribute("data-draggable")) {
-        const nextRect = next.getBoundingClientRect();
-        if (midY > nextRect.top + nextRect.height / 2) {
-          row.parentElement.insertBefore(next, row);
-          startY = latestY;
-          row.style.transform = "translateY(0px)";
-        }
-      }
-    }
-    function onMove(ev) {
-      latestY = ev.clientY;
-      if (!rafPending) { rafPending = true; requestAnimationFrame(evaluate); }
-    }
-    function onUp() {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
-      row.classList.remove("dragging");
-      row.style.transform = "";
-    }
-    // Window-level listeners (not pointer capture on the handle) so the drag
-    // still ends cleanly even after the row is reparented into another run's
-    // container — capture can silently drop when the captured element moves.
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
+// ---------- Drag-to-reorder (SortableJS-backed) ----------
+// Thin wrapper around the SortableJS library (loaded via CDN in index.html).
+// `group` lets several containers share a name so items can be dragged
+// between them (used for missions moving between runs / Unassigned) —
+// leave it unset for a container whose items should only reorder in place
+// (attachments, run groups, tasks within one mission).
+function makeSortable(container, { group, onEnd } = {}) {
+  return Sortable.create(container, {
+    handle: ".drag-handle",
+    animation: 150,
+    group,
+    fallbackOnBody: true, // recommended by SortableJS for nested sortable lists
+    swapThreshold: 0.65,
+    onEnd,
   });
 }
 function reorderToolbarHTML(editing, prefix) {
@@ -673,6 +545,7 @@ function renderAttachmentsSetup() {
     for (const [idx, att] of state.attachments.entries()) {
       const row = document.createElement("div");
       row.dataset.idx = idx;
+      row.dataset.attId = String(att.id);
       if (editing) {
         row.className = "mission-row";
         row.innerHTML = `
@@ -699,9 +572,6 @@ function renderAttachmentsSetup() {
           });
         });
         list.appendChild(row);
-        attachRowDrag(row, list, () => {
-          [...list.querySelectorAll(".drag-row .drag-num")].forEach((el, i) => { el.textContent = `#${i + 1}`; });
-        });
       } else {
         const count = await iterationCount(att.id);
         row.className = "mission-row";
@@ -714,6 +584,13 @@ function renderAttachmentsSetup() {
         `;
         list.appendChild(row);
       }
+    }
+    if (editing && state.attachments.length) {
+      makeSortable(list, {
+        onEnd: () => {
+          [...list.querySelectorAll(".drag-num")].forEach((el, i) => { el.textContent = `#${i + 1}`; });
+        },
+      });
     }
   })();
 }
@@ -752,7 +629,13 @@ function wireAttachmentOrderToolbar() {
   });
   const saveBtn = document.getElementById("btn-save-order-attachments");
   if (saveBtn) saveBtn.addEventListener("click", async () => {
-    for (const [idx, att] of state.attachments.entries()) { att.order = idx; att.number = idx + 1; await dbPut("attachments", att); }
+    const list = document.getElementById("attachment-setup-list");
+    const orderedIds = [...list.querySelectorAll("[data-att-id]")].map((row) => row.dataset.attId);
+    orderedIds.forEach((id, idx) => {
+      const att = state.attachments.find((a) => String(a.id) === id);
+      if (att) { att.order = idx; att.number = idx + 1; }
+    });
+    for (const att of state.attachments) await dbPut("attachments", att);
     attachmentEditSessionSnapshot = null;
     state.editingAttachmentOrder = false;
     await loadAttachments();
@@ -1396,7 +1279,9 @@ async function saveAllOrder() {
     const taskEls = [...mEl.querySelectorAll(":scope > .task-list > [data-tid]")];
     if (!taskEls.length) continue;
     const reordered = taskEls.map((te) => m.tasks.find((t) => t.id === te.dataset.tid)).filter(Boolean);
-    if (reordered.length === m.tasks.length) m.tasks = reordered;
+    if (reordered.length === visibleTasks(m).length) {
+      m.tasks = [...reordered, ...m.tasks.filter((t) => t.deleted)];
+    }
   }
   for (const m of state.missions) await dbPut("missions", m);
 
@@ -1416,9 +1301,6 @@ function renderRunGroups() {
   if (!state.runGroups.length) {
     list.innerHTML = `<p class="empty-sub">No runs yet. Add one, then add the missions it covers.</p>`;
   }
-
-  const missionContainers = []; // collected across all groups, for cross-run mission dragging
-  const missionRows = []; // {row, mission} pairs — wired up in a second pass once all containers are known
 
   state.runGroups.forEach((g) => {
     const wrap = document.createElement("div");
@@ -1462,15 +1344,15 @@ function renderRunGroups() {
           await restoreDeletedRunGroup(g.id);
         });
       });
-      attachRowDrag(wrap, list, undefined, true);
     }
     if (expanded) {
       const container = wrap.querySelector(".task-list");
-      missionContainers.push(container);
-      renderMissionsForGroup(container, g, missionRows);
+      renderMissionsForGroup(container, g);
+      makeSortable(container, { group: "missions" });
     }
     list.appendChild(wrap);
   });
+  if (editing && state.runGroups.length) makeSortable(list);
 
   const orphans = state.missions.filter((m) => !state.runGroups.some((g) => g.id === m.runGroupId));
   let orphanWrap = null;
@@ -1497,23 +1379,15 @@ function renderRunGroups() {
     }
     if (orphanExpanded) {
       const orphanContainer = orphanWrap.querySelector(".task-list");
-      missionContainers.push(orphanContainer);
-      renderOrphanMissions(orphanContainer, orphans, missionRows);
+      renderOrphanMissions(orphanContainer, orphans);
+      makeSortable(orphanContainer, { group: "missions" });
     }
-  }
-
-  // Second pass: now that every run's (and Unassigned's) mission container
-  // exists, wire up cross-run dragging for every mission row at once — this
-  // is what lets a mission be dragged between two real runs, or in/out of
-  // Unassigned, not just reordered within its current list.
-  if (editing) {
-    missionRows.forEach(({ row }) => attachMissionDrag(row, missionContainers));
   }
 
   if (orphanWrap) list.appendChild(orphanWrap);
 }
 
-function renderOrphanMissions(container, orphans, missionRows) {
+function renderOrphanMissions(container, orphans) {
   const editing = state.editingAllOrder;
   container.innerHTML = "";
   orphans.forEach((m) => {
@@ -1553,7 +1427,6 @@ function renderOrphanMissions(container, orphans, missionRows) {
           await restoreDeletedMission(m.id);
         });
       });
-      if (missionRows) missionRows.push({ row, mission: m });
     }
     if (expanded) renderTaskList(row.querySelector(".task-list"), m);
     container.appendChild(row);
@@ -1585,9 +1458,7 @@ function openRunGroupModal(g) {
 }
 
 // ---- Missions nested within a run ----
-// `missionRows` (optional) collects {row, mission} pairs so the caller can
-// wire up cross-run dragging once every run's container has been created.
-function renderMissionsForGroup(container, group, missionRows) {
+function renderMissionsForGroup(container, group) {
   const editing = state.editingAllOrder;
   container.innerHTML = "";
   const groupMissions = state.missions.filter((m) => m.runGroupId === group.id).sort((a, b) => a.order - b.order);
@@ -1632,7 +1503,6 @@ function renderMissionsForGroup(container, group, missionRows) {
           await restoreDeletedMission(m.id);
         });
       });
-      if (missionRows) missionRows.push({ row, mission: m });
     }
     if (expanded) {
       const taskListEl = row.querySelector(".task-list");
@@ -1711,7 +1581,6 @@ function renderTaskList(container, mission) {
         });
       });
       container.appendChild(row);
-      attachRowDrag(row, container);
       return;
     }
     row.className = "task-row";
@@ -1723,6 +1592,7 @@ function renderTaskList(container, mission) {
     `;
     container.appendChild(row);
   });
+  if (editing && visibleTasks(mission).length) makeSortable(container);
 }
 
 function openTaskModal(mission, t) {
