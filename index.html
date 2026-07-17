@@ -138,6 +138,21 @@
     <button class="btn btn-primary" id="btn-google-signin">Sign in with Google</button>
     <button class="btn btn-ghost" id="btn-google-signout" hidden>Sign out</button>
     <p class="empty-sub" id="drive-sync-status" hidden>Not synced yet.</p>
+
+    <div id="admin-sheets-section" hidden>
+      <div class="section-row" style="margin-top:28px;">
+        <h2>Google Sheets Export</h2>
+      </div>
+      <p class="empty-sub">Admin only. Exports everything in the app into a Google Sheet with three tabs: Time Data, Score Data, and Analysis charts — for more flexibility than fits on a phone screen.</p>
+      <p class="empty-sub" id="sheets-connect-status">Not connected.</p>
+      <button class="btn btn-primary" id="btn-sheets-connect">Connect Google Sheets</button>
+      <div class="field" style="margin-top:12px;">
+        <label>Target spreadsheet ID or URL</label>
+        <input class="text-input" id="sheets-target-id" placeholder="Paste the Google Sheet's URL or ID here">
+      </div>
+      <button class="btn btn-amber btn-full" id="btn-sheets-export" style="margin-top:10px;">Export to Sheets</button>
+      <p class="empty-sub" id="sheets-export-status"></p>
+    </div>
   </section>
 
 </main>

@@ -3185,13 +3185,15 @@ function buildScoresheetSheet(wb, sheetName, rows, runsChunk) {
       style: { fill: { type: "pattern", pattern: "solid", bgColor: { argb: "FFCFE2F3" } } },
     }],
   });
-  // Red-yellow-green heatmap on the Success Rate column.
+  // Red-yellow-green heatmap on the Success Rate column — fixed 0%/50%/100%
+  // stops (not percentile-based) since Success Rate is inherently bounded to
+  // that range, so a fixed scale is the meaningful one, not a relative one.
   ws.addConditionalFormatting({
     ref: `${successRateLetter}2:${successRateLetter}${lastTaskRow}`,
     rules: [{
       type: "colorScale",
-      cfvo: [{ type: "min" }, { type: "percentile", value: 50 }, { type: "max" }],
-      color: [{ argb: "FFF8696B" }, { argb: "FFFFEB84" }, { argb: "FF63BE7B" }],
+      cfvo: [{ type: "num", value: 0 }, { type: "num", value: 0.5 }, { type: "num", value: 1 }],
+      color: [{ argb: "FFFF0000" }, { argb: "FFFFFF00" }, { argb: "FF57BB8A" }],
     }],
   });
 
@@ -3522,6 +3524,7 @@ function renderGoogleSignInStatus() {
   if (signInBtn) signInBtn.hidden = signedIn;
   if (signOutBtn) signOutBtn.hidden = !signedIn;
   if (syncEl) syncEl.hidden = !signedIn;
+  renderAdminSheetsVisibility();
 }
 document.getElementById("btn-google-signin").addEventListener("click", async () => {
   if (!window.firebaseAuth) { showErrorBanner("Sign-in isn't ready yet — check your internet connection and try again."); return; }
@@ -3547,6 +3550,300 @@ document.getElementById("btn-google-signout").addEventListener("click", () => {
     closeModal();
     if (window.firebaseAuth) await window.firebaseFns.signOut(window.firebaseAuth);
   });
+});
+
+// ---- Google Sheets export (admin only) ----
+// Change this to your own account's email — this is the only gate deciding
+// who sees the Sheets export UI at all. Not a security boundary by itself
+// (client-side check), but real enforcement comes from the fact that only
+// this account has ever gone through the drive.file consent screen, so a
+// teammate's token could never actually touch the target spreadsheet anyway.
+const ADMIN_EMAIL = "wangjia228@gmail.com";
+
+state.sheets = { accessToken: null, tokenExpiresAt: 0, spreadsheetId: null };
+
+function renderAdminSheetsVisibility() {
+  const section = document.getElementById("admin-sheets-section");
+  if (!section) return;
+  const isAdmin = state.firebaseUser && state.firebaseUser.email === ADMIN_EMAIL;
+  section.hidden = !isAdmin;
+}
+
+function parseSpreadsheetId(input) {
+  const m = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  return m ? m[1] : input.trim();
+}
+
+async function sheetsFetch(path, options = {}) {
+  if (!state.sheets.accessToken || Date.now() >= state.sheets.tokenExpiresAt) {
+    throw new Error("Not connected to Google Sheets — click Connect Google Sheets first.");
+  }
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${path}`, {
+    ...options,
+    headers: { Authorization: `Bearer ${state.sheets.accessToken}`, "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Sheets API ${res.status}: ${body.slice(0, 300)}`);
+  }
+  return res.json();
+}
+function sheetsValuesUpdate(spreadsheetId, range, values) {
+  return sheetsFetch(`${spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, {
+    method: "PUT",
+    body: JSON.stringify({ range, values }),
+  });
+}
+function sheetsBatchUpdate(spreadsheetId, requests) {
+  return sheetsFetch(`${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    body: JSON.stringify({ requests }),
+  });
+}
+
+document.getElementById("btn-sheets-connect").addEventListener("click", async () => {
+  if (!window.firebaseAuth) { showErrorBanner("Sign-in isn't ready yet."); return; }
+  const provider = new window.firebaseFns.GoogleAuthProvider();
+  provider.addScope("https://www.googleapis.com/auth/drive.file");
+  try {
+    const result = await window.firebaseFns.signInWithPopup(window.firebaseAuth, provider);
+    const credential = window.firebaseFns.GoogleAuthProvider.credentialFromResult(result);
+    state.sheets.accessToken = credential.accessToken;
+    state.sheets.tokenExpiresAt = Date.now() + 55 * 60 * 1000; // Google access tokens run ~1hr; refresh a bit early
+    document.getElementById("sheets-connect-status").textContent = "Connected.";
+  } catch (e) {
+    showErrorBanner(`Couldn't connect Google Sheets: ${e.message}`);
+  }
+});
+
+// ---- Sheet 1: Time Data ----
+// Operation time for a mission = the gap since the previous mission ended
+// (or, if it's the first mission of a new leg, that leg's transition time).
+// The very first mission of the whole run has no preceding operation time,
+// same as your reference file's own "first mission always blank" pattern.
+function computeTimeDataForSheets() {
+  const completed = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  function weekStart(ts) {
+    const d = new Date(ts);
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - d.getDay());
+    return d.toISOString().slice(0, 10);
+  }
+  const entries = [];
+  completed.forEach((run) => {
+    let prevEnd = null, prevGroupId = null;
+    (run.missionTimings || []).forEach((mt) => {
+      let operationMs = null;
+      if (prevEnd != null) {
+        if (mt.runGroupId !== prevGroupId) {
+          const trans = (run.transitionTimings || []).find((t) => t.beforeRunGroupId === mt.runGroupId);
+          operationMs = trans ? trans.durationMs : null;
+        } else {
+          operationMs = mt.startTs - prevEnd;
+        }
+      }
+      entries.push({ missionId: mt.missionId, weekKey: weekStart(run.startedAt || mt.startTs), operationMs, runMs: mt.durationMs });
+      prevEnd = mt.endTs;
+      prevGroupId = mt.runGroupId;
+    });
+  });
+  const missionOrder = state.missions.slice().sort((a, b) => a.order - b.order);
+  const weekKeys = [...new Set(entries.map((e) => e.weekKey))].sort();
+  const table = missionOrder.map((m, idx) => {
+    const weeks = {};
+    weekKeys.forEach((wk) => {
+      const matches = entries.filter((e) => e.missionId === m.id && e.weekKey === wk);
+      const opVals = matches.map((e) => e.operationMs).filter((v) => v != null);
+      const runVals = matches.map((e) => e.runMs).filter((v) => v != null);
+      weeks[wk] = {
+        avgOperation: opVals.length ? Math.round(opVals.reduce((a, b) => a + b, 0) / opVals.length / 1000) : "",
+        avgRun: runVals.length ? Math.round(runVals.reduce((a, b) => a + b, 0) / runVals.length / 1000) : "",
+      };
+    });
+    return { runNum: idx + 1, name: m.name, weeks };
+  });
+  return { weekKeys, table };
+}
+async function writeTimeDataSheet(spreadsheetId, sheetId) {
+  const { weekKeys, table } = computeTimeDataForSheets();
+  const header1 = ["Run #", "Run Name", ...weekKeys.flatMap((wk) => [`Week of ${wk}`, ""])];
+  const header2 = ["", "", ...weekKeys.flatMap(() => ["Operation Time (sec)", "Run Time (sec)"])];
+  const rows = table.map((r) => [r.runNum, r.name, ...weekKeys.flatMap((wk) => [r.weeks[wk].avgOperation, r.weeks[wk].avgRun])]);
+  await sheetsValuesUpdate(spreadsheetId, `'Time Data'!A1`, [header1, header2, ...rows]);
+  const merges = weekKeys.map((_, i) => ({
+    mergeCells: {
+      range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 2 + i * 2, endColumnIndex: 4 + i * 2 },
+      mergeType: "MERGE_ALL",
+    },
+  }));
+  if (merges.length) await sheetsBatchUpdate(spreadsheetId, merges);
+}
+
+// ---- Sheet 2: Score Data ----
+// Reuses buildScoreRowDefs() — the exact same row logic BARP's own XLSX
+// export already uses (one row per Yes/No task, per unit of a Number task,
+// per option of a Choice task), so this sheet's shape always matches
+// whatever's actually configured in Settings, not last season's structure.
+async function writeScoreDataSheet(spreadsheetId, sheetId) {
+  const rowDefs = buildScoreRowDefs();
+  const completedRuns = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  const firstFlagCol = 7; // 1-indexed, column G — matches the XLSX export's own layout
+  const lastFlagCol = firstFlagCol + Math.max(completedRuns.length, 1) - 1;
+  const successCol = lastFlagCol + 1;
+  const header = ["M#", "Official Name", "Task", "Pts", "Name", "#", ...completedRuns.map(() => ""), "Success Rate"];
+  const dataRows = rowDefs.map((row, i) => {
+    const rowNum = i + 2;
+    const flags = completedRuns.map((r) => (row.flagged(r) ? 1 : ""));
+    const successFormula = completedRuns.length
+      ? `=SUM(${colLetter(firstFlagCol)}${rowNum}:${colLetter(lastFlagCol)}${rowNum})/${completedRuns.length}`
+      : "";
+    return [row.mission.number ?? "", row.mission.name, row.notes, row.pts, row.runName, row.runNum, ...flags, successFormula];
+  });
+  await sheetsValuesUpdate(spreadsheetId, `'Score Data'!A1`, [header, ...dataRows]);
+  const lastTaskRow = rowDefs.length + 1;
+  // Header formula per run — same SUMPRODUCT the XLSX export uses.
+  if (completedRuns.length) {
+    const headerFormulas = completedRuns.map((r, i) => {
+      const col = firstFlagCol + i;
+      return [{ userEnteredValue: { formulaValue: `=SUMPRODUCT($D2:$D${lastTaskRow},${colLetter(col)}2:${colLetter(col)}${lastTaskRow})` } }];
+    });
+    await sheetsBatchUpdate(spreadsheetId, headerFormulas.map((cellData, i) => ({
+      updateCells: {
+        rows: [{ values: cellData }],
+        fields: "userEnteredValue",
+        start: { sheetId, rowIndex: 0, columnIndex: firstFlagCol - 1 + i },
+      },
+    })));
+  }
+  // Colors confirmed from the reference template: green Success Rate header,
+  // red bold run-total cells, light-blue ISODD category banding, and a
+  // fixed 0/50%/100% red-yellow-green scale on Success Rate (not
+  // percentile-based — it's a metric that's inherently bounded to 0-100%).
+  await sheetsBatchUpdate(spreadsheetId, [
+    { repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: successCol - 1, endColumnIndex: successCol },
+        cell: { userEnteredFormat: { backgroundColor: { red: 0, green: 1, blue: 0 }, textFormat: { bold: true } } },
+        fields: "userEnteredFormat(backgroundColor,textFormat)",
+    } },
+    { repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: firstFlagCol - 1, endColumnIndex: lastFlagCol },
+        cell: { userEnteredFormat: { textFormat: { bold: true, foregroundColor: { red: 1, green: 0, blue: 0 } } } },
+        fields: "userEnteredFormat.textFormat",
+    } },
+    { addConditionalFormatRule: {
+        rule: {
+          ranges: [{ sheetId, startRowIndex: 1, endRowIndex: lastTaskRow, startColumnIndex: 0, endColumnIndex: successCol }],
+          booleanRule: {
+            condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: "=ISODD($F2)" }] },
+            format: { backgroundColor: { red: 0.812, green: 0.886, blue: 0.953 } },
+          },
+        },
+        index: 0,
+    } },
+    { addConditionalFormatRule: {
+        rule: {
+          ranges: [{ sheetId, startRowIndex: 1, endRowIndex: lastTaskRow, startColumnIndex: successCol - 1, endColumnIndex: successCol }],
+          gradientRule: {
+            minpoint: { type: "NUMBER", value: "0", color: { red: 1, green: 0, blue: 0 } },
+            midpoint: { type: "NUMBER", value: "0.5", color: { red: 1, green: 1, blue: 0 } },
+            maxpoint: { type: "NUMBER", value: "1", color: { red: 0.341, green: 0.745, blue: 0.541 } },
+          },
+        },
+        index: 1,
+    } },
+  ]);
+}
+
+// ---- Sheet 3: Analysis ----
+// Reuses the exact same computations already driving the in-app Analysis
+// tab, just written as real Sheets charts instead of hand-drawn SVG.
+async function writeAnalysisSheet(spreadsheetId, sheetId) {
+  const completed = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  const trendRows = completed.map((r) => [r.label, runTotal(r, state.missions)]);
+  const missionData = computeMissionAnalytics().sort((a, b) => a.order - b.order);
+  const missionRows = missionData.map((d) => [
+    d.mission.name,
+    d.successRate != null ? Math.round(d.successRate * 100) : "",
+    d.pointsPerSec != null ? Number(d.pointsPerSec.toFixed(2)) : "",
+    d.avgTimeMs != null ? Math.round(d.avgTimeMs / 1000) : "",
+  ]);
+  await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A1`, [
+    ["Run", "Score"], ...trendRows,
+  ]);
+  const missionStartRow = trendRows.length + 3; // leave a gap below the trend table
+  await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A${missionStartRow}`, [
+    ["Mission", "Success Rate (%)", "Points/Sec", "Avg Time (sec)"], ...missionRows,
+  ]);
+
+  const trendLastRow = trendRows.length + 1;
+  const missionLastRow = missionStartRow + missionRows.length - 1;
+  await sheetsBatchUpdate(spreadsheetId, [
+    { addChart: { chart: { spec: {
+      title: "Score Trend", basicChart: {
+        chartType: "LINE",
+        legendPosition: "NO_LEGEND",
+        axis: [{ position: "BOTTOM_AXIS", title: "Run" }, { position: "LEFT_AXIS", title: "Score" }],
+        domains: [{ domain: { sourceRange: { sources: [{ sheetId, startRowIndex: 1, endRowIndex: trendLastRow, startColumnIndex: 0, endColumnIndex: 1 }] } } }],
+        series: [{ series: { sourceRange: { sources: [{ sheetId, startRowIndex: 1, endRowIndex: trendLastRow, startColumnIndex: 1, endColumnIndex: 2 }] } } }],
+      },
+    }, position: { overlayPosition: { anchorCell: { sheetId, rowIndex: 0, columnIndex: 3 } } } } } },
+    { addChart: { chart: { spec: {
+      title: "Mission Success Rate", basicChart: {
+        chartType: "COLUMN",
+        legendPosition: "NO_LEGEND",
+        axis: [{ position: "BOTTOM_AXIS", title: "Mission" }, { position: "LEFT_AXIS", title: "Success %" }],
+        domains: [{ domain: { sourceRange: { sources: [{ sheetId, startRowIndex: missionStartRow, endRowIndex: missionLastRow, startColumnIndex: 0, endColumnIndex: 1 }] } } }],
+        series: [{ series: { sourceRange: { sources: [{ sheetId, startRowIndex: missionStartRow, endRowIndex: missionLastRow, startColumnIndex: 1, endColumnIndex: 2 }] } } }],
+      },
+    }, position: { overlayPosition: { anchorCell: { sheetId, rowIndex: 20, columnIndex: 3 } } } } } },
+    { addChart: { chart: { spec: {
+      title: "Points per Second by Mission", basicChart: {
+        chartType: "COLUMN",
+        legendPosition: "NO_LEGEND",
+        axis: [{ position: "BOTTOM_AXIS", title: "Mission" }, { position: "LEFT_AXIS", title: "Pts/sec" }],
+        domains: [{ domain: { sourceRange: { sources: [{ sheetId, startRowIndex: missionStartRow, endRowIndex: missionLastRow, startColumnIndex: 0, endColumnIndex: 1 }] } } }],
+        series: [{ series: { sourceRange: { sources: [{ sheetId, startRowIndex: missionStartRow, endRowIndex: missionLastRow, startColumnIndex: 2, endColumnIndex: 3 }] } } }],
+      },
+    }, position: { overlayPosition: { anchorCell: { sheetId, rowIndex: 40, columnIndex: 3 } } } } } },
+  ]);
+}
+
+// ---- Orchestration ----
+async function ensureSheetsExist(spreadsheetId) {
+  const meta = await sheetsFetch(spreadsheetId);
+  const wanted = ["Time Data", "Score Data", "Analysis"];
+  const existing = {};
+  meta.sheets.forEach((s) => { existing[s.properties.title] = s.properties.sheetId; });
+  const toCreate = wanted.filter((name) => !(name in existing));
+  if (toCreate.length) {
+    const resp = await sheetsBatchUpdate(spreadsheetId, toCreate.map((title) => ({ addSheet: { properties: { title } } })));
+    resp.replies.forEach((r) => { existing[r.addSheet.properties.title] = r.addSheet.properties.sheetId; });
+  }
+  return existing;
+}
+document.getElementById("btn-sheets-export").addEventListener("click", async () => {
+  const raw = document.getElementById("sheets-target-id").value.trim();
+  if (!raw) { showErrorBanner("Paste the target Google Sheet's URL or ID first."); return; }
+  const spreadsheetId = parseSpreadsheetId(raw);
+  const statusEl = document.getElementById("sheets-export-status");
+  const btn = document.getElementById("btn-sheets-export");
+  btn.disabled = true;
+  try {
+    statusEl.textContent = "Setting up sheets…";
+    const sheetIds = await ensureSheetsExist(spreadsheetId);
+    statusEl.textContent = "Writing Time Data…";
+    await writeTimeDataSheet(spreadsheetId, sheetIds["Time Data"]);
+    statusEl.textContent = "Writing Score Data…";
+    await writeScoreDataSheet(spreadsheetId, sheetIds["Score Data"]);
+    statusEl.textContent = "Writing Analysis…";
+    await writeAnalysisSheet(spreadsheetId, sheetIds["Analysis"]);
+    statusEl.textContent = `Exported ${new Date().toLocaleTimeString()}.`;
+  } catch (e) {
+    statusEl.textContent = "Export failed.";
+    showErrorBanner(`Sheets export failed: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 // ---- Firestore sync ----
