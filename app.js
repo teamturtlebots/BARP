@@ -2096,7 +2096,7 @@ function liveTimerHTML() {
 }
 function liveScoreHTML() {
   if (!state.guidedRun) return "0 / 0";
-  return `${runTotal(state.guidedRun.run, state.missions)} / ${runMaxPoints(state.missions)}`;
+  return `${runTotal(state.guidedRun.run, state.missions)}`;
 }
 
 function openGuidedFullscreen(html) {
@@ -2374,11 +2374,11 @@ function renderGuidedOverview() {
       ${isLive ? `
         <div class="gfs-timer-row" style="justify-content:center; gap:24px;">
           <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
-          <div class="gfs-timer" id="gfs-overview-total">${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}</div>
+          <div class="gfs-timer" id="gfs-overview-total">${runTotal(run, state.missions)}</div>
         </div>
         <div class="gfs-timer-label">time left &middot; score &middot; fill in scores below as you go</div>
       ` : `
-        <div class="gfs-timer" id="gfs-overview-total">${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}</div>
+        <div class="gfs-timer" id="gfs-overview-total">${runTotal(run, state.missions)}</div>
         <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs)} total time &middot; review below or save now</div>
       `}
       <button class="btn btn-primary btn-full" id="grn-save-top" type="button" style="margin-top:12px;">&#10003; Save &amp; Finish</button>
@@ -2472,7 +2472,7 @@ function bindOverviewEvents() {
 
 function updateOverviewTotal() {
   const el = document.getElementById("gfs-overview-total");
-  if (el) el.textContent = `${runTotal(state.guidedRun.run, state.missions)} / ${runMaxPoints(state.missions)}`;
+  if (el) el.textContent = `${runTotal(state.guidedRun.run, state.missions)}`;
 }
 
 async function finalizeGuidedRun() {
@@ -2647,7 +2647,6 @@ function renderRuns() {
 
   completed.slice().reverse().forEach((run) => {
     const total = runTotal(run, state.missions);
-    const maxTotal = runMaxPoints(state.missions);
     const avgOp = breakdownAvgOpTime(run);
     const card = document.createElement("div");
     card.className = "run-card";
@@ -2657,7 +2656,7 @@ function renderRuns() {
           <div class="run-title">${esc(run.label)}</div>
           <div class="run-date">${esc(run.date || "")}</div>
         </div>
-        <div class="rc-stat"><span class="rc-stat-val">${total}/${maxTotal}</span><span class="rc-stat-label">pts</span></div>
+        <div class="rc-stat"><span class="rc-stat-val">${total}</span><span class="rc-stat-label">pts</span></div>
         <div class="rc-stat"><span class="rc-stat-val">${fmtDuration(run.totalTimeMs || 0)}</span><span class="rc-stat-label">time</span></div>
         <div class="rc-stat"><span class="rc-stat-val">${avgOp !== null ? fmtDuration(avgOp) : "&mdash;"}</span><span class="rc-stat-label">avg op</span></div>
         <button class="btn-icon rc-icon-btn" data-act="view" title="View breakdown">&#128065;&#65039;</button>
@@ -2695,7 +2694,7 @@ function renderRunBreakdown(run) {
         <button type="button" class="brk-edit-icon-btn" id="brk-edit-btn">&#9998;&#65039; Edit</button>
         <div class="guided-phase-badge">${esc(run.label)}</div>
       </div>
-      <div class="gfs-timer" id="brk-total">${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}</div>
+      <div class="gfs-timer" id="brk-total">${runTotal(run, state.missions)}</div>
       <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs || 0)} total time &middot; avg operation time ${avgOp !== null ? fmtDuration(avgOp) : "&mdash;"}</div>
       <div class="brk-tabs">
         <button type="button" class="brk-tab-btn" data-tab="scores">Scores</button>
@@ -2806,7 +2805,7 @@ function bindBreakdownEditEvents() {
 function refreshBreakdownTotal() {
   const { run } = state.breakdown;
   const el = document.getElementById("brk-total");
-  if (el) el.textContent = `${runTotal(run, state.missions)} / ${runMaxPoints(state.missions)}`;
+  if (el) el.textContent = `${runTotal(run, state.missions)}`;
 }
 
 function renderBreakdownTimingTab() {
@@ -2852,7 +2851,7 @@ function renderBreakdownTimingTab() {
 // ==========================================================
 // ANALYSIS TAB — across every completed run, not just one
 // ==========================================================
-state.analysis = { subTab: "trend", expandedMissionIds: new Set() };
+state.analysis = { subTab: "trend" };
 
 function renderAnalysisTab() {
   document.querySelectorAll(".analysis-tab-btn").forEach((btn) => {
@@ -2916,7 +2915,7 @@ function renderScoreTrendChart() {
   const points = scores.map((s, i) => [padL + i * stepX, padT + plotH - (s / maxScore) * plotH]);
   const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
   const dots = points.map((p, i) =>
-    `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="4" fill="var(--moss)" stroke="var(--paper)" stroke-width="1.5"><title>${esc(completed[i].label)}: ${scores[i]} pts</title></circle>`
+    `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="7" fill="var(--moss)" stroke="var(--paper)" stroke-width="1.5" data-run-idx="${i}" style="cursor:pointer;"><title>${esc(completed[i].label)}: ${scores[i]} pts</title></circle>`
   ).join("");
   const gridFracs = [0, 0.5, 1];
   const gridLines = gridFracs.map((f) => {
@@ -2933,8 +2932,11 @@ function renderScoreTrendChart() {
       <path d="${pathD}" fill="none" stroke="var(--moss)" stroke-width="2.5"/>
       ${dots}
     </svg>
-    <p class="empty-sub" style="text-align:center;">${completed.length} completed runs &middot; tap a point for details</p>
+    <p class="empty-sub" style="text-align:center;">${completed.length} completed runs &middot; tap a point to view that run</p>
   `;
+  container.querySelectorAll("circle[data-run-idx]").forEach((circle) => {
+    circle.addEventListener("click", () => renderRunBreakdown(completed[Number(circle.dataset.runIdx)]));
+  });
 }
 
 // Same red-yellow-green palette as the XLSX export's conditional formatting,
@@ -2974,29 +2976,25 @@ function renderMissionsAnalysisTable() {
   const successVals = data.map((d) => d.successRate);
   const ppsVals = data.map((d) => d.pointsPerSec);
   const timeVals = data.map((d) => d.avgTimeMs);
+  const allTaskRates = state.missions.flatMap((m) => computeTaskAnalytics(m).map((t) => t.successRate));
 
   const rows = data.map(({ mission, successRate, pointsPerSec, avgTimeMs }) => {
-    const expanded = state.analysis.expandedMissionIds.has(String(mission.id));
-    let taskRowsHTML = "";
-    if (expanded) {
-      const allTaskRates = state.missions.flatMap((m) => computeTaskAnalytics(m).map((t) => t.successRate));
-      const taskData = computeTaskAnalytics(mission).sort((a, b) => a.order - b.order);
-      taskRowsHTML = taskData.length
-        ? `<tr><td colspan="4" style="padding:0;">
-             <table class="analysis-subtable">
-               ${taskData.map(({ task, successRate: tsr }) =>
-                 `<tr><td class="analysis-subtable-name">${esc(task.name)}</td>${heatCellHTML(fmtPct(tsr), heatFrac(tsr, allTaskRates, false))}</tr>`
-               ).join("")}
-             </table>
-           </td></tr>`
-        : `<tr><td colspan="4"><p class="empty-sub" style="margin:6px 0;">No tasks in this mission.</p></td></tr>`;
-    }
+    const taskData = computeTaskAnalytics(mission).sort((a, b) => a.order - b.order);
+    const taskRowsHTML = taskData.length
+      ? taskData.map(({ task, successRate: tsr }) =>
+          `<tr class="analysis-task-row">
+             <td class="analysis-subtable-name">${esc(task.name)}</td>
+             <td></td><td></td>
+             ${heatCellHTML(fmtPct(tsr), heatFrac(tsr, allTaskRates, false))}
+           </tr>`
+        ).join("")
+      : `<tr class="analysis-task-row"><td class="analysis-subtable-name" colspan="4"><p class="empty-sub" style="margin:4px 0;">No tasks in this mission.</p></td></tr>`;
     return `
-      <tr class="analysis-mission-row" data-mid="${mission.id}">
-        <td class="analysis-mission-name"><span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>${esc(mission.name)}</td>
-        ${heatCellHTML(fmtPct(successRate), heatFrac(successRate, successVals, false))}
+      <tr class="analysis-mission-row">
+        <td class="analysis-mission-name">${esc(mission.name)}</td>
         ${heatCellHTML(fmtPPS(pointsPerSec), heatFrac(pointsPerSec, ppsVals, false))}
         ${heatCellHTML(avgTimeMs != null ? fmtDuration(avgTimeMs) : "—", heatFrac(avgTimeMs, timeVals, true))}
+        ${heatCellHTML(fmtPct(successRate), heatFrac(successRate, successVals, false))}
       </tr>
       ${taskRowsHTML}
     `;
@@ -3004,19 +3002,11 @@ function renderMissionsAnalysisTable() {
 
   body.innerHTML = `
     <table class="analysis-table">
-      <thead><tr><th>Mission</th><th>Success</th><th>Pts/sec</th><th>Time</th></tr></thead>
+      <thead><tr><th>Mission</th><th>Pts/sec</th><th>Time</th><th>Success</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <p class="empty-sub">Green = best, red = worst, relative to your other missions. Tap a mission to see its tasks.</p>
+    <p class="empty-sub">Green = best, red = worst, relative to your other missions.</p>
   `;
-  body.querySelectorAll(".analysis-mission-row").forEach((tr) => {
-    tr.addEventListener("click", () => {
-      const mid = tr.dataset.mid;
-      if (state.analysis.expandedMissionIds.has(mid)) state.analysis.expandedMissionIds.delete(mid);
-      else state.analysis.expandedMissionIds.add(mid);
-      renderMissionsAnalysisTable();
-    });
-  });
 }
 
 // ---- Scoresheet-style CSV export ----
