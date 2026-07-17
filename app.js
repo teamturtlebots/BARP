@@ -2915,7 +2915,7 @@ function renderScoreTrendChart() {
   const points = scores.map((s, i) => [padL + i * stepX, padT + plotH - (s / maxScore) * plotH]);
   const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
   const dots = points.map((p, i) =>
-    `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="7" fill="var(--moss)" stroke="var(--paper)" stroke-width="1.5" data-run-idx="${i}" style="cursor:pointer;"><title>${esc(completed[i].label)}: ${scores[i]} pts</title></circle>`
+    `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="7" fill="var(--moss)" stroke="var(--paper)" stroke-width="1.5" data-run-idx="${i}" style="cursor:pointer;"></circle>`
   ).join("");
   const gridFracs = [0, 0.5, 1];
   const gridLines = gridFracs.map((f) => {
@@ -2927,16 +2927,30 @@ function renderScoreTrendChart() {
     return `<text x="${padL - 6}" y="${(y + 3).toFixed(1)}" font-size="9" text-anchor="end" fill="var(--text-soft)">${Math.round(maxScore * f)}</text>`;
   }).join("");
   container.innerHTML = `
-    <svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; display:block;">
-      ${gridLines}${gridLabels}
-      <path d="${pathD}" fill="none" stroke="var(--moss)" stroke-width="2.5"/>
-      ${dots}
-    </svg>
-    <p class="empty-sub" style="text-align:center;">${completed.length} completed runs &middot; tap a point to view that run</p>
+    <div style="position:relative;">
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; display:block;">
+        ${gridLines}${gridLabels}
+        <path d="${pathD}" fill="none" stroke="var(--moss)" stroke-width="2.5"/>
+        ${dots}
+      </svg>
+      <div id="trend-tooltip" class="trend-tooltip" hidden></div>
+    </div>
+    <p class="empty-sub" style="text-align:center;">${completed.length} completed runs &middot; tap a point for details</p>
   `;
+  const tooltip = document.getElementById("trend-tooltip");
   container.querySelectorAll("circle[data-run-idx]").forEach((circle) => {
-    circle.addEventListener("click", () => renderRunBreakdown(completed[Number(circle.dataset.runIdx)]));
+    circle.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const i = Number(circle.dataset.runIdx);
+      const run = completed[i];
+      const timeStr = run.totalTimeMs != null ? fmtDuration(run.totalTimeMs) : null;
+      tooltip.innerHTML = `<strong>${esc(run.label)}</strong><br>${scores[i]} pts${timeStr ? ` &middot; ${timeStr}` : ""}`;
+      tooltip.style.left = `${(parseFloat(circle.getAttribute("cx")) / W) * 100}%`;
+      tooltip.style.top = `${(parseFloat(circle.getAttribute("cy")) / H) * 100}%`;
+      tooltip.hidden = false;
+    });
   });
+  document.addEventListener("click", () => { tooltip.hidden = true; }, { once: true });
 }
 
 // Same red-yellow-green palette as the XLSX export's conditional formatting,
@@ -3569,11 +3583,6 @@ function renderAdminSheetsVisibility() {
   section.hidden = !isAdmin;
 }
 
-function parseSpreadsheetId(input) {
-  const m = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-  return m ? m[1] : input.trim();
-}
-
 async function sheetsFetch(path, options = {}) {
   if (!state.sheets.accessToken || Date.now() >= state.sheets.tokenExpiresAt) {
     throw new Error("Not connected to Google Sheets — click Connect Google Sheets first.");
@@ -3601,6 +3610,35 @@ function sheetsBatchUpdate(spreadsheetId, requests) {
   });
 }
 
+async function sheetsCreateSpreadsheet() {
+  const res = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${state.sheets.accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      properties: { title: "BARP Team Export" },
+      sheets: [{ properties: { title: "Time Data" } }, { properties: { title: "Score Data" } }, { properties: { title: "Analysis" } }],
+    }),
+  });
+  if (!res.ok) throw new Error(`Couldn't create the spreadsheet (${res.status})`);
+  return res.json();
+}
+async function loadStoredSheetsFileId() {
+  const rec = await dbGet("meta", "sheetsExportSpreadsheetId");
+  return rec?.value || null;
+}
+function renderSheetsFileStatus() {
+  const fileStatusEl = document.getElementById("sheets-file-status");
+  const exportBtn = document.getElementById("btn-sheets-export");
+  if (state.sheets.spreadsheetId) {
+    fileStatusEl.hidden = false;
+    fileStatusEl.innerHTML = `Exporting to <a href="https://docs.google.com/spreadsheets/d/${state.sheets.spreadsheetId}" target="_blank" rel="noopener">this sheet</a>.`;
+    exportBtn.hidden = false;
+  } else {
+    fileStatusEl.hidden = true;
+    exportBtn.hidden = true;
+  }
+}
+
 document.getElementById("btn-sheets-connect").addEventListener("click", async () => {
   if (!window.firebaseAuth) { showErrorBanner("Sign-in isn't ready yet."); return; }
   const provider = new window.firebaseFns.GoogleAuthProvider();
@@ -3611,6 +3649,16 @@ document.getElementById("btn-sheets-connect").addEventListener("click", async ()
     state.sheets.accessToken = credential.accessToken;
     state.sheets.tokenExpiresAt = Date.now() + 55 * 60 * 1000; // Google access tokens run ~1hr; refresh a bit early
     document.getElementById("sheets-connect-status").textContent = "Connected.";
+    let spreadsheetId = await loadStoredSheetsFileId();
+    if (!spreadsheetId) {
+      document.getElementById("sheets-file-status").hidden = false;
+      document.getElementById("sheets-file-status").textContent = "Creating your export sheet…";
+      const created = await sheetsCreateSpreadsheet();
+      spreadsheetId = created.spreadsheetId;
+      await dbPut("meta", { key: "sheetsExportSpreadsheetId", value: spreadsheetId });
+    }
+    state.sheets.spreadsheetId = spreadsheetId;
+    renderSheetsFileStatus();
   } catch (e) {
     showErrorBanner(`Couldn't connect Google Sheets: ${e.message}`);
   }
@@ -3822,9 +3870,8 @@ async function ensureSheetsExist(spreadsheetId) {
   return existing;
 }
 document.getElementById("btn-sheets-export").addEventListener("click", async () => {
-  const raw = document.getElementById("sheets-target-id").value.trim();
-  if (!raw) { showErrorBanner("Paste the target Google Sheet's URL or ID first."); return; }
-  const spreadsheetId = parseSpreadsheetId(raw);
+  const spreadsheetId = state.sheets.spreadsheetId;
+  if (!spreadsheetId) { showErrorBanner("Connect Google Sheets first."); return; }
   const statusEl = document.getElementById("sheets-export-status");
   const btn = document.getElementById("btn-sheets-export");
   btn.disabled = true;
@@ -4002,7 +4049,9 @@ async function initAll() {
   await loadKeepGoingAfterBuzzerSetting();
   await loadInteractiveScoringSetting();
   await loadInteractiveIterationsSetting();
+  state.sheets.spreadsheetId = await loadStoredSheetsFileId();
   renderGoogleSignInStatus();
+  renderSheetsFileStatus();
   document.getElementById("log-empty-state").hidden = state.attachments.length === 0 ? false : true;
 }
 initAll();

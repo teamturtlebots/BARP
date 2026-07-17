@@ -538,6 +538,12 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 }
 .brk-tab-btn.active { background: var(--paper); color: var(--ink-deep); }
 .analysis-tabs { display: flex; gap: 6px; margin: 10px 0 16px; }
+.trend-tooltip {
+  position: absolute; transform: translate(-50%, -120%);
+  background: var(--ink-deep); color: var(--paper); font-size: 0.82rem;
+  padding: 6px 10px; border-radius: 8px; white-space: nowrap; pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25); z-index: 5;
+}
 .analysis-tab-btn {
   flex: 1; background: var(--paper-2); border: 1px solid var(--line); border-radius: 8px;
   color: var(--text-soft); font-family: var(--body); font-weight: 600; font-size: 0.85rem;
