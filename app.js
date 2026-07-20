@@ -2987,10 +2987,8 @@ function renderMissionsAnalysisTable() {
     return;
   }
   const data = computeMissionAnalytics().sort((a, b) => a.order - b.order);
-  const successVals = data.map((d) => d.successRate);
   const ppsVals = data.map((d) => d.pointsPerSec);
   const timeVals = data.map((d) => d.avgTimeMs);
-  const allTaskRates = state.missions.flatMap((m) => computeTaskAnalytics(m).map((t) => t.successRate));
 
   const rows = data.map(({ mission, successRate, pointsPerSec, avgTimeMs }) => {
     const taskData = computeTaskAnalytics(mission).sort((a, b) => a.order - b.order);
@@ -2999,7 +2997,7 @@ function renderMissionsAnalysisTable() {
           `<tr class="analysis-task-row">
              <td class="analysis-subtable-name">${esc(task.name)}</td>
              <td></td><td></td>
-             ${heatCellHTML(fmtPct(tsr), heatFrac(tsr, allTaskRates, false))}
+             ${heatCellHTML(fmtPct(tsr), tsr)}
            </tr>`
         ).join("")
       : `<tr class="analysis-task-row"><td class="analysis-subtable-name" colspan="4"><p class="empty-sub" style="margin:4px 0;">No tasks in this mission.</p></td></tr>`;
@@ -3008,7 +3006,7 @@ function renderMissionsAnalysisTable() {
         <td class="analysis-mission-name">${esc(mission.name)}</td>
         ${heatCellHTML(fmtPPS(pointsPerSec), heatFrac(pointsPerSec, ppsVals, false))}
         ${heatCellHTML(avgTimeMs != null ? fmtDuration(avgTimeMs) : "—", heatFrac(avgTimeMs, timeVals, true))}
-        ${heatCellHTML(fmtPct(successRate), heatFrac(successRate, successVals, false))}
+        ${heatCellHTML(fmtPct(successRate), successRate)}
       </tr>
       ${taskRowsHTML}
     `;
@@ -3019,7 +3017,7 @@ function renderMissionsAnalysisTable() {
       <thead><tr><th>Mission</th><th>Pts/sec</th><th>Time</th><th>Success</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <p class="empty-sub">Green = best, red = worst, relative to your other missions.</p>
+    <p class="empty-sub">Green = best, red = worst. Success is colored on a fixed 0–100% scale; Pts/sec and Time are relative to your other missions.</p>
   `;
 }
 
@@ -3769,6 +3767,11 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
   // percentile-based — it's a metric that's inherently bounded to 0-100%).
   await sheetsBatchUpdate(spreadsheetId, [
     { repeatCell: {
+        range: { sheetId, startRowIndex: 1, endRowIndex: lastTaskRow, startColumnIndex: successCol - 1, endColumnIndex: successCol },
+        cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: "0%" } } },
+        fields: "userEnteredFormat.numberFormat",
+    } },
+    { repeatCell: {
         range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: successCol - 1, endColumnIndex: successCol },
         cell: { userEnteredFormat: { backgroundColor: { red: 0, green: 1, blue: 0 }, textFormat: { bold: true } } },
         fields: "userEnteredFormat(backgroundColor,textFormat)",
@@ -3798,6 +3801,42 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
           },
         },
         index: 1,
+    } },
+    // Overall average success rate — matches the reference template's T1
+    // cell exactly (two columns right of Success Rate, red fill/yellow text).
+    { updateCells: {
+        rows: [{ values: [{
+          userEnteredValue: { formulaValue: `=AVERAGE(${colLetter(successCol)}2:${colLetter(successCol)}${lastTaskRow})` },
+          userEnteredFormat: {
+            backgroundColor: { red: 1, green: 0, blue: 0 },
+            textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 0 } },
+            numberFormat: { type: "PERCENT", pattern: "0%" },
+          },
+        }] }],
+        fields: "userEnteredValue,userEnteredFormat(backgroundColor,textFormat,numberFormat)",
+        start: { sheetId, rowIndex: 0, columnIndex: successCol + 1 },
+    } },
+    // Narrow columns that only ever hold a short number — text columns
+    // (Official Name, Task, Name) keep their default/wider width.
+    { updateDimensionProperties: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 1 }, // M#
+        properties: { pixelSize: 40 }, fields: "pixelSize",
+    } },
+    { updateDimensionProperties: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: 4 }, // Pts
+        properties: { pixelSize: 45 }, fields: "pixelSize",
+    } },
+    { updateDimensionProperties: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: 5, endIndex: 6 }, // #
+        properties: { pixelSize: 35 }, fields: "pixelSize",
+    } },
+    { updateDimensionProperties: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: firstFlagCol - 1, endIndex: lastFlagCol }, // run flag columns
+        properties: { pixelSize: 45 }, fields: "pixelSize",
+    } },
+    { updateDimensionProperties: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: successCol - 1, endIndex: successCol }, // Success Rate
+        properties: { pixelSize: 90 }, fields: "pixelSize",
     } },
   ]);
 }
