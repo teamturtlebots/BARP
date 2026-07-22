@@ -203,6 +203,15 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 
 /* Mission editor list */
 .mission-list { display: flex; flex-direction: column; gap: 8px; }
+.base-robot-photo-area { cursor: pointer; margin-bottom: 6px; }
+.base-robot-photo {
+  width: 100%; max-height: 220px; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); display: block;
+}
+.base-robot-photo-placeholder {
+  display: flex; align-items: center; justify-content: center; height: 110px;
+  border: 1.5px dashed var(--line); border-radius: 10px; color: var(--text-soft);
+  font-weight: 600; font-size: 0.85rem; background: var(--paper-2);
+}
 .mission-row {
   background: var(--paper-2);
   border: 1px solid var(--line);

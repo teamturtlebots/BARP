@@ -427,6 +427,8 @@ async function ensureBaseRobotExists() {
     // Self-heal duplicates created by the old race before this fix: keep the
     // oldest, fold every other one's logged iterations into it, soft-delete the rest.
     const survivor = activeBaseRobots[0];
+    survivor.name = "Base Robot";
+    await dbPut("attachments", survivor);
     for (const dup of activeBaseRobots.slice(1)) {
       const dupEntries = await dbGetByIndex("entries", "byAttachment", dup.id);
       for (const e of dupEntries) { e.attachmentId = survivor.id; await dbPut("entries", e); }
@@ -436,7 +438,13 @@ async function ensureBaseRobotExists() {
     }
     return;
   }
-  if (activeBaseRobots.length === 1) return;
+  if (activeBaseRobots.length === 1) {
+    // The rename lock only stops future edits — this corrects a name that
+    // got changed before the lock existed (or by any other stray write).
+    const robot = activeBaseRobots[0];
+    if (robot.name !== "Base Robot") { robot.name = "Base Robot"; await dbPut("attachments", robot); }
+    return;
+  }
   const softDeleted = all.find((a) => a.isBaseRobot);
   if (softDeleted) {
     delete softDeleted.deleted;
@@ -652,10 +660,21 @@ async function renderEntryList() {
 
 // ---- Attachment management (Setup tab) ----
 document.getElementById("btn-record-iteration").addEventListener("click", () => openRecordIterationModal());
+document.getElementById("base-robot-photo-input").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  const baseRobot = state.attachments.find((a) => a.isBaseRobot);
+  if (!baseRobot) return;
+  baseRobot.photo = await resizeImageToDataURL(file, 900, 0.72);
+  await dbPut("attachments", baseRobot);
+  await loadAttachments();
+  syncToTeamDrive();
+});
 
 function renderAttachmentsSetup() {
   const list = document.getElementById("attachment-setup-list");
-  const baseRobotContainer = document.getElementById("base-robot-row");
+  const photoArea = document.getElementById("base-robot-photo-area");
   const editing = state.editingAttachmentOrder;
   renderAttachmentOrderToolbar();
 
@@ -663,25 +682,13 @@ function renderAttachmentsSetup() {
   const realAttachments = state.attachments.filter((a) => !a.isBaseRobot);
 
   (async () => {
-    // Base Robot: always present, can't be deleted, not part of the
-    // reorderable/numbered attachment list.
-    if (baseRobotContainer) {
-      baseRobotContainer.innerHTML = "";
-      if (baseRobot) {
-        const count = await iterationCount(baseRobot.id);
-        const row = document.createElement("div");
-        row.className = "mission-row";
-        row.innerHTML = `
-          ${baseRobot.photo ? `<img class="att-thumb" src="${baseRobot.photo}" alt="">` : ""}
-          <div class="m-info">
-            <div class="m-name">${esc(baseRobot.name)}</div>
-            <div class="m-sub">${count} iteration${count === 1 ? "" : "s"} logged</div>
-          </div>
-          <button class="btn-icon" data-act="edit" title="Edit photo">&#9998;&#65039;</button>
-        `;
-        row.querySelector('[data-act="edit"]').addEventListener("click", () => openAttachmentModal(baseRobot));
-        baseRobotContainer.appendChild(row);
-      }
+    // Base Robot: just a photo, no name/edit/count clutter — its name is
+    // fixed and can't be changed from here.
+    if (photoArea) {
+      photoArea.innerHTML = baseRobot && baseRobot.photo
+        ? `<img class="base-robot-photo" src="${baseRobot.photo}" alt="Base Robot">`
+        : `<div class="base-robot-photo-placeholder">+ Add Photo</div>`;
+      photoArea.onclick = () => document.getElementById("base-robot-photo-input").click();
     }
 
     list.innerHTML = "";
