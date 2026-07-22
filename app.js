@@ -590,6 +590,7 @@ function renderEntryDetailView() {
     <div class="gfs-header">
       <div class="gfs-header-top">
         <button type="button" class="gfs-back-btn" id="entry-detail-back">&#8592;</button>
+        <button type="button" class="brk-edit-icon-btn" id="entry-detail-edit-btn">&#9998;&#65039; Edit</button>
         <div class="guided-phase-badge">${att ? (att.isBaseRobot ? "Base Robot" : esc(att.name)) : "Iteration"}</div>
       </div>
       <h2 class="gfs-mission-name">${fmtDate(entry.timestamp)}</h2>
@@ -615,6 +616,7 @@ function renderEntryDetailView() {
   `);
   document.getElementById("entry-detail-back").addEventListener("click", closeGuidedFullscreen);
   document.getElementById("entry-detail-close").addEventListener("click", closeGuidedFullscreen);
+  document.getElementById("entry-detail-edit-btn").addEventListener("click", () => openRecordIterationModalClassic(entry));
   if (photos.length > 1) {
     document.getElementById("entry-detail-prev").addEventListener("click", () => {
       state.entryDetail.photoIdx = (photoIdx - 1 + photos.length) % photos.length;
@@ -929,13 +931,15 @@ function openRecordIterationModal() {
   openRecordIterationModalClassic();
 }
 
-function openRecordIterationModalClassic() {
-  pendingPhotos = [];
-  pendingSize = "small";
-  const defaultAttId = state.selectedAttachmentIds.size === 1 ? [...state.selectedAttachmentIds][0] : state.attachments[0].id;
+function openRecordIterationModalClassic(existingEntry) {
+  const isEdit = !!existingEntry;
+  pendingPhotos = isEdit ? getEntryPhotos(existingEntry) : [];
+  pendingSize = isEdit ? (existingEntry.size || "small") : "small";
+  const defaultAttId = isEdit ? existingEntry.attachmentId
+    : (state.selectedAttachmentIds.size === 1 ? [...state.selectedAttachmentIds][0] : state.attachments[0].id);
   const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
   openModal(`
-    <h2>Record Iteration</h2>
+    <h2>${isEdit ? "Edit Iteration" : "Record Iteration"}</h2>
     <div class="field"><label>Attachment</label>
       <select class="text-input" id="ri-attachment">
         ${state.attachments.map((a) => `<option value="${a.id}" ${a.id === defaultAttId ? "selected" : ""}>${a.isBaseRobot ? "Base Robot" : `#${esc(a.number)} ${esc(a.name)}`}</option>`).join("")}
@@ -943,9 +947,9 @@ function openRecordIterationModalClassic() {
     </div>
     <div class="field"><label>Size of this iteration</label>
       <div class="size-picker" id="ri-size-picker">
-        <button type="button" class="size-btn" data-size="small">Small<span>bug fix</span></button>
-        <button type="button" class="size-btn" data-size="moderate">Moderate<span>a real change</span></button>
-        <button type="button" class="size-btn" data-size="major">Major<span>strategy change</span></button>
+        <button type="button" class="size-btn${pendingSize === "small" ? " active" : ""}" data-size="small">Small<span>bug fix</span></button>
+        <button type="button" class="size-btn${pendingSize === "moderate" ? " active" : ""}" data-size="moderate">Moderate<span>a real change</span></button>
+        <button type="button" class="size-btn${pendingSize === "major" ? " active" : ""}" data-size="major">Major<span>strategy change</span></button>
       </div>
     </div>
     <div class="field">
@@ -967,20 +971,21 @@ function openRecordIterationModalClassic() {
     <div class="field">
       <label>What changed?</label>
       ${SpeechRec ? `<div class="voice-row"><button class="btn btn-ghost" id="m-voice-btn-1" type="button">&#127908; Dictate</button><span class="voice-status" id="m-voice-status-1"></span></div>` : ""}
-      <textarea class="textarea-input" id="ri-what" placeholder="e.g. Swapped the claw's gear ratio from 1:1 to 3:1"></textarea>
+      <textarea class="textarea-input" id="ri-what" placeholder="e.g. Swapped the claw's gear ratio from 1:1 to 3:1">${isEdit ? esc(existingEntry.whatChanged || "") : ""}</textarea>
     </div>
     <div class="field">
       <label>Why changed?</label>
       ${SpeechRec ? `<div class="voice-row"><button class="btn btn-ghost" id="m-voice-btn-2" type="button">&#127908; Dictate</button><span class="voice-status" id="m-voice-status-2"></span></div>` : ""}
-      <textarea class="textarea-input" id="ri-why" placeholder="e.g. It was stalling under load on the last run"></textarea>
+      <textarea class="textarea-input" id="ri-why" placeholder="e.g. It was stalling under load on the last run">${isEdit ? esc(existingEntry.whyChanged || "") : ""}</textarea>
     </div>
     ${SpeechRec ? "" : `<p class="type-hint">Voice-to-text isn't supported in this browser &mdash; try Chrome on Android.</p>`}
     <div class="modal-actions">
       <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
-      <button class="btn btn-primary" id="m-save" type="button">Save entry</button>
+      <button class="btn btn-primary" id="m-save" type="button">${isEdit ? "Save changes" : "Save entry"}</button>
     </div>
   `);
   document.getElementById("m-cancel").addEventListener("click", () => { stopRecognizer(); stopCamera(); closeModal(); });
+  renderPhotoStrip("photo-preview-wrap", pendingPhotos, removeClassicPhoto); // pre-populate when editing; no-op (empty) otherwise
 
   document.querySelectorAll("#ri-size-picker .size-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1021,7 +1026,19 @@ function openRecordIterationModalClassic() {
     const whatChanged = document.getElementById("ri-what").value.trim();
     const whyChanged = document.getElementById("ri-why").value.trim();
     if (!whatChanged && !whyChanged && !pendingPhotos.length) { alert("Add a photo or a note first."); return; }
-    await dbPut("entries", { id: crypto.randomUUID(), attachmentId, timestamp: Date.now(), photos: pendingPhotos, whatChanged, whyChanged, size: pendingSize });
+    if (isEdit) {
+      existingEntry.attachmentId = attachmentId;
+      existingEntry.whatChanged = whatChanged;
+      existingEntry.whyChanged = whyChanged;
+      existingEntry.size = pendingSize;
+      existingEntry.photos = pendingPhotos;
+      delete existingEntry.photo; // fully migrated to the array now that we've rewritten it
+      await dbPut("entries", existingEntry);
+      state.entryDetail = null; // the entry that opened the detail view may have just moved to a different attachment
+      closeGuidedFullscreen();
+    } else {
+      await dbPut("entries", { id: crypto.randomUUID(), attachmentId, timestamp: Date.now(), photos: pendingPhotos, whatChanged, whyChanged, size: pendingSize });
+    }
     state.selectedAttachmentIds.add(attachmentId);
     closeModal();
     renderAttachmentChips();
