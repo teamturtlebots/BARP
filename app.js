@@ -590,7 +590,7 @@ function renderEntryDetailView() {
     <div class="gfs-header">
       <div class="gfs-header-top">
         <button type="button" class="gfs-back-btn" id="entry-detail-back">&#8592;</button>
-        <button type="button" class="brk-edit-icon-btn" id="entry-detail-edit-btn">&#9998;&#65039; Edit</button>
+        <button type="button" class="brk-edit-icon-btn" id="entry-detail-edit-btn" title="Edit">&#9998;&#65039;</button>
         <div class="guided-phase-badge">${att ? (att.isBaseRobot ? "Base Robot" : esc(att.name)) : "Iteration"}</div>
       </div>
       <h2 class="gfs-mission-name">${fmtDate(entry.timestamp)}</h2>
@@ -616,7 +616,10 @@ function renderEntryDetailView() {
   `);
   document.getElementById("entry-detail-back").addEventListener("click", closeGuidedFullscreen);
   document.getElementById("entry-detail-close").addEventListener("click", closeGuidedFullscreen);
-  document.getElementById("entry-detail-edit-btn").addEventListener("click", () => openRecordIterationModalClassic(entry));
+  document.getElementById("entry-detail-edit-btn").addEventListener("click", () => {
+    closeGuidedFullscreen();
+    openRecordIterationModalClassic(entry);
+  });
   if (photos.length > 1) {
     document.getElementById("entry-detail-prev").addEventListener("click", () => {
       state.entryDetail.photoIdx = (photoIdx - 1 + photos.length) % photos.length;
@@ -2950,7 +2953,7 @@ function renderRunBreakdown(run) {
     <div class="gfs-header">
       <div class="gfs-header-top">
         <button type="button" class="gfs-back-btn" id="brk-back">&#8592;</button>
-        <button type="button" class="brk-edit-icon-btn" id="brk-edit-btn">&#9998;&#65039; Edit</button>
+        <button type="button" class="brk-edit-icon-btn" id="brk-edit-btn" title="Edit">&#9998;&#65039;</button>
         <div class="guided-phase-badge">${esc(run.label)}</div>
       </div>
       <div class="gfs-timer" id="brk-total">${runTotal(run, state.missions)}</div>

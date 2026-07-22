@@ -591,9 +591,10 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .gfs-subsection h4 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-soft); margin: 0 0 6px; }
 .brk-tabs { display: flex; gap: 6px; margin-top: 12px; }
 .brk-edit-icon-btn {
-  background: rgba(255,255,255,0.14); border: none; border-radius: 14px; cursor: pointer;
-  color: var(--amber); font-size: 0.78rem; font-family: var(--body); padding: 5px 12px;
-  display: flex; align-items: center; gap: 5px; flex: none;
+  width: 38px; height: 38px; border-radius: 50%;
+  background: rgba(255,255,255,0.14); border: none; cursor: pointer;
+  color: var(--paper); font-size: 1.05rem;
+  display: flex; align-items: center; justify-content: center; flex: none;
 }
 .brk-edit-icon-btn:hover { background: rgba(255,255,255,0.22); }
 .brk-tab-btn {
