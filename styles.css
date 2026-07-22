@@ -203,14 +203,22 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 
 /* Mission editor list */
 .mission-list { display: flex; flex-direction: column; gap: 8px; }
-.base-robot-photo-area { cursor: pointer; margin-bottom: 6px; }
-.base-robot-photo {
-  width: 100%; max-height: 220px; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); display: block;
+.base-robot-carousel {
+  display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; margin-bottom: 6px;
 }
-.base-robot-photo-placeholder {
-  display: flex; align-items: center; justify-content: center; height: 110px;
-  border: 1.5px dashed var(--line); border-radius: 10px; color: var(--text-soft);
-  font-weight: 600; font-size: 0.85rem; background: var(--paper-2);
+.base-robot-photo-item { position: relative; flex: none; }
+.base-robot-photo-item img {
+  width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); display: block;
+}
+.base-robot-photo-remove {
+  position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--ink-deep); color: var(--paper); border: none; font-size: 0.65rem;
+  display: flex; align-items: center; justify-content: center; cursor: pointer; line-height: 1;
+}
+.base-robot-photo-add {
+  flex: none; width: 72px; height: 72px; border-radius: 8px; border: 1.5px dashed var(--line);
+  background: var(--paper-2); color: var(--text-soft); font-size: 1.4rem; font-weight: 600;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
 }
 .mission-row {
   background: var(--paper-2);
@@ -384,7 +392,6 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   position: absolute; bottom: -4px; right: -4px; background: var(--ink-deep); color: var(--paper);
   font-size: 0.62rem; font-weight: 700; padding: 1px 5px; border-radius: 8px;
 }
-.entry-expand-btn { flex: none; padding: 2px 4px; font-size: 0.95rem; }
 
 /* Full-screen entry detail view */
 .entry-detail-image-wrap { position: relative; display: flex; justify-content: center; }
@@ -440,6 +447,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .run-summary-table .row-task td { font-weight: 400; color: var(--text-soft); font-size: 0.8rem; }
 .run-summary-table .row-task td:first-child { padding-left: 18px; }
 .run-card-incomplete { opacity: 0.7; border-style: dashed; }
+.entry-card-clickable, .run-card-clickable { cursor: pointer; }
 
 /* --- Added: multi-select attachment filter + sort --- */
 .filter-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
@@ -494,7 +502,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .iter-attachment-btn.active { border-color: var(--moss); background: var(--moss); color: var(--paper); }
 .size-picker-big { flex-direction: column; gap: 12px; width: 100%; }
 .size-picker-big .size-btn { padding: 20px; font-size: 1.1rem; }
-#iter-camera-video { width: 100%; height: 60vh; object-fit: cover; border-radius: 12px; background: #000; display: block; }
+#iter-camera-video { width: 100%; height: 90vh; max-height: 90vh; object-fit: cover; border-radius: 12px; background: #000; display: block; }
 .iter-shutter-row { display: flex; align-items: center; justify-content: space-between; padding: 0 24px; margin: 16px 0; gap: 14px; }
 .iter-shutter-btn {
   width: 68px; height: 68px; border-radius: 50%; flex: none;

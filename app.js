@@ -287,6 +287,14 @@ function getEntryPhotos(entry) {
   if (entry.photo) return [entry.photo];
   return [];
 }
+// Base Robot used to store a single .photo; now it's .photos (an array, so
+// the carousel can hold more than one picture) — same normalization pattern.
+function getBaseRobotPhotos(att) {
+  if (!att) return [];
+  if (Array.isArray(att.photos)) return att.photos.filter(Boolean);
+  if (att.photo) return [att.photo];
+  return [];
+}
 function esc(str) {
   return String(str ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -420,6 +428,16 @@ async function renumberAttachments() {
 // fixed ID means every device's "first load" write lands on the exact same
 // Firestore document instead of creating a new one.
 const BASE_ROBOT_ID = "base-robot";
+// Shared by ensureBaseRobotExists (startup) and refreshAfterRemoteChange (every
+// remote sync) — the earlier fix only corrected the name locally, which the
+// very next Firestore sync would silently overwrite back to the old (wrong)
+// name, since that correction was never pushed back up. Calling this from
+// both places, followed by syncToTeamDrive(), makes sure the fix actually
+// sticks for the whole team instead of getting reverted by the next sync.
+async function enforceBaseRobotName() {
+  const robot = (await dbGetAll("attachments")).find((a) => a.isBaseRobot && !a.deleted);
+  if (robot && robot.name !== "Base Robot") { robot.name = "Base Robot"; await dbPut("attachments", robot); }
+}
 async function ensureBaseRobotExists() {
   const all = await dbGetAll("attachments");
   const activeBaseRobots = all.filter((a) => a.isBaseRobot && !a.deleted).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
@@ -519,7 +537,7 @@ function renderAttachmentChips() {
   state.attachments.forEach((att) => {
     const chip = document.createElement("button");
     chip.className = "chip" + (state.selectedAttachmentIds.has(att.id) ? " active" : "");
-    chip.innerHTML = att.isBaseRobot ? esc(att.name) : `<span class="chip-num">#${esc(att.number)}</span>${esc(att.name)}`;
+    chip.innerHTML = att.isBaseRobot ? "Base Robot" : `<span class="chip-num">#${esc(att.number)}</span>${esc(att.name)}`;
     chip.addEventListener("click", async () => {
       if (state.selectedAttachmentIds.has(att.id)) state.selectedAttachmentIds.delete(att.id);
       else state.selectedAttachmentIds.add(att.id);
@@ -549,7 +567,6 @@ function entryCardHTML(entry, attachmentLabel) {
         ${attachmentLabel ? ` &middot; <span class="entry-att-tag">${esc(attachmentLabel)}</span>` : ""}
         ${sizeLabel ? ` &middot; <span class="size-badge size-${entry.size}">${esc(sizeLabel)}</span>` : ""}
       </span>
-      <button class="btn-icon entry-expand-btn" data-id="${entry.id}" title="View full">&#128470;&#65039;</button>
       <button class="btn-icon entry-del-btn" data-id="${entry.id}" title="Delete">&#128465;&#65039;</button>
     </div>
     <div class="entry-body-row">
@@ -573,7 +590,7 @@ function renderEntryDetailView() {
     <div class="gfs-header">
       <div class="gfs-header-top">
         <button type="button" class="gfs-back-btn" id="entry-detail-back">&#8592;</button>
-        <div class="guided-phase-badge">${att ? esc(att.name) : "Iteration"}</div>
+        <div class="guided-phase-badge">${att ? (att.isBaseRobot ? "Base Robot" : esc(att.name)) : "Iteration"}</div>
       </div>
       <h2 class="gfs-mission-name">${fmtDate(entry.timestamp)}</h2>
     </div>
@@ -640,9 +657,11 @@ async function renderEntryList() {
   entries.forEach((entry) => {
     const att = attById[entry.attachmentId];
     const card = document.createElement("div");
-    card.className = "entry-card";
-    card.innerHTML = entryCardHTML(entry, showTag ? (att ? (att.isBaseRobot ? att.name : `#${att.number} ${att.name}`) : "deleted attachment") : null);
-    card.querySelector(".entry-del-btn").addEventListener("click", async () => {
+    card.className = "entry-card entry-card-clickable";
+    card.innerHTML = entryCardHTML(entry, showTag ? (att ? (att.isBaseRobot ? "Base Robot" : `#${att.number} ${att.name}`) : "deleted attachment") : null);
+    card.addEventListener("click", () => openEntryDetailView(entry, att));
+    card.querySelector(".entry-del-btn").addEventListener("click", async (ev) => {
+      ev.stopPropagation();
       if (!confirm("This removes the entry from the log. You can restore it any time from Settings → Recently Deleted.")) return;
       entry.deleted = true;
       entry.deletedAt = Date.now();
@@ -653,7 +672,6 @@ async function renderEntryList() {
       syncToTeamDrive();
       showUndoToast("Entry deleted.", () => restoreDeletedEntry(entry));
     });
-    card.querySelector(".entry-expand-btn").addEventListener("click", () => openEntryDetailView(entry, att));
     list.appendChild(card);
   });
 }
@@ -661,12 +679,15 @@ async function renderEntryList() {
 // ---- Attachment management (Setup tab) ----
 document.getElementById("btn-record-iteration").addEventListener("click", () => openRecordIterationModal());
 document.getElementById("base-robot-photo-input").addEventListener("change", async (e) => {
-  const file = e.target.files[0];
+  const files = Array.from(e.target.files || []);
   e.target.value = "";
-  if (!file) return;
+  if (!files.length) return;
   const baseRobot = state.attachments.find((a) => a.isBaseRobot);
   if (!baseRobot) return;
-  baseRobot.photo = await resizeImageToDataURL(file, 900, 0.72);
+  const photos = getBaseRobotPhotos(baseRobot);
+  for (const file of files) photos.push(await resizeImageToDataURL(file, 900, 0.72));
+  baseRobot.photos = photos;
+  delete baseRobot.photo; // fully migrated to the array now that we've written it
   await dbPut("attachments", baseRobot);
   await loadAttachments();
   syncToTeamDrive();
@@ -682,13 +703,35 @@ function renderAttachmentsSetup() {
   const realAttachments = state.attachments.filter((a) => !a.isBaseRobot);
 
   (async () => {
-    // Base Robot: just a photo, no name/edit/count clutter — its name is
-    // fixed and can't be changed from here.
+    // Base Robot: a small horizontally-scrolling photo carousel — no
+    // name/edit/count clutter, and its name is fixed and can't be changed
+    // from here. Supports multiple photos, each individually removable.
     if (photoArea) {
-      photoArea.innerHTML = baseRobot && baseRobot.photo
-        ? `<img class="base-robot-photo" src="${baseRobot.photo}" alt="Base Robot">`
-        : `<div class="base-robot-photo-placeholder">+ Add Photo</div>`;
-      photoArea.onclick = () => document.getElementById("base-robot-photo-input").click();
+      const photos = getBaseRobotPhotos(baseRobot);
+      photoArea.innerHTML = `
+        <div class="base-robot-carousel">
+          ${photos.map((src, i) => `
+            <div class="base-robot-photo-item">
+              <img src="${src}" alt="Base Robot">
+              <button type="button" class="base-robot-photo-remove" data-idx="${i}" title="Remove">&#10005;</button>
+            </div>
+          `).join("")}
+          <button type="button" class="base-robot-photo-add" id="base-robot-photo-add-btn" title="Add photo">+</button>
+        </div>
+      `;
+      photoArea.querySelectorAll(".base-robot-photo-remove").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const idx = Number(btn.dataset.idx);
+          const current = getBaseRobotPhotos(baseRobot);
+          current.splice(idx, 1);
+          baseRobot.photos = current;
+          delete baseRobot.photo;
+          await dbPut("attachments", baseRobot);
+          await loadAttachments();
+          syncToTeamDrive();
+        });
+      });
+      document.getElementById("base-robot-photo-add-btn").addEventListener("click", () => document.getElementById("base-robot-photo-input").click());
     }
 
     list.innerHTML = "";
@@ -802,7 +845,7 @@ function openAttachmentModal(att) {
   let pendingAttPhoto = isEdit ? (att.photo || null) : null;
   openModal(`
     <h2>${isEdit ? (att.isBaseRobot ? "Edit Base Robot" : "Edit attachment") : "New attachment"}</h2>
-    <div class="field"><label>Name</label><input class="text-input" id="m-att-name" type="text" value="${isEdit ? esc(att.name) : ""}" placeholder="e.g. Coral claw" ${att && att.isBaseRobot ? "disabled" : ""}></div>
+    <div class="field"><label>Name</label><input class="text-input" id="m-att-name" type="text" value="${isEdit ? (att.isBaseRobot ? "Base Robot" : esc(att.name)) : ""}" placeholder="e.g. Coral claw" ${att && att.isBaseRobot ? "disabled" : ""}></div>
     <div class="field">
       <label>Picture (optional)</label>
       <div class="photo-preview-wrap" id="att-photo-preview-wrap">${pendingAttPhoto ? `<img class="photo-preview" src="${pendingAttPhoto}">` : ""}</div>
@@ -838,7 +881,7 @@ function openAttachmentModal(att) {
   });
   document.getElementById("m-save").addEventListener("click", async () => {
     stopCamera();
-    const name = (att && att.isBaseRobot) ? att.name : document.getElementById("m-att-name").value.trim();
+    const name = (att && att.isBaseRobot) ? "Base Robot" : document.getElementById("m-att-name").value.trim();
     if (!name) { alert("Give this attachment a name."); return; }
     const record = isEdit ? att : { id: crypto.randomUUID(), order: state.attachments.length, number: state.attachments.length + 1 };
     record.name = name;
@@ -895,7 +938,7 @@ function openRecordIterationModalClassic() {
     <h2>Record Iteration</h2>
     <div class="field"><label>Attachment</label>
       <select class="text-input" id="ri-attachment">
-        ${state.attachments.map((a) => `<option value="${a.id}" ${a.id === defaultAttId ? "selected" : ""}>${a.isBaseRobot ? "" : `#${esc(a.number)} `}${esc(a.name)}</option>`).join("")}
+        ${state.attachments.map((a) => `<option value="${a.id}" ${a.id === defaultAttId ? "selected" : ""}>${a.isBaseRobot ? "Base Robot" : `#${esc(a.number)} ${esc(a.name)}`}</option>`).join("")}
       </select>
     </div>
     <div class="field"><label>Size of this iteration</label>
@@ -1040,7 +1083,7 @@ function renderIterAttachmentStep() {
     ${iterHeaderHTML("Which attachment?")}
     <div class="gfs-body gfs-center">
       <div class="iter-attachment-grid">
-        ${state.attachments.map((a) => `<button type="button" class="iter-attachment-btn${a.id === state.iterFlow.attachmentId ? " active" : ""}" data-id="${a.id}">${a.isBaseRobot ? "" : `#${esc(a.number)} `}${esc(a.name)}</button>`).join("")}
+        ${state.attachments.map((a) => `<button type="button" class="iter-attachment-btn${a.id === state.iterFlow.attachmentId ? " active" : ""}" data-id="${a.id}">${a.isBaseRobot ? "Base Robot" : `#${esc(a.number)} ${esc(a.name)}`}</button>`).join("")}
       </div>
     </div>
     <div class="gfs-footer"></div>
@@ -2848,7 +2891,7 @@ function renderRuns() {
     const total = runTotal(run, state.missions);
     const avgOp = breakdownAvgOpTime(run);
     const card = document.createElement("div");
-    card.className = "run-card";
+    card.className = "run-card run-card-clickable";
     card.innerHTML = `
       <div class="rc-row">
         <div class="rc-title-block">
@@ -2858,12 +2901,12 @@ function renderRuns() {
         <div class="rc-stat"><span class="rc-stat-val">${total}</span><span class="rc-stat-label">pts</span></div>
         <div class="rc-stat"><span class="rc-stat-val">${fmtDuration(run.totalTimeMs || 0)}</span><span class="rc-stat-label">time</span></div>
         <div class="rc-stat"><span class="rc-stat-val">${avgOp !== null ? fmtDuration(avgOp) : "&mdash;"}</span><span class="rc-stat-label">avg op</span></div>
-        <button class="btn-icon rc-icon-btn" data-act="view" title="View breakdown">&#128065;&#65039;</button>
         <button class="btn-icon rc-icon-btn" data-act="del" title="Delete">&#128465;&#65039;</button>
       </div>
     `;
-    card.querySelector('[data-act="view"]').addEventListener("click", () => renderRunBreakdown(run));
-    card.querySelector('[data-act="del"]').addEventListener("click", async () => {
+    card.addEventListener("click", () => renderRunBreakdown(run));
+    card.querySelector('[data-act="del"]').addEventListener("click", async (ev) => {
+      ev.stopPropagation();
       if (!confirm(`Delete game run "${run.label}"?`)) return;
       run.deleted = true;
       run.deletedAt = Date.now();
@@ -4315,7 +4358,7 @@ function startFirestoreListeners() {
   });
 }
 async function refreshAfterRemoteChange(storeName) {
-  if (storeName === "attachments") { await renumberAttachments(); await loadAttachments(); syncToTeamDrive(); }
+  if (storeName === "attachments") { await enforceBaseRobotName(); await renumberAttachments(); await loadAttachments(); syncToTeamDrive(); }
   else if (storeName === "entries") { renderAttachmentChips(); await renderEntryList(); await renderIterationTotal(); renderAttachmentsSetup(); }
   else if (storeName === "runGroups") { await loadRunGroups(); await loadMissions(); }
   else if (storeName === "missions") { await loadMissions(); renderRunGroups(); }
