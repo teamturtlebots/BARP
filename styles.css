@@ -73,17 +73,18 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .view { animation: fadein 0.15s ease-out; }
 @keyframes fadein { from { opacity: 0; transform: translateY(4px);} to { opacity: 1; transform: none; } }
 
-.settings-layout { display: flex; gap: 14px; align-items: flex-start; }
+.settings-layout { display: flex; flex-direction: column; gap: 12px; }
 .settings-sidebar {
-  display: flex; flex-direction: column; gap: 6px; flex: none; width: 96px;
-  position: sticky; top: 0;
+  display: flex; flex-direction: row; gap: 16px; flex: none;
+  border-bottom: 1px solid var(--line); padding-bottom: 6px;
 }
 .settings-sidebar-btn {
-  background: var(--paper-2); border: 1px solid var(--line); border-radius: 8px;
-  color: var(--text-soft); font-family: var(--body); font-weight: 600; font-size: 0.78rem;
-  padding: 10px 6px; cursor: pointer; text-align: center; line-height: 1.25;
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--text-soft); font-family: var(--body); font-weight: 600; font-size: 0.72rem;
+  text-transform: uppercase; letter-spacing: 0.02em;
+  padding: 2px 0 5px; cursor: pointer; text-align: left; line-height: 1.2;
 }
-.settings-sidebar-btn.active { background: var(--moss); color: var(--paper); border-color: var(--moss); }
+.settings-sidebar-btn.active { color: var(--moss); border-bottom-color: var(--moss); }
 .settings-content { flex: 1; min-width: 0; }
 
 .section-row {

@@ -397,7 +397,12 @@ async function loadAttachments() {
   await renderEntryList();
 }
 async function renumberAttachments() {
-  const remaining = (await dbGetAll("attachments")).filter((a) => !a.deleted && !a.isBaseRobot).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  // Tie-broken by createdAt then id (not just `order`) so that once every
+  // device has synced the same data, they all independently compute the
+  // exact same final numbering — not just "no duplicates locally" but
+  // "everyone agrees on the same numbers."
+  const remaining = (await dbGetAll("attachments")).filter((a) => !a.deleted && !a.isBaseRobot)
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || (a.createdAt ?? 0) - (b.createdAt ?? 0) || String(a.id).localeCompare(String(b.id)));
   for (const [i, a] of remaining.entries()) { a.order = i; a.number = i + 1; await dbPut("attachments", a); }
 }
 // Base Robot is a system-created attachment that always exists and can't be
@@ -405,10 +410,33 @@ async function renumberAttachments() {
 // picked when logging an iteration, filtered, etc.) but is excluded from
 // the numbered/reorderable list and its iteration count is tracked
 // separately from the main attachments total.
+//
+// It gets a fixed ID (rather than crypto.randomUUID()) on purpose: when a
+// new device/teammate opens BARP for the first time, its local IndexedDB is
+// empty, so this function runs before Firestore has had a chance to sync
+// down the team's existing data — every fresh device used to independently
+// create its own "Base Robot" with a random ID, and once everyone synced up
+// you'd end up with one duplicate per device that ever did a first load. A
+// fixed ID means every device's "first load" write lands on the exact same
+// Firestore document instead of creating a new one.
+const BASE_ROBOT_ID = "base-robot";
 async function ensureBaseRobotExists() {
   const all = await dbGetAll("attachments");
-  const existing = all.find((a) => a.isBaseRobot && !a.deleted);
-  if (existing) return;
+  const activeBaseRobots = all.filter((a) => a.isBaseRobot && !a.deleted).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  if (activeBaseRobots.length > 1) {
+    // Self-heal duplicates created by the old race before this fix: keep the
+    // oldest, fold every other one's logged iterations into it, soft-delete the rest.
+    const survivor = activeBaseRobots[0];
+    for (const dup of activeBaseRobots.slice(1)) {
+      const dupEntries = await dbGetByIndex("entries", "byAttachment", dup.id);
+      for (const e of dupEntries) { e.attachmentId = survivor.id; await dbPut("entries", e); }
+      dup.deleted = true;
+      dup.deletedAt = Date.now();
+      await dbPut("attachments", dup);
+    }
+    return;
+  }
+  if (activeBaseRobots.length === 1) return;
   const softDeleted = all.find((a) => a.isBaseRobot);
   if (softDeleted) {
     delete softDeleted.deleted;
@@ -417,7 +445,7 @@ async function ensureBaseRobotExists() {
     return;
   }
   await dbPut("attachments", {
-    id: crypto.randomUUID(),
+    id: BASE_ROBOT_ID,
     order: -1,
     number: 0,
     name: "Base Robot",
@@ -646,8 +674,8 @@ function renderAttachmentsSetup() {
         row.innerHTML = `
           ${baseRobot.photo ? `<img class="att-thumb" src="${baseRobot.photo}" alt="">` : ""}
           <div class="m-info">
-            <div class="m-name">&#129302; ${esc(baseRobot.name)}</div>
-            <div class="m-sub">${count} iteration${count === 1 ? "" : "s"} logged &middot; tracked separately</div>
+            <div class="m-name">${esc(baseRobot.name)}</div>
+            <div class="m-sub">${count} iteration${count === 1 ? "" : "s"} logged</div>
           </div>
           <button class="btn-icon" data-act="edit" title="Edit photo">&#9998;&#65039;</button>
         `;
@@ -810,7 +838,7 @@ function openAttachmentModal(att) {
     record.photo = pendingAttPhoto;
     if (!isEdit) record.createdAt = Date.now();
     const id = await dbPut("attachments", record);
-    if (!isEdit) { state.selectedAttachmentIds.add(id); }
+    if (!isEdit) { state.selectedAttachmentIds.add(id); await renumberAttachments(); }
     closeModal();
     await loadAttachments();
     syncToTeamDrive();
@@ -4280,7 +4308,7 @@ function startFirestoreListeners() {
   });
 }
 async function refreshAfterRemoteChange(storeName) {
-  if (storeName === "attachments") { await loadAttachments(); }
+  if (storeName === "attachments") { await renumberAttachments(); await loadAttachments(); syncToTeamDrive(); }
   else if (storeName === "entries") { renderAttachmentChips(); await renderEntryList(); await renderIterationTotal(); renderAttachmentsSetup(); }
   else if (storeName === "runGroups") { await loadRunGroups(); await loadMissions(); }
   else if (storeName === "missions") { await loadMissions(); renderRunGroups(); }
