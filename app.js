@@ -794,8 +794,8 @@ function openAttachmentModal(att) {
   const isEdit = !!att;
   let pendingAttPhoto = isEdit ? (att.photo || null) : null;
   openModal(`
-    <h2>${isEdit ? "Edit attachment" : "New attachment"}</h2>
-    <div class="field"><label>Name</label><input class="text-input" id="m-att-name" type="text" value="${isEdit ? esc(att.name) : ""}" placeholder="e.g. Coral claw"></div>
+    <h2>${isEdit ? (att.isBaseRobot ? "Edit Base Robot" : "Edit attachment") : "New attachment"}</h2>
+    <div class="field"><label>Name</label><input class="text-input" id="m-att-name" type="text" value="${isEdit ? esc(att.name) : ""}" placeholder="e.g. Coral claw" ${att && att.isBaseRobot ? "disabled" : ""}></div>
     <div class="field">
       <label>Picture (optional)</label>
       <div class="photo-preview-wrap" id="att-photo-preview-wrap">${pendingAttPhoto ? `<img class="photo-preview" src="${pendingAttPhoto}">` : ""}</div>
@@ -831,7 +831,7 @@ function openAttachmentModal(att) {
   });
   document.getElementById("m-save").addEventListener("click", async () => {
     stopCamera();
-    const name = document.getElementById("m-att-name").value.trim();
+    const name = (att && att.isBaseRobot) ? att.name : document.getElementById("m-att-name").value.trim();
     if (!name) { alert("Give this attachment a name."); return; }
     const record = isEdit ? att : { id: crypto.randomUUID(), order: state.attachments.length, number: state.attachments.length + 1 };
     record.name = name;
