@@ -2732,6 +2732,16 @@ function getRunDateFilterRange() {
   };
 }
 
+// Today / Yesterday / "Mon, Jul 21" — whichever reads fastest at a glance.
+function dayLabel(ts) {
+  const d = new Date(ts);
+  const today = new Date();
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return "Today";
+  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
 function renderRuns() {
   const list = document.getElementById("run-list");
   const stats = document.getElementById("run-stats");
@@ -2790,7 +2800,16 @@ function renderRuns() {
     list.appendChild(card);
   });
 
+  let lastDayKey = null;
   completed.slice().reverse().forEach((run) => {
+    const dayKey = new Date(run.startedAt || 0).toDateString();
+    if (dayKey !== lastDayKey) {
+      lastDayKey = dayKey;
+      const header = document.createElement("div");
+      header.className = "run-day-header";
+      header.textContent = dayLabel(run.startedAt || 0);
+      list.appendChild(header);
+    }
     const total = runTotal(run, state.missions);
     const avgOp = breakdownAvgOpTime(run);
     const card = document.createElement("div");
@@ -3790,6 +3809,10 @@ async function writeTimeDataSheet(spreadsheetId, sheetId) {
     },
   }));
   if (merges.length) await sheetsBatchUpdate(spreadsheetId, merges);
+  // Auto-fit every column to its content so run names / long headers don't overflow.
+  await sheetsBatchUpdate(spreadsheetId, [
+    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 2 + weekKeys.length * 2 } } },
+  ]);
 }
 
 // ---- Sheet 2: Score Data ----
@@ -3919,55 +3942,155 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
         range: { sheetId, dimension: "COLUMNS", startIndex: successCol - 1, endIndex: successCol }, // Success Rate
         properties: { pixelSize: 90 }, fields: "pixelSize",
     } },
+    // Auto-fit the free-text columns (Official Name, Task, Name) so nothing overflows.
+    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 3 } } },
+    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 4, endIndex: 5 } } },
   ]);
 }
 
 // ---- Sheet 3: Analysis ----
 // Reuses the exact same computations already driving the in-app Analysis
-// tab, just written as real Sheets charts instead of hand-drawn SVG.
+// tab. Three charts (Score Trend, Success Rate, Points/Sec by Mission) sit
+// in a row along the top; their backing data tables are written below them,
+// stacked in column A. Re-running the export deletes any charts already on
+// this sheet first, so repeated exports don't pile up duplicates.
 async function writeAnalysisSheet(spreadsheetId, sheetId) {
   const completed = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  const rowDefs = buildScoreRowDefs();
   const trendRows = completed.map((r) => [r.label, runTotal(r, state.missions)]);
-  const runTimeRows = completed.map((r) => [r.label, r.totalTimeMs != null ? Math.round(r.totalTimeMs / 1000) : ""]);
+  const successRows = completed.map((r) => {
+    const total = rowDefs.length;
+    const flagged = rowDefs.filter((row) => row.flagged(r)).length;
+    return [r.label, total ? flagged / total : ""];
+  });
   const missionData = computeMissionAnalytics().sort((a, b) => a.order - b.order);
   const missionRows = missionData.map((d) => [
     d.mission.name,
     d.pointsPerSec != null ? Number(d.pointsPerSec.toFixed(2)) : "",
   ]);
-  await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A1`, [
-    ["Run", "Score"], ...trendRows,
-  ]);
-  const runTimeStartRow = trendRows.length + 3;
-  await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A${runTimeStartRow}`, [
-    ["Run", "Total Time (sec)"], ...runTimeRows,
-  ]);
-  const missionStartRow = runTimeStartRow + runTimeRows.length + 2;
-  await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A${missionStartRow}`, [
-    ["Mission", "Points/Sec"], ...missionRows,
+
+  // Clear old charts (same reasoning as the conditional-format cleanup on
+  // Score Data: without this, every re-export would add 3 more on top).
+  const meta = await sheetsFetch(spreadsheetId);
+  const sheetMeta = meta.sheets.find((s) => s.properties.sheetId === sheetId);
+  const existingCharts = (sheetMeta && sheetMeta.charts) || [];
+  if (existingCharts.length) {
+    await sheetsBatchUpdate(spreadsheetId, existingCharts.map((c) => ({ deleteEmbeddedObject: { objectId: c.chartId } })));
+  }
+
+  // Layout: 0-indexed rows 0-18 are reserved for the row of charts; every
+  // data table's header starts at row 19 or later.
+  const CHARTS_ROWS_RESERVED = 19;
+  const trendHeaderRow = CHARTS_ROWS_RESERVED;
+  const trendDataStart = trendHeaderRow + 1;
+  const trendDataEnd = trendDataStart + trendRows.length;
+  await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A${trendHeaderRow + 1}`, [["Run", "Score"], ...trendRows]);
+
+  const successHeaderRow = trendDataEnd + 2;
+  const successDataStart = successHeaderRow + 1;
+  const successDataEnd = successDataStart + successRows.length;
+  await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A${successHeaderRow + 1}`, [["Run", "Success Rate"], ...successRows]);
+
+  const missionHeaderRow = successDataEnd + 2;
+  const missionDataStart = missionHeaderRow + 1;
+  const missionDataEnd = missionDataStart + missionRows.length;
+  await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A${missionHeaderRow + 1}`, [["Mission", "Points/Sec"], ...missionRows]);
+
+  // Success Rate values colored red→yellow→green by how good the run was —
+  // same 0/50/100% scale already used on the Score Data sheet — plus percent
+  // formatting, and auto-fit columns so none of these tables' text overflows.
+  await sheetsBatchUpdate(spreadsheetId, [
+    { addConditionalFormatRule: {
+        rule: {
+          ranges: [{ sheetId, startRowIndex: successDataStart, endRowIndex: successDataEnd, startColumnIndex: 1, endColumnIndex: 2 }],
+          gradientRule: {
+            minpoint: { type: "NUMBER", value: "0", color: { red: 1, green: 0, blue: 0 } },
+            midpoint: { type: "NUMBER", value: "0.5", color: { red: 1, green: 1, blue: 0 } },
+            maxpoint: { type: "NUMBER", value: "1", color: { red: 0.341, green: 0.745, blue: 0.541 } },
+          },
+        },
+        index: 0,
+    } },
+    { repeatCell: {
+        range: { sheetId, startRowIndex: successDataStart, endRowIndex: successDataEnd, startColumnIndex: 1, endColumnIndex: 2 },
+        cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: "0%" } } },
+        fields: "userEnteredFormat.numberFormat",
+    } },
+    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 2 } } },
   ]);
 
-  const trendLastRow = trendRows.length + 1;
-  const runTimeLastRow = runTimeStartRow + runTimeRows.length - 1;
-  await sheetsBatchUpdate(spreadsheetId, [
-    { addChart: { chart: { spec: {
-      title: "Score Trend", basicChart: {
-        chartType: "LINE",
+  // Three charts in a row at the top, each a fixed size so they line up
+  // evenly regardless of how much data feeds them.
+  const CHART_WIDTH = 360, CHART_HEIGHT = 250, CHART_GAP_COLS = 4;
+
+  // Sheets charts can't gradient-color bars by value the way conditional
+  // formatting colors cells, so the Success Rate chart fakes it: each run
+  // gets its own hidden helper column (blank except for that run's own row),
+  // and each column becomes a separate single-bar "series" with an explicit
+  // color computed from that run's rate. Nobody needs to read these columns
+  // directly — they exist purely to drive the chart — so they're hidden.
+  function successColor(rate) {
+    const r = rate === "" || rate == null ? 0.5 : Math.max(0, Math.min(1, rate));
+    const lerp = (a, b, t) => a + (b - a) * t;
+    return r <= 0.5
+      ? { red: 1, green: lerp(0, 1, r / 0.5), blue: 0 }
+      : { red: lerp(1, 0.341, (r - 0.5) / 0.5), green: lerp(1, 0.745, (r - 0.5) / 0.5), blue: lerp(0, 0.541, (r - 0.5) / 0.5) };
+  }
+  const n = successRows.length;
+  let successChartRequest = null;
+  if (n > 0) {
+    const helperStartCol = 2; // column C, 0-indexed
+    const helperMatrix = successRows.map((row, i) =>
+      Array.from({ length: n }, (_, j) => (i === j ? row[1] : ""))
+    );
+    await sheetsValuesUpdate(spreadsheetId, `'Analysis'!${colLetter(helperStartCol + 1)}${successDataStart + 1}`, helperMatrix);
+    await sheetsBatchUpdate(spreadsheetId, [
+      { updateDimensionProperties: {
+          range: { sheetId, dimension: "COLUMNS", startIndex: helperStartCol, endIndex: helperStartCol + n },
+          properties: { hiddenByUser: true }, fields: "hiddenByUser",
+      } },
+    ]);
+    successChartRequest = {
+      addChart: { chart: { spec: {
+        title: "Success Rate",
+        basicChart: {
+          chartType: "COLUMN",
+          legendPosition: "NO_LEGEND",
+          axis: [{ position: "BOTTOM_AXIS", title: "Run" }, { position: "LEFT_AXIS", title: "Success Rate" }],
+          domains: [{ domain: { sourceRange: { sources: [{ sheetId, startRowIndex: successDataStart, endRowIndex: successDataEnd, startColumnIndex: 0, endColumnIndex: 1 }] } } }],
+          series: successRows.map((row, i) => ({
+            series: { sourceRange: { sources: [{ sheetId, startRowIndex: successDataStart, endRowIndex: successDataEnd, startColumnIndex: helperStartCol + i, endColumnIndex: helperStartCol + i + 1 }] } },
+            color: successColor(row[1]),
+          })),
+        },
+      }, position: { overlayPosition: {
+        anchorCell: { sheetId, rowIndex: 0, columnIndex: CHART_GAP_COLS },
+        widthPixels: CHART_WIDTH, heightPixels: CHART_HEIGHT,
+      } } } },
+    };
+  }
+
+  const charts = [
+    { title: "Score Trend", axisTitle: "Score", dataStart: trendDataStart, dataEnd: trendDataEnd, col: 0, domainTitle: "Run" },
+    { title: "Points/Sec by Mission", axisTitle: "Points/Sec", dataStart: missionDataStart, dataEnd: missionDataEnd, col: CHART_GAP_COLS * 2, domainTitle: "Mission", chartType: "COLUMN" },
+  ];
+  const chartRequests = charts.map((c) => ({
+    addChart: { chart: { spec: {
+      title: c.title,
+      basicChart: {
+        chartType: c.chartType || "LINE",
         legendPosition: "NO_LEGEND",
-        axis: [{ position: "BOTTOM_AXIS", title: "Run" }, { position: "LEFT_AXIS", title: "Score" }],
-        domains: [{ domain: { sourceRange: { sources: [{ sheetId, startRowIndex: 1, endRowIndex: trendLastRow, startColumnIndex: 0, endColumnIndex: 1 }] } } }],
-        series: [{ series: { sourceRange: { sources: [{ sheetId, startRowIndex: 1, endRowIndex: trendLastRow, startColumnIndex: 1, endColumnIndex: 2 }] } } }],
+        axis: [{ position: "BOTTOM_AXIS", title: c.domainTitle }, { position: "LEFT_AXIS", title: c.axisTitle }],
+        domains: [{ domain: { sourceRange: { sources: [{ sheetId, startRowIndex: c.dataStart, endRowIndex: c.dataEnd, startColumnIndex: 0, endColumnIndex: 1 }] } } }],
+        series: [{ series: { sourceRange: { sources: [{ sheetId, startRowIndex: c.dataStart, endRowIndex: c.dataEnd, startColumnIndex: 1, endColumnIndex: 2 }] } } }],
       },
-    }, position: { overlayPosition: { anchorCell: { sheetId, rowIndex: 0, columnIndex: 3 } } } } } },
-    { addChart: { chart: { spec: {
-      title: "Total Run Time per Game Run", basicChart: {
-        chartType: "LINE",
-        legendPosition: "NO_LEGEND",
-        axis: [{ position: "BOTTOM_AXIS", title: "Run" }, { position: "LEFT_AXIS", title: "Total Time (sec)" }],
-        domains: [{ domain: { sourceRange: { sources: [{ sheetId, startRowIndex: runTimeStartRow, endRowIndex: runTimeLastRow, startColumnIndex: 0, endColumnIndex: 1 }] } } }],
-        series: [{ series: { sourceRange: { sources: [{ sheetId, startRowIndex: runTimeStartRow, endRowIndex: runTimeLastRow, startColumnIndex: 1, endColumnIndex: 2 }] } } }],
-      },
-    }, position: { overlayPosition: { anchorCell: { sheetId, rowIndex: 20, columnIndex: 3 } } } } } },
-  ]);
+    }, position: { overlayPosition: {
+      anchorCell: { sheetId, rowIndex: 0, columnIndex: c.col },
+      widthPixels: CHART_WIDTH, heightPixels: CHART_HEIGHT,
+    } } } },
+  }));
+  if (successChartRequest) chartRequests.splice(1, 0, successChartRequest);
+  await sheetsBatchUpdate(spreadsheetId, chartRequests);
 }
 
 // ---- Sheet 4: Attachments (iteration log, with photos) ----
@@ -4042,6 +4165,9 @@ async function writeAttachmentsSheet(spreadsheetId, sheetId, onProgress) {
         range: { sheetId, dimension: "COLUMNS", startIndex: 5, endIndex: 5 + MAX_PHOTO_COLS },
         properties: { pixelSize: 130 }, fields: "pixelSize",
     } },
+    // Auto-fit the text columns (Attachment/Date/Size/What/Why) — photo
+    // columns are left at their fixed 130px so the 120px images stay put.
+    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 5 } } },
   ]);
 }
 
