@@ -56,11 +56,6 @@
   <!-- RUNS VIEW -->
   <section class="view" id="view-runs" hidden>
     <button class="btn btn-amber btn-full btn-start-run" id="btn-start-run">&#9654; Start New Practice Game Run</button>
-    <div class="section-row" style="margin-bottom:16px; gap:10px;">
-      <button class="btn btn-ghost" style="flex:1;" id="btn-export-runs-csv">Export scoresheet</button>
-      <button class="btn btn-ghost" style="flex:1;" id="btn-import-runs-xlsx">Import scoresheet</button>
-    </div>
-    <input type="file" accept=".xlsx" id="file-import-runs-xlsx" hidden>
 
     <div id="run-stats" class="stat-strip"></div>
 
@@ -199,6 +194,9 @@
   import {
     getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot
   } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+  import {
+    getStorage, ref, uploadBytes, getDownloadURL
+  } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-storage.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyDsBz2vPqKQDy3kQvp7XXz3loUAj9yVEcc",
@@ -211,12 +209,14 @@
   const app = initializeApp(firebaseConfig);
   const auth = getAuth(app);
   const db = getFirestore(app);
+  const storage = getStorage(app);
 
   // app.js is a plain classic script (not a module), so hand it what it
   // needs this way rather than restructuring the whole file into a module.
   window.firebaseAuth = auth;
   window.firebaseDb = db;
-  window.firebaseFns = { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, collection, doc, setDoc, deleteDoc, onSnapshot };
+  window.firebaseStorage = storage;
+  window.firebaseFns = { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, collection, doc, setDoc, deleteDoc, onSnapshot, storageRef: ref, uploadBytes, getDownloadURL };
   window.dispatchEvent(new Event("firebase-ready"));
 </script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.7/Sortable.min.js"></script>

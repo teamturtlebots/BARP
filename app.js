@@ -3506,90 +3506,12 @@ async function importScoresheetXLSX(file) {
   return { importedCount: newRuns.length, unmatchedCount };
 }
 
-document.getElementById("btn-export-runs-csv").addEventListener("click", () => {
-  const completedRuns = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
-  if (!completedRuns.length) { alert("No completed runs yet."); return; }
-  const toLocalInput = (ts) => {
-    const d = new Date(ts);
-    d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-    return d.toISOString().slice(0, 16);
-  };
-  const earliest = (completedRuns[0].startedAt || Date.now()) - 60000;
-  const latest = (completedRuns[completedRuns.length - 1].startedAt || Date.now()) + 60000;
-  openModal(`
-    <h2>Export scoresheet</h2>
-    <p class="empty-sub">Choose a date/time range — every completed run started in that window becomes one column.</p>
-    <div class="field"><label>From</label><input type="datetime-local" id="export-from" class="text-input" value="${toLocalInput(earliest)}"></div>
-    <div class="field"><label>To</label><input type="datetime-local" id="export-to" class="text-input" value="${toLocalInput(latest)}"></div>
-    <p class="empty-sub" id="export-run-count"></p>
-    <div class="modal-actions" style="gap:6px;">
-      <button class="btn btn-ghost btn-sm" id="m-cancel" type="button" style="flex:1; padding:10px 4px;">Cancel</button>
-      <button class="btn btn-ghost btn-sm" id="m-export-csv" type="button" style="flex:1; padding:10px 4px;">CSV</button>
-      <button class="btn btn-primary btn-sm" id="m-export-xlsx" type="button" style="flex:1; padding:10px 4px;">XLSX</button>
-    </div>
-  `);
-  function inRangeRuns() {
-    const fromVal = document.getElementById("export-from").value;
-    const toVal = document.getElementById("export-to").value;
-    const from = fromVal ? new Date(fromVal).getTime() : -Infinity;
-    const to = toVal ? new Date(toVal).getTime() : Infinity;
-    return completedRuns.filter((r) => { const t = r.startedAt || 0; return t >= from && t <= to; });
-  }
-  function updateCount() {
-    const n = inRangeRuns().length;
-    document.getElementById("export-run-count").textContent = `${n} run${n === 1 ? "" : "s"} in this range.`;
-  }
-  document.getElementById("export-from").addEventListener("change", updateCount);
-  document.getElementById("export-to").addEventListener("change", updateCount);
-  updateCount();
-  document.getElementById("m-cancel").addEventListener("click", closeModal);
-  document.getElementById("m-export-csv").addEventListener("click", () => {
-    const runs = inRangeRuns();
-    if (!runs.length) { alert("No runs in that range."); return; }
-    if (!state.missions.some((m) => visibleTasks(m).length)) { alert("Add missions and tasks in Settings first."); return; }
-    const csv = buildScoresheetCSV(runs);
-    closeModal();
-    download(`barp-scoresheet-${Date.now()}.csv`, csv, "text/csv");
-  });
-  document.getElementById("m-export-xlsx").addEventListener("click", async () => {
-    const runs = inRangeRuns();
-    if (!runs.length) { alert("No runs in that range."); return; }
-    if (!state.missions.some((m) => visibleTasks(m).length)) { alert("Add missions and tasks in Settings first."); return; }
-    if (typeof ExcelJS === "undefined") { alert("Couldn't load the Excel export library — check your internet connection and try again."); return; }
-    const btn = document.getElementById("m-export-xlsx");
-    btn.disabled = true; btn.textContent = "Building…";
-    try {
-      const buf = await buildScoresheetXLSX(runs);
-      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url; a.download = `barp-scoresheet-${Date.now()}.xlsx`;
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
-      closeModal();
-    } catch (e) {
-      showErrorBanner(`XLSX export failed: ${e.name} — ${e.message}`);
-      btn.disabled = false; btn.textContent = "XLSX";
-    }
-  });
-});
-
-document.getElementById("btn-import-runs-xlsx").addEventListener("click", () => document.getElementById("file-import-runs-xlsx").click());
-document.getElementById("file-import-runs-xlsx").addEventListener("change", async (e) => {
-  const file = e.target.files[0];
-  e.target.value = "";
-  if (!file) return;
-  if (typeof ExcelJS === "undefined") { alert("Couldn't load the Excel library — check your internet connection and try again."); return; }
-  if (!state.missions.some((m) => visibleTasks(m).length)) { alert("Add missions and tasks in Settings first, so imported scores have something to match against."); return; }
-  try {
-    const result = await importScoresheetXLSX(file);
-    let msg = `Imported ${result.importedCount} run${result.importedCount === 1 ? "" : "s"}.`;
-    if (result.unmatchedCount) msg += ` ${result.unmatchedCount} row${result.unmatchedCount === 1 ? "" : "s"} in the file didn't match any mission/task in Settings and were skipped.`;
-    alert(msg);
-  } catch (err) {
-    showErrorBanner(`Import failed: ${err.name} — ${err.message}`);
-  }
-});
+// Note: the in-app "Export scoresheet" / "Import scoresheet" buttons on the
+// Runs view were removed. buildScoresheetCSV / buildScoresheetXLSX /
+// importScoresheetXLSX below are now unused by the UI but left in place —
+// writeScoreDataSheet() (Google Sheets export) still reuses buildScoreRowDefs,
+// and these functions are handy to keep around if CSV/XLSX export ever needs
+// to come back.
 
 // ==========================================================
 // BACKUP
@@ -3759,7 +3681,7 @@ async function sheetsCreateSpreadsheet() {
     headers: { Authorization: `Bearer ${state.sheets.accessToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       properties: { title: "BARP Team Export" },
-      sheets: [{ properties: { title: "Time Data" } }, { properties: { title: "Score Data" } }, { properties: { title: "Analysis" } }],
+      sheets: [{ properties: { title: "Time Data" } }, { properties: { title: "Score Data" } }, { properties: { title: "Analysis" } }, { properties: { title: "Attachments" } }],
     }),
   });
   if (!res.ok) throw new Error(`Couldn't create the spreadsheet (${res.status})`);
@@ -4048,10 +3970,85 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
   ]);
 }
 
+// ---- Sheet 4: Attachments (iteration log, with photos) ----
+// Sheets' IMAGE() formula needs a real URL it can fetch over HTTP — a data:
+// URI (which is how photos are stored locally/in Firestore) is either
+// rejected or blows past the formula length limit. So each photo gets
+// uploaded once to Firebase Storage, and the resulting download URL (which
+// carries its own access token and works without any signed-in request) is
+// cached back onto the entry — dbPut here, plus a Firestore push if we're
+// online — so re-running the export later doesn't re-upload anything.
+async function sha256Hex(str) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function ensurePhotoUploaded(entry, photoDataUrl) {
+  const hash = await sha256Hex(photoDataUrl);
+  entry.uploadedPhotoUrls = entry.uploadedPhotoUrls || {};
+  if (entry.uploadedPhotoUrls[hash]) return entry.uploadedPhotoUrls[hash];
+  if (!window.firebaseStorage) throw new Error("Firebase Storage isn't ready.");
+  const blob = await (await fetch(photoDataUrl)).blob();
+  const path = `entryPhotos/${entry.attachmentId}/${hash}.jpg`;
+  const storageRef = window.firebaseFns.storageRef(window.firebaseStorage, path);
+  await window.firebaseFns.uploadBytes(storageRef, blob, { contentType: blob.type || "image/jpeg" });
+  const url = await window.firebaseFns.getDownloadURL(storageRef);
+  entry.uploadedPhotoUrls[hash] = url;
+  await dbPut("entries", entry); // cache so future exports skip re-uploading this photo
+  return url;
+}
+async function writeAttachmentsSheet(spreadsheetId, sheetId, onProgress) {
+  const attById = Object.fromEntries(state.attachments.map((a) => [a.id, a]));
+  const allEntries = (await dbGetAll("entries")).filter((e) => !e.deleted && attById[e.attachmentId]);
+  allEntries.sort((a, b) => (attById[a.attachmentId].order ?? 0) - (attById[b.attachmentId].order ?? 0) || (a.timestamp || 0) - (b.timestamp || 0));
+  const sizeLabel = { small: "Small change", moderate: "Moderate change", major: "Major change" };
+  const MAX_PHOTO_COLS = 3;
+  const header = ["Attachment", "Date", "Size", "What Changed", "Why Changed", ...Array.from({ length: MAX_PHOTO_COLS }, (_, i) => `Photo ${i + 1}`)];
+  const rows = [];
+  for (let i = 0; i < allEntries.length; i++) {
+    const entry = allEntries[i];
+    if (onProgress) onProgress(i + 1, allEntries.length);
+    const photos = getEntryPhotos(entry).slice(0, MAX_PHOTO_COLS);
+    const photoCells = [];
+    for (const p of photos) {
+      try {
+        const url = await ensurePhotoUploaded(entry, p);
+        photoCells.push(`=IMAGE("${url}",4,120,120)`);
+      } catch (e) {
+        photoCells.push(""); // one bad photo shouldn't fail the whole export
+      }
+    }
+    while (photoCells.length < MAX_PHOTO_COLS) photoCells.push("");
+    rows.push([
+      attById[entry.attachmentId].name,
+      new Date(entry.timestamp || 0).toLocaleDateString(),
+      sizeLabel[entry.size] || "",
+      entry.whatChanged || "",
+      entry.whyChanged || "",
+      ...photoCells,
+    ]);
+  }
+  await sheetsValuesUpdate(spreadsheetId, `'Attachments'!A1`, [header, ...rows]);
+  await sheetsBatchUpdate(spreadsheetId, [
+    { repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+        cell: { userEnteredFormat: { textFormat: { bold: true } } },
+        fields: "userEnteredFormat.textFormat",
+    } },
+    { updateDimensionProperties: {
+        range: { sheetId, dimension: "ROWS", startRowIndex: 1, endRowIndex: rows.length + 1 },
+        properties: { pixelSize: 130 }, fields: "pixelSize", // tall enough for the 120px images
+    } },
+    { updateDimensionProperties: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: 5, endIndex: 5 + MAX_PHOTO_COLS },
+        properties: { pixelSize: 130 }, fields: "pixelSize",
+    } },
+  ]);
+}
+
 // ---- Orchestration ----
 async function ensureSheetsExist(spreadsheetId) {
   const meta = await sheetsFetch(spreadsheetId);
-  const wanted = ["Time Data", "Score Data", "Analysis"];
+  const wanted = ["Time Data", "Score Data", "Analysis", "Attachments"];
   const existing = {};
   meta.sheets.forEach((s) => { existing[s.properties.title] = s.properties.sheetId; });
   const toCreate = wanted.filter((name) => !(name in existing));
@@ -4076,6 +4073,10 @@ document.getElementById("btn-sheets-export").addEventListener("click", async () 
     await writeScoreDataSheet(spreadsheetId, sheetIds["Score Data"]);
     statusEl.textContent = "Writing Analysis…";
     await writeAnalysisSheet(spreadsheetId, sheetIds["Analysis"]);
+    statusEl.textContent = "Writing Attachments (uploading photos)…";
+    await writeAttachmentsSheet(spreadsheetId, sheetIds["Attachments"], (done, total) => {
+      statusEl.textContent = `Writing Attachments — photo ${done}/${total}…`;
+    });
     statusEl.textContent = `Exported ${new Date().toLocaleTimeString()}.`;
   } catch (e) {
     statusEl.textContent = "Export failed.";
@@ -4096,8 +4097,10 @@ document.getElementById("btn-sheets-export").addEventListener("click", async () 
 // Attachment/entry records carry a base64 photo, which is compressed on
 // capture (900px, quality 0.72) and normally stays well under that — but an
 // unusually large photo could occasionally fail to sync even though it still
-// saved fine locally. Worth revisiting with Firebase Storage for photos
-// specifically if that ever actually happens in practice.
+// saved fine locally. (Firebase Storage is now used for photos too, but only
+// as a byproduct of the Sheets export — see ensurePhotoUploaded/
+// writeAttachmentsSheet — entries themselves still sync via Firestore as
+// base64, same as before.)
 let driveSyncInFlight = false;
 let driveSyncQueued = false;
 function setSyncStatus(text) {
