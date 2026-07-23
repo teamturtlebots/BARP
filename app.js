@@ -738,39 +738,31 @@ function renderAttachmentsSetup() {
     if (infoArea && baseRobot) {
       const count = await iterationCount(baseRobot.id);
       const ports = baseRobot.ports || {};
-      const LEFT_PORTS = [{ id: "A", y: 40 }, { id: "B", y: 72 }, { id: "C", y: 104 }];
-      const RIGHT_PORTS = [{ id: "D", y: 40 }, { id: "E", y: 72 }, { id: "F", y: 104 }];
-      const portGroup = (p, side) => {
-        const cx = side === "left" ? 35 : 185;
-        const letterX = side === "left" ? 45 : 195;
-        const labelX = side === "left" ? 30 : 210;
+      // Grid reads left-to-right, top-to-bottom: E C A / F D B.
+      const GRID = [
+        [{ id: "E" }, { id: "C" }, { id: "A" }],
+        [{ id: "F" }, { id: "D" }, { id: "B" }],
+      ];
+      const COL_X = [55, 110, 165];
+      const ROW_Y = [45, 95];
+      const portGroup = (p, cx, cy) => {
         const type = baseRobotPortType(ports[p.id]);
         return `
           <g class="port-hit${type ? " assigned" : ""}" data-port="${p.id}">
-            <rect class="port-connector" x="${cx}" y="${p.y}" width="20" height="16" rx="3"></rect>
-            <text class="port-letter" x="${letterX}" y="${p.y + 11}" text-anchor="middle">${p.id}</text>
-            <text class="port-type-label" x="${labelX}" y="${p.y + 11}" text-anchor="${side === "left" ? "end" : "start"}">${type ? esc(type.short) : "&mdash;"}</text>
+            <rect class="port-connector" x="${cx - 18}" y="${cy - 18}" width="36" height="36" rx="4"></rect>
+            <text class="port-letter" x="${cx}" y="${cy - 3}" text-anchor="middle">${p.id}</text>
+            <text class="port-type-label" x="${cx}" y="${cy + 12}" text-anchor="middle">${type ? esc(type.short) : "&mdash;"}</text>
           </g>
         `;
       };
-      // A top-down schematic of the hub, loosely modeled on the SPIKE Prime
-      // Hub's layout — 3 ports down the left edge, 3 down the right — so you
-      // can see at a glance which physical port maps to which function. Tap
-      // any port to change it.
+      // A simple top-down schematic — 11:7 rectangle with slightly rounded
+      // corners, ports arranged in a 2x3 grid. Tap any port to change it.
       infoArea.innerHTML = `
         <p class="empty-sub" style="margin:0 0 8px;">${count} iteration${count === 1 ? "" : "s"} logged</p>
         <div class="port-diagram-wrap">
-          <svg viewBox="0 0 240 160" class="port-diagram">
-            <rect class="hub-body" x="55" y="15" width="130" height="130" rx="24"></rect>
-            <circle class="hub-bolt" cx="75" cy="35" r="4"></circle>
-            <circle class="hub-bolt" cx="165" cy="35" r="4"></circle>
-            <circle class="hub-bolt" cx="75" cy="125" r="4"></circle>
-            <circle class="hub-bolt" cx="165" cy="125" r="4"></circle>
-            <rect class="hub-screen" x="95" y="42" width="50" height="26" rx="3"></rect>
-            <circle class="hub-btn" cx="150" cy="90" r="8"></circle>
-            <circle class="hub-speaker" cx="90" cy="90" r="7"></circle>
-            ${LEFT_PORTS.map((p) => portGroup(p, "left")).join("")}
-            ${RIGHT_PORTS.map((p) => portGroup(p, "right")).join("")}
+          <svg viewBox="0 0 220 140" class="port-diagram">
+            <rect class="hub-body" x="5" y="5" width="210" height="130" rx="8"></rect>
+            ${GRID.map((row, r) => row.map((p, c) => portGroup(p, COL_X[c], ROW_Y[r])).join("")).join("")}
           </svg>
         </div>
       `;
@@ -4257,35 +4249,85 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
 // Sheets' IMAGE() formula needs a real URL it can fetch over HTTP — a data:
 // URI (which is how photos are stored locally/in Firestore) is either
 // rejected or blows past the formula length limit. So each photo gets
-// uploaded once to Firebase Storage, and the resulting download URL (which
-// carries its own access token and works without any signed-in request) is
-// cached back onto the entry — dbPut here, plus a Firestore push if we're
-// online — so re-running the export later doesn't re-upload anything.
+// uploaded once to Google Drive (using the same drive.file OAuth token
+// already granted when connecting Sheets — no separate billing plan needed,
+// unlike Firebase Storage), made link-viewable, and the resulting URL is
+// cached back onto the entry — dbPut here — so re-running the export later
+// doesn't re-upload anything.
 async function sha256Hex(str) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-// Neither uploadBytes nor getDownloadURL has a built-in timeout — on a flaky
-// connection (very plausible at a practice space) the request can just sit
-// there pending forever with no error and no progress, which is exactly
-// what looked like the export being "stuck." This forces it to give up on
-// a single photo after 20s instead of hanging the whole export.
+// Neither of these has a built-in timeout — on a flaky connection (very
+// plausible at a practice space) the request can just sit there pending
+// forever with no error and no progress, which is exactly what looked like
+// the export being "stuck." This forces it to give up on a single photo
+// after 20s instead of hanging the whole export.
 function withTimeout(promise, ms, label) {
   return Promise.race([
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)),
   ]);
 }
-async function ensurePhotoUploaded(entry, photoDataUrl) {
+// Photos go in a dedicated "BARP Photos" Drive folder rather than loose in
+// the root — created once and cached (same pattern as the spreadsheet id
+// below), so this only actually creates the folder the very first time.
+async function ensureDrivePhotosFolder() {
+  const cached = await dbGet("meta", "drivePhotosFolderId");
+  if (cached?.value) {
+    // Confirm it still exists/is accessible before trusting the cache — it
+    // could have been deleted or the token could no longer see it.
+    const check = await fetch(`https://www.googleapis.com/drive/v3/files/${cached.value}?fields=id,trashed`, {
+      headers: { Authorization: `Bearer ${state.sheets.accessToken}` },
+    });
+    if (check.ok) {
+      const data = await check.json();
+      if (!data.trashed) return cached.value;
+    }
+  }
+  const res = await fetch("https://www.googleapis.com/drive/v3/files?fields=id", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${state.sheets.accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "BARP Photos", mimeType: "application/vnd.google-apps.folder" }),
+  });
+  if (!res.ok) throw new Error(`Couldn't create the Drive folder (${res.status})`);
+  const folderId = (await res.json()).id;
+  await dbPut("meta", { key: "drivePhotosFolderId", value: folderId });
+  return folderId;
+}
+async function driveUploadPhoto(blob, filename, folderId) {
+  // Manual multipart/related body — fetch has no built-in helper for this,
+  // and it's what Drive's "upload metadata + media in one request" endpoint
+  // requires.
+  const boundary = "barp" + Math.random().toString(36).slice(2);
+  const metadataPart = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name: filename, parents: [folderId] })}\r\n`;
+  const mediaHeader = `--${boundary}\r\nContent-Type: ${blob.type || "image/jpeg"}\r\n\r\n`;
+  const body = new Blob([metadataPart, mediaHeader, blob, `\r\n--${boundary}--`]);
+  const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${state.sheets.accessToken}`, "Content-Type": `multipart/related; boundary=${boundary}` },
+    body,
+  });
+  if (!res.ok) throw new Error(`Drive upload ${res.status}: ${(await res.text().catch(() => "")).slice(0, 300)}`);
+  return (await res.json()).id;
+}
+async function driveMakePublic(fileId) {
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${state.sheets.accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ role: "reader", type: "anyone" }),
+  });
+  if (!res.ok) throw new Error(`Drive permission ${res.status}: ${(await res.text().catch(() => "")).slice(0, 300)}`);
+}
+async function ensurePhotoUploaded(entry, photoDataUrl, folderId) {
   const hash = await sha256Hex(photoDataUrl);
   entry.uploadedPhotoUrls = entry.uploadedPhotoUrls || {};
   if (entry.uploadedPhotoUrls[hash]) return entry.uploadedPhotoUrls[hash];
-  if (!window.firebaseStorage) throw new Error("Firebase Storage isn't ready.");
+  if (!state.sheets.accessToken) throw new Error("Not connected to Google Sheets.");
   const blob = await (await fetch(photoDataUrl)).blob();
-  const path = `entryPhotos/${entry.attachmentId}/${hash}.jpg`;
-  const storageRef = window.firebaseFns.storageRef(window.firebaseStorage, path);
-  await withTimeout(window.firebaseFns.uploadBytes(storageRef, blob, { contentType: blob.type || "image/jpeg" }), 20000, "Photo upload");
-  const url = await withTimeout(window.firebaseFns.getDownloadURL(storageRef), 20000, "Getting photo URL");
+  const fileId = await withTimeout(driveUploadPhoto(blob, `${hash}.jpg`, folderId), 20000, "Photo upload");
+  await withTimeout(driveMakePublic(fileId), 20000, "Setting photo sharing");
+  const url = `https://drive.google.com/thumbnail?id=${fileId}&sz=w1000`;
   entry.uploadedPhotoUrls[hash] = url;
   await dbPut("entries", entry); // cache so future exports skip re-uploading this photo
   return url;
@@ -4319,15 +4361,16 @@ async function writeAttachmentsSheet(spreadsheetId, sheetId, onProgress) {
   // Flatten every (entry, photo) pair across the whole export into one list
   // so uploads can run several at once — 4 concurrent is a reasonable
   // middle ground between actually speeding this up and not hammering
-  // Firebase Storage or a slow connection with too much at once.
+  // Google Drive or a slow connection with too much at once.
   const photoTasks = [];
   for (const entry of allEntries) {
     getEntryPhotos(entry).slice(0, MAX_PHOTO_COLS).forEach((dataUrl, colIdx) => photoTasks.push({ entry, colIdx, dataUrl, url: null }));
   }
   let uploadedSoFar = 0;
+  const folderId = photoTasks.length ? await ensureDrivePhotosFolder() : null;
   await mapWithConcurrency(photoTasks, 4, async (task) => {
     try {
-      task.url = await ensurePhotoUploaded(task.entry, task.dataUrl);
+      task.url = await ensurePhotoUploaded(task.entry, task.dataUrl, folderId);
     } catch (e) {
       task.url = null; // one bad/slow photo shouldn't fail the whole export
     }
@@ -4448,7 +4491,7 @@ document.getElementById("btn-sheets-export").addEventListener("click", async () 
 // Attachment/entry records carry a base64 photo, which is compressed on
 // capture (900px, quality 0.72) and normally stays well under that — but an
 // unusually large photo could occasionally fail to sync even though it still
-// saved fine locally. (Firebase Storage is now used for photos too, but only
+// saved fine locally. (Google Drive is now used for photos too, but only
 // as a byproduct of the Sheets export — see ensurePhotoUploaded/
 // writeAttachmentsSheet — entries themselves still sync via Firestore as
 // base64, same as before.)
