@@ -3194,6 +3194,7 @@ function computeTaskAnalytics(mission) {
   });
 }
 
+let scoreTrendOutsideClickWired = false;
 function renderScoreTrendChart() {
   const container = document.getElementById("analysis-trend-body");
   const completed = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
@@ -3239,12 +3240,23 @@ function renderScoreTrendChart() {
       const run = completed[i];
       const timeStr = run.totalTimeMs != null ? fmtDuration(run.totalTimeMs) : null;
       tooltip.innerHTML = `<strong>${esc(run.label)}</strong><br>${scores[i]} pts${timeStr ? ` &middot; ${timeStr}` : ""}`;
-      tooltip.style.left = `${(parseFloat(circle.getAttribute("cx")) / W) * 100}%`;
-      tooltip.style.top = `${(parseFloat(circle.getAttribute("cy")) / H) * 100}%`;
+      // Clamped so a dot near an edge (e.g. the last point) can't push the
+      // tooltip past the container bounds — that overflow was what made the
+      // page grow/scroll when the last dot was clicked.
+      const leftPct = Math.min(88, Math.max(12, (parseFloat(circle.getAttribute("cx")) / W) * 100));
+      const topPct = Math.min(90, Math.max(12, (parseFloat(circle.getAttribute("cy")) / H) * 100));
+      tooltip.style.left = `${leftPct}%`;
+      tooltip.style.top = `${topPct}%`;
       tooltip.hidden = false;
     });
   });
-  document.addEventListener("click", () => { tooltip.hidden = true; }, { once: true });
+  if (!scoreTrendOutsideClickWired) {
+    scoreTrendOutsideClickWired = true;
+    document.addEventListener("click", () => {
+      const t = document.getElementById("trend-tooltip");
+      if (t) t.hidden = true;
+    });
+  }
 }
 
 // Same red-yellow-green palette as the XLSX export's conditional formatting,
@@ -3978,6 +3990,20 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
   const lastFlagCol = firstFlagCol + Math.max(completedRuns.length, 1) - 1;
   const successCol = lastFlagCol + 1;
 
+  // Everything from the run columns onward shifts left/right depending on
+  // how many runs are completed — so a *previous* export with more runs
+  // than this one leaves stale formatting (e.g. the red-filled overall
+  // average cell) sitting out past where this export's data now ends,
+  // never cleared, looking like a fixed cell that's "always" red. Wipe a
+  // generous swath of row 1 first so nothing lingers from an earlier run.
+  await sheetsBatchUpdate(spreadsheetId, [
+    { repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: firstFlagCol - 1, endColumnIndex: firstFlagCol - 1 + 100 },
+        cell: {},
+        fields: "userEnteredValue,userEnteredFormat",
+    } },
+  ]);
+
   // Clear any conditional formatting rules already on this sheet before
   // adding fresh ones — otherwise repeated exports pile up overlapping (and
   // possibly stale/conflicting, from earlier iterations) rules instead of
@@ -3991,22 +4017,23 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
     })));
   }
 
-  const header = ["M#", "Official Name", "Task", "Pts", "Name", "#", ...completedRuns.map(() => ""), "Success Rate"];
+  const header = ["Run #", "Name", "M#", "Official Name", "Task", "Pts", ...completedRuns.map(() => ""), "Success Rate"];
   const dataRows = rowDefs.map((row, i) => {
     const rowNum = i + 2;
     const flags = completedRuns.map((r) => (row.flagged(r) ? 1 : ""));
     const successFormula = completedRuns.length
       ? `=SUM(${colLetter(firstFlagCol)}${rowNum}:${colLetter(lastFlagCol)}${rowNum})/${completedRuns.length}`
       : "";
-    return [row.mission.number ?? "", row.mission.name, row.notes, row.pts, row.runName, row.runNum, ...flags, successFormula];
+    return [row.runNum, row.runName, row.mission.number ?? "", row.mission.name, row.notes, row.pts, ...flags, successFormula];
   });
   await sheetsValuesUpdate(spreadsheetId, `'Score Data'!A1`, [header, ...dataRows]);
   const lastTaskRow = rowDefs.length + 1;
+  const ptsCol = 6; // 1-indexed column F — matches the reordered header above
   // Header formula per run — same SUMPRODUCT the XLSX export uses.
   if (completedRuns.length) {
     const headerFormulas = completedRuns.map((r, i) => {
       const col = firstFlagCol + i;
-      return [{ userEnteredValue: { formulaValue: `=SUMPRODUCT($D2:$D${lastTaskRow},${colLetter(col)}2:${colLetter(col)}${lastTaskRow})` } }];
+      return [{ userEnteredValue: { formulaValue: `=SUMPRODUCT($${colLetter(ptsCol)}2:$${colLetter(ptsCol)}${lastTaskRow},${colLetter(col)}2:${colLetter(col)}${lastTaskRow})` } }];
     });
     await sheetsBatchUpdate(spreadsheetId, headerFormulas.map((cellData, i) => ({
       updateCells: {
@@ -4041,7 +4068,7 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
         rule: {
           ranges: [{ sheetId, startRowIndex: 1, endRowIndex: lastTaskRow, startColumnIndex: 0, endColumnIndex: successCol - 1 }],
           booleanRule: {
-            condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: "=ISODD($F2)" }] },
+            condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: "=ISODD($A2)" }] },
             format: { backgroundColor: { red: 0.812, green: 0.886, blue: 0.953 } },
           },
         },
@@ -4058,14 +4085,13 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
         },
         index: 1,
     } },
-    // Overall average success rate — matches the reference template's T1
-    // cell exactly (two columns right of Success Rate, red fill/yellow text).
+    // Overall average success rate — a red bold number like the per-run
+    // total cells above, not a solid-red-filled cell.
     { updateCells: {
         rows: [{ values: [{
           userEnteredValue: { formulaValue: `=AVERAGE(${colLetter(successCol)}2:${colLetter(successCol)}${lastTaskRow})` },
           userEnteredFormat: {
-            backgroundColor: { red: 1, green: 0, blue: 0 },
-            textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 0 } },
+            textFormat: { bold: true, foregroundColor: { red: 1, green: 0, blue: 0 } },
             numberFormat: { type: "PERCENT", pattern: "0%" },
           },
         }] }],
@@ -4073,18 +4099,18 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
         start: { sheetId, rowIndex: 0, columnIndex: successCol + 1 },
     } },
     // Narrow columns that only ever hold a short number — text columns
-    // (Official Name, Task, Name) keep their default/wider width.
+    // (Name, Official Name, Task) keep their default/wider width.
     { updateDimensionProperties: {
-        range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 1 }, // M#
+        range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 1 }, // Run #
+        properties: { pixelSize: 35 }, fields: "pixelSize",
+    } },
+    { updateDimensionProperties: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: 2, endIndex: 3 }, // M#
         properties: { pixelSize: 40 }, fields: "pixelSize",
     } },
     { updateDimensionProperties: {
-        range: { sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: 4 }, // Pts
+        range: { sheetId, dimension: "COLUMNS", startIndex: 5, endIndex: 6 }, // Pts
         properties: { pixelSize: 45 }, fields: "pixelSize",
-    } },
-    { updateDimensionProperties: {
-        range: { sheetId, dimension: "COLUMNS", startIndex: 5, endIndex: 6 }, // #
-        properties: { pixelSize: 35 }, fields: "pixelSize",
     } },
     { updateDimensionProperties: {
         range: { sheetId, dimension: "COLUMNS", startIndex: firstFlagCol - 1, endIndex: lastFlagCol }, // run flag columns
@@ -4094,9 +4120,9 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
         range: { sheetId, dimension: "COLUMNS", startIndex: successCol - 1, endIndex: successCol }, // Success Rate
         properties: { pixelSize: 90 }, fields: "pixelSize",
     } },
-    // Auto-fit the free-text columns (Official Name, Task, Name) so nothing overflows.
-    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 3 } } },
-    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 4, endIndex: 5 } } },
+    // Auto-fit the free-text columns (Name, Official Name, Task) so nothing overflows.
+    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 2 } } },
+    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: 5 } } },
   ]);
 }
 
@@ -4168,12 +4194,13 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
         cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: "0%" } } },
         fields: "userEnteredFormat.numberFormat",
     } },
-    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 2 } } },
   ]);
 
   // Three charts in a row at the top, each a fixed size so they line up
-  // evenly regardless of how much data feeds them.
-  const CHART_WIDTH = 360, CHART_HEIGHT = 250, CHART_GAP_COLS = 4;
+  // evenly regardless of how much data feeds them. 5 columns apart, per your
+  // spacing preference; columns A/B are deliberately left at their default
+  // width (no auto-fit) rather than being resized to the data beneath them.
+  const CHART_WIDTH = 360, CHART_HEIGHT = 250, CHART_GAP_COLS = 5;
 
   // Sheets charts can't gradient-color bars by value the way conditional
   // formatting colors cells, so the Success Rate chart fakes it: each run
@@ -4353,7 +4380,7 @@ async function mapWithConcurrency(items, limit, fn) {
 async function writeAttachmentsSheet(spreadsheetId, sheetId, onProgress) {
   const attById = Object.fromEntries(state.attachments.map((a) => [a.id, a]));
   const allEntries = (await dbGetAll("entries")).filter((e) => !e.deleted && attById[e.attachmentId]);
-  allEntries.sort((a, b) => (attById[a.attachmentId].order ?? 0) - (attById[b.attachmentId].order ?? 0) || (a.timestamp || 0) - (b.timestamp || 0));
+  allEntries.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)); // newest first
   const sizeLabel = { small: "Small change", moderate: "Moderate change", major: "Major change" };
   const MAX_PHOTO_COLS = 3;
   const header = ["Attachment", "Date", "Size", "What Changed", "Why Changed", ...Array.from({ length: MAX_PHOTO_COLS }, (_, i) => `Photo ${i + 1}`)];
@@ -4410,9 +4437,28 @@ async function writeAttachmentsSheet(spreadsheetId, sheetId, onProgress) {
         range: { sheetId, dimension: "COLUMNS", startIndex: 5, endIndex: 5 + MAX_PHOTO_COLS },
         properties: { pixelSize: 130 }, fields: "pixelSize",
     } },
-    // Auto-fit the text columns (Attachment/Date/Size/What/Why) — photo
-    // columns are left at their fixed 130px so the 120px images stay put.
-    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 5 } } },
+    { updateDimensionProperties: {
+        range: { sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: 5 }, // What Changed, Why Changed
+        properties: { pixelSize: 160 }, fields: "pixelSize",
+    } },
+    // Auto-fit just Attachment/Date/Size — What/Why get a fixed width above
+    // instead (auto-fitting them to their full text made those two columns
+    // huge and crowded the photos out).
+    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 3 } } },
+    // Wrap + top-align everything: without this, long What/Why notes either
+    // got visually clipped or ran through neighboring cells, and the header
+    // row's own text (e.g. "Attachment") could get cut off the same way.
+    { repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: rows.length + 1, startColumnIndex: 0, endColumnIndex: 5 + MAX_PHOTO_COLS },
+        cell: { userEnteredFormat: { wrapStrategy: "WRAP", verticalAlignment: "TOP" } },
+        fields: "userEnteredFormat(wrapStrategy,verticalAlignment)",
+    } },
+    // A basic filter turns the header row into sort/filter dropdowns —
+    // click "Attachment" to filter down to specific attachments, click any
+    // column to sort by it, all directly in Sheets.
+    { setBasicFilter: {
+        filter: { range: { sheetId, startRowIndex: 0, endRowIndex: rows.length + 1, startColumnIndex: 0, endColumnIndex: 5 + MAX_PHOTO_COLS } },
+    } },
   ]);
 }
 
