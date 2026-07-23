@@ -4268,6 +4268,17 @@ async function sha256Hex(str) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+// Neither uploadBytes nor getDownloadURL has a built-in timeout — on a flaky
+// connection (very plausible at a practice space) the request can just sit
+// there pending forever with no error and no progress, which is exactly
+// what looked like the export being "stuck." This forces it to give up on
+// a single photo after 20s instead of hanging the whole export.
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)),
+  ]);
+}
 async function ensurePhotoUploaded(entry, photoDataUrl) {
   const hash = await sha256Hex(photoDataUrl);
   entry.uploadedPhotoUrls = entry.uploadedPhotoUrls || {};
@@ -4276,8 +4287,8 @@ async function ensurePhotoUploaded(entry, photoDataUrl) {
   const blob = await (await fetch(photoDataUrl)).blob();
   const path = `entryPhotos/${entry.attachmentId}/${hash}.jpg`;
   const storageRef = window.firebaseFns.storageRef(window.firebaseStorage, path);
-  await window.firebaseFns.uploadBytes(storageRef, blob, { contentType: blob.type || "image/jpeg" });
-  const url = await window.firebaseFns.getDownloadURL(storageRef);
+  await withTimeout(window.firebaseFns.uploadBytes(storageRef, blob, { contentType: blob.type || "image/jpeg" }), 20000, "Photo upload");
+  const url = await withTimeout(window.firebaseFns.getDownloadURL(storageRef), 20000, "Getting photo URL");
   entry.uploadedPhotoUrls[hash] = url;
   await dbPut("entries", entry); // cache so future exports skip re-uploading this photo
   return url;
