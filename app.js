@@ -287,34 +287,25 @@ function getEntryPhotos(entry) {
   if (entry.photo) return [entry.photo];
   return [];
 }
-// Base Robot used to store a single .photo; now it's .photos (an array, so
-// the carousel can hold more than one picture) — same normalization pattern.
 // Base Robot's port map: 6 physical ports (A-F), each assignable to one of
 // these. Only 4 motor slots exist in hardware (2 drive + 2 attachment), so
 // each motor type can only be assigned to one port at a time; sensors have
 // no such limit (e.g. two color sensors is fine).
 const BASE_ROBOT_MOTOR_TYPES = [
-  { id: "leftDrive", label: "Left Drive Motor" },
-  { id: "rightDrive", label: "Right Drive Motor" },
-  { id: "leftAttachment", label: "Left Attachment Motor" },
-  { id: "rightAttachment", label: "Right Attachment Motor" },
+  { id: "leftDrive", label: "Left Drive Motor", short: "L Drive" },
+  { id: "rightDrive", label: "Right Drive Motor", short: "R Drive" },
+  { id: "leftAttachment", label: "Left Attachment Motor", short: "L Att." },
+  { id: "rightAttachment", label: "Right Attachment Motor", short: "R Att." },
 ];
 const BASE_ROBOT_SENSOR_TYPES = [
-  { id: "color", label: "Color Sensor" },
-  { id: "force", label: "Force Sensor" },
-  { id: "distance", label: "Distance Sensor" },
+  { id: "color", label: "Color Sensor", short: "Color" },
+  { id: "force", label: "Force Sensor", short: "Force" },
+  { id: "distance", label: "Distance Sensor", short: "Dist." },
 ];
-const BASE_ROBOT_PORTS = ["A", "B", "C", "D", "E", "F"];
-function baseRobotPortTypeLabel(id) {
-  return (BASE_ROBOT_MOTOR_TYPES.find((t) => t.id === id) || BASE_ROBOT_SENSOR_TYPES.find((t) => t.id === id) || {}).label || "";
+function baseRobotPortType(id) {
+  return BASE_ROBOT_MOTOR_TYPES.find((t) => t.id === id) || BASE_ROBOT_SENSOR_TYPES.find((t) => t.id === id) || null;
 }
 
-function getBaseRobotPhotos(att) {
-  if (!att) return [];
-  if (Array.isArray(att.photos)) return att.photos.filter(Boolean);
-  if (att.photo) return [att.photo];
-  return [];
-}
 function esc(str) {
   return String(str ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -703,24 +694,39 @@ async function renderEntryList() {
 
 // ---- Attachment management (Setup tab) ----
 document.getElementById("btn-record-iteration").addEventListener("click", () => openRecordIterationModal());
-document.getElementById("base-robot-photo-input").addEventListener("change", async (e) => {
-  const files = Array.from(e.target.files || []);
-  e.target.value = "";
-  if (!files.length) return;
-  const baseRobot = state.attachments.find((a) => a.isBaseRobot);
-  if (!baseRobot) return;
-  const photos = getBaseRobotPhotos(baseRobot);
-  for (const file of files) photos.push(await resizeImageToDataURL(file, 900, 0.72));
-  baseRobot.photos = photos;
-  delete baseRobot.photo; // fully migrated to the array now that we've written it
-  await dbPut("attachments", baseRobot);
-  await loadAttachments();
-  syncToTeamDrive();
-});
+
+function openPortPickerModal(baseRobot, port) {
+  const ports = baseRobot.ports || {};
+  openModal(`
+    <h2>Port ${port}</h2>
+    <div class="iter-attachment-grid">
+      <button type="button" class="iter-attachment-btn${!ports[port] ? " active" : ""}" data-val="">Unassigned</button>
+      ${BASE_ROBOT_MOTOR_TYPES.map((t) => `<button type="button" class="iter-attachment-btn${ports[port] === t.id ? " active" : ""}" data-val="${t.id}">${t.label}</button>`).join("")}
+      ${BASE_ROBOT_SENSOR_TYPES.map((t) => `<button type="button" class="iter-attachment-btn${ports[port] === t.id ? " active" : ""}" data-val="${t.id}">${t.label}</button>`).join("")}
+    </div>
+    <div class="modal-actions"><button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button></div>
+  `);
+  document.getElementById("m-cancel").addEventListener("click", closeModal);
+  document.querySelectorAll(".iter-attachment-grid .iter-attachment-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const newVal = btn.dataset.val;
+      const isMotor = BASE_ROBOT_MOTOR_TYPES.some((t) => t.id === newVal);
+      if (isMotor) {
+        const conflictPort = Object.keys(ports).find((p) => p !== port && ports[p] === newVal);
+        if (conflictPort) { alert(`${baseRobotPortType(newVal).label} is already assigned to Port ${conflictPort}.`); return; }
+      }
+      if (newVal) ports[port] = newVal; else delete ports[port];
+      baseRobot.ports = ports;
+      await dbPut("attachments", baseRobot);
+      closeModal();
+      renderAttachmentsSetup();
+      syncToTeamDrive();
+    });
+  });
+}
 
 function renderAttachmentsSetup() {
   const list = document.getElementById("attachment-setup-list");
-  const photoArea = document.getElementById("base-robot-photo-area");
   const editing = state.editingAttachmentOrder;
   renderAttachmentOrderToolbar();
 
@@ -728,78 +734,48 @@ function renderAttachmentsSetup() {
   const realAttachments = state.attachments.filter((a) => !a.isBaseRobot);
 
   (async () => {
-    // Base Robot: a small horizontally-scrolling photo carousel — no
-    // name/edit/count clutter, and its name is fixed and can't be changed
-    // from here. Supports multiple photos, each individually removable.
-    if (photoArea) {
-      const photos = getBaseRobotPhotos(baseRobot);
-      photoArea.innerHTML = `
-        <div class="base-robot-carousel">
-          ${photos.map((src, i) => `
-            <div class="base-robot-photo-item">
-              <img src="${src}" alt="Base Robot">
-              <button type="button" class="base-robot-photo-remove" data-idx="${i}" title="Remove">&#10005;</button>
-            </div>
-          `).join("")}
-          <button type="button" class="base-robot-photo-add" id="base-robot-photo-add-btn" title="Add photo">+</button>
-        </div>
-      `;
-      photoArea.querySelectorAll(".base-robot-photo-remove").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const idx = Number(btn.dataset.idx);
-          const current = getBaseRobotPhotos(baseRobot);
-          current.splice(idx, 1);
-          baseRobot.photos = current;
-          delete baseRobot.photo;
-          await dbPut("attachments", baseRobot);
-          await loadAttachments();
-          syncToTeamDrive();
-        });
-      });
-      document.getElementById("base-robot-photo-add-btn").addEventListener("click", () => document.getElementById("base-robot-photo-input").click());
-    }
-
     const infoArea = document.getElementById("base-robot-info");
     if (infoArea && baseRobot) {
       const count = await iterationCount(baseRobot.id);
       const ports = baseRobot.ports || {};
+      const LEFT_PORTS = [{ id: "A", y: 40 }, { id: "B", y: 72 }, { id: "C", y: 104 }];
+      const RIGHT_PORTS = [{ id: "D", y: 40 }, { id: "E", y: 72 }, { id: "F", y: 104 }];
+      const portGroup = (p, side) => {
+        const cx = side === "left" ? 35 : 185;
+        const letterX = side === "left" ? 45 : 195;
+        const labelX = side === "left" ? 30 : 210;
+        const type = baseRobotPortType(ports[p.id]);
+        return `
+          <g class="port-hit${type ? " assigned" : ""}" data-port="${p.id}">
+            <rect class="port-connector" x="${cx}" y="${p.y}" width="20" height="16" rx="3"></rect>
+            <text class="port-letter" x="${letterX}" y="${p.y + 11}" text-anchor="middle">${p.id}</text>
+            <text class="port-type-label" x="${labelX}" y="${p.y + 11}" text-anchor="${side === "left" ? "end" : "start"}">${type ? esc(type.short) : "&mdash;"}</text>
+          </g>
+        `;
+      };
+      // A top-down schematic of the hub, loosely modeled on the SPIKE Prime
+      // Hub's layout — 3 ports down the left edge, 3 down the right — so you
+      // can see at a glance which physical port maps to which function. Tap
+      // any port to change it.
       infoArea.innerHTML = `
-        <p class="empty-sub" style="margin:0 0 10px;">${count} iteration${count === 1 ? "" : "s"} logged</p>
-        <div class="port-map">
-          ${BASE_ROBOT_PORTS.map((port) => `
-            <div class="port-row">
-              <span class="port-label">Port ${port}</span>
-              <select class="text-input port-select" data-port="${port}">
-                <option value="">&mdash; Unassigned &mdash;</option>
-                <optgroup label="Motors">
-                  ${BASE_ROBOT_MOTOR_TYPES.map((t) => `<option value="${t.id}" ${ports[port] === t.id ? "selected" : ""}>${t.label}</option>`).join("")}
-                </optgroup>
-                <optgroup label="Sensors">
-                  ${BASE_ROBOT_SENSOR_TYPES.map((t) => `<option value="${t.id}" ${ports[port] === t.id ? "selected" : ""}>${t.label}</option>`).join("")}
-                </optgroup>
-              </select>
-            </div>
-          `).join("")}
+        <p class="empty-sub" style="margin:0 0 8px;">${count} iteration${count === 1 ? "" : "s"} logged</p>
+        <div class="port-diagram-wrap">
+          <svg viewBox="0 0 240 160" class="port-diagram">
+            <rect class="hub-body" x="55" y="15" width="130" height="130" rx="24"></rect>
+            <circle class="hub-bolt" cx="75" cy="35" r="4"></circle>
+            <circle class="hub-bolt" cx="165" cy="35" r="4"></circle>
+            <circle class="hub-bolt" cx="75" cy="125" r="4"></circle>
+            <circle class="hub-bolt" cx="165" cy="125" r="4"></circle>
+            <rect class="hub-screen" x="95" y="42" width="50" height="26" rx="3"></rect>
+            <circle class="hub-btn" cx="150" cy="90" r="8"></circle>
+            <circle class="hub-speaker" cx="90" cy="90" r="7"></circle>
+            ${LEFT_PORTS.map((p) => portGroup(p, "left")).join("")}
+            ${RIGHT_PORTS.map((p) => portGroup(p, "right")).join("")}
+          </svg>
         </div>
       `;
-      infoArea.querySelectorAll(".port-select").forEach((sel) => {
-        sel.addEventListener("change", async () => {
-          const port = sel.dataset.port;
-          const newVal = sel.value;
-          const isMotor = BASE_ROBOT_MOTOR_TYPES.some((t) => t.id === newVal);
-          if (isMotor) {
-            const conflictPort = Object.keys(ports).find((p) => p !== port && ports[p] === newVal);
-            if (conflictPort) {
-              alert(`${baseRobotPortTypeLabel(newVal)} is already assigned to Port ${conflictPort}.`);
-              sel.value = ports[port] || "";
-              return;
-            }
-          }
-          if (newVal) ports[port] = newVal; else delete ports[port];
-          baseRobot.ports = ports;
-          await dbPut("attachments", baseRobot);
-          syncToTeamDrive();
-        });
+      infoArea.querySelectorAll(".port-hit").forEach((el) => {
+        el.addEventListener("click", () => openPortPickerModal(baseRobot, el.dataset.port));
       });
     }
 
@@ -3827,6 +3803,26 @@ function renderAdminSheetsVisibility() {
   if (!section) return;
   const isAdmin = state.firebaseUser && state.firebaseUser.email === ADMIN_EMAIL;
   section.hidden = !isAdmin;
+  renderSheetsConnectStatus();
+}
+// The access token itself used to live only in memory, so every reload —
+// even seconds after connecting — forced clicking "Connect" again, unlike
+// Team Sync which resumes automatically via Firebase's own persisted
+// session. Access tokens are inherently short-lived (~1hr) and can't be
+// silently refreshed the way Firebase's own sign-in is, but persisting it
+// means a reload *within* that hour reconnects automatically instead of
+// asking you to click through the popup again for no reason.
+async function loadStoredSheetsToken() {
+  const rec = await dbGet("meta", "sheetsAccessToken");
+  return rec?.value || null;
+}
+function renderSheetsConnectStatus() {
+  const statusEl = document.getElementById("sheets-connect-status");
+  const connectBtn = document.getElementById("btn-sheets-connect");
+  if (!statusEl || !connectBtn) return;
+  const connected = state.sheets.accessToken && Date.now() < state.sheets.tokenExpiresAt;
+  statusEl.textContent = connected ? "Connected." : "Not connected.";
+  connectBtn.textContent = connected ? "Reconnect Google Sheets" : "Connect Google Sheets";
 }
 
 async function sheetsFetch(path, options = {}) {
@@ -3894,7 +3890,8 @@ document.getElementById("btn-sheets-connect").addEventListener("click", async ()
     const credential = window.firebaseFns.GoogleAuthProvider.credentialFromResult(result);
     state.sheets.accessToken = credential.accessToken;
     state.sheets.tokenExpiresAt = Date.now() + 55 * 60 * 1000; // Google access tokens run ~1hr; refresh a bit early
-    document.getElementById("sheets-connect-status").textContent = "Connected.";
+    await dbPut("meta", { key: "sheetsAccessToken", value: { accessToken: state.sheets.accessToken, tokenExpiresAt: state.sheets.tokenExpiresAt } });
+    renderSheetsConnectStatus();
     let spreadsheetId = await loadStoredSheetsFileId();
     if (!spreadsheetId) {
       document.getElementById("sheets-file-status").hidden = false;
@@ -4293,6 +4290,24 @@ async function ensurePhotoUploaded(entry, photoDataUrl) {
   await dbPut("entries", entry); // cache so future exports skip re-uploading this photo
   return url;
 }
+// Runs async work over `items` with at most `limit` running at once —
+// used to upload several photos in parallel instead of one dead-strict
+// await-per-photo loop, which is almost certainly why the export was
+// taking ~1 photo/minute: each upload's real network time was probably a
+// few seconds, but doing them one at a time serializes all of that latency
+// instead of overlapping it.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const i = nextIndex++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
 async function writeAttachmentsSheet(spreadsheetId, sheetId, onProgress) {
   const attById = Object.fromEntries(state.attachments.map((a) => [a.id, a]));
   const allEntries = (await dbGetAll("entries")).filter((e) => !e.deleted && attById[e.attachmentId]);
@@ -4300,30 +4315,43 @@ async function writeAttachmentsSheet(spreadsheetId, sheetId, onProgress) {
   const sizeLabel = { small: "Small change", moderate: "Moderate change", major: "Major change" };
   const MAX_PHOTO_COLS = 3;
   const header = ["Attachment", "Date", "Size", "What Changed", "Why Changed", ...Array.from({ length: MAX_PHOTO_COLS }, (_, i) => `Photo ${i + 1}`)];
-  const rows = [];
-  for (let i = 0; i < allEntries.length; i++) {
-    const entry = allEntries[i];
-    if (onProgress) onProgress(i + 1, allEntries.length);
-    const photos = getEntryPhotos(entry).slice(0, MAX_PHOTO_COLS);
-    const photoCells = [];
-    for (const p of photos) {
-      try {
-        const url = await ensurePhotoUploaded(entry, p);
-        photoCells.push(`=IMAGE("${url}",4,120,120)`);
-      } catch (e) {
-        photoCells.push(""); // one bad photo shouldn't fail the whole export
-      }
+
+  // Flatten every (entry, photo) pair across the whole export into one list
+  // so uploads can run several at once — 4 concurrent is a reasonable
+  // middle ground between actually speeding this up and not hammering
+  // Firebase Storage or a slow connection with too much at once.
+  const photoTasks = [];
+  for (const entry of allEntries) {
+    getEntryPhotos(entry).slice(0, MAX_PHOTO_COLS).forEach((dataUrl, colIdx) => photoTasks.push({ entry, colIdx, dataUrl, url: null }));
+  }
+  let uploadedSoFar = 0;
+  await mapWithConcurrency(photoTasks, 4, async (task) => {
+    try {
+      task.url = await ensurePhotoUploaded(task.entry, task.dataUrl);
+    } catch (e) {
+      task.url = null; // one bad/slow photo shouldn't fail the whole export
     }
-    while (photoCells.length < MAX_PHOTO_COLS) photoCells.push("");
-    rows.push([
+    uploadedSoFar++;
+    if (onProgress) onProgress(uploadedSoFar, photoTasks.length);
+  });
+
+  const urlsByEntry = new Map();
+  for (const t of photoTasks) {
+    if (!urlsByEntry.has(t.entry)) urlsByEntry.set(t.entry, []);
+    urlsByEntry.get(t.entry)[t.colIdx] = t.url;
+  }
+  const rows = allEntries.map((entry) => {
+    const urls = urlsByEntry.get(entry) || [];
+    const photoCells = Array.from({ length: MAX_PHOTO_COLS }, (_, i) => (urls[i] ? `=IMAGE("${urls[i]}",4,120,120)` : ""));
+    return [
       attById[entry.attachmentId].name,
       new Date(entry.timestamp || 0).toLocaleDateString(),
       sizeLabel[entry.size] || "",
       entry.whatChanged || "",
       entry.whyChanged || "",
       ...photoCells,
-    ]);
-  }
+    ];
+  });
   await sheetsValuesUpdate(spreadsheetId, `'Attachments'!A1`, [header, ...rows]);
   await sheetsBatchUpdate(spreadsheetId, [
     { repeatCell: {
@@ -4332,7 +4360,7 @@ async function writeAttachmentsSheet(spreadsheetId, sheetId, onProgress) {
         fields: "userEnteredFormat.textFormat",
     } },
     { updateDimensionProperties: {
-        range: { sheetId, dimension: "ROWS", startRowIndex: 1, endRowIndex: rows.length + 1 },
+        range: { sheetId, dimension: "ROWS", startIndex: 1, endIndex: rows.length + 1 },
         properties: { pixelSize: 130 }, fields: "pixelSize", // tall enough for the 120px images
     } },
     { updateDimensionProperties: {
@@ -4358,12 +4386,33 @@ async function ensureSheetsExist(spreadsheetId) {
   }
   return existing;
 }
+// Mobile browsers heavily throttle (or fully suspend) JS once the screen
+// turns off — almost certainly why uploads stopped making progress. The
+// Wake Lock API keeps the screen on for the duration of the export so that
+// doesn't happen. Feature-detected: on a browser without support (e.g.
+// older iOS Safari) this silently does nothing rather than erroring, so the
+// export still runs — just vulnerable to the screen timing out again.
+let sheetsExportWakeLock = null;
+async function acquireExportWakeLock() {
+  try {
+    if ("wakeLock" in navigator) sheetsExportWakeLock = await navigator.wakeLock.request("screen");
+  } catch (e) { /* not supported/permitted — export still runs, just without this protection */ }
+}
+function releaseExportWakeLock() {
+  if (sheetsExportWakeLock) { sheetsExportWakeLock.release().catch(() => {}); sheetsExportWakeLock = null; }
+}
+let sheetsExportInProgress = false;
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && sheetsExportInProgress && !sheetsExportWakeLock) acquireExportWakeLock();
+});
 document.getElementById("btn-sheets-export").addEventListener("click", async () => {
   const spreadsheetId = state.sheets.spreadsheetId;
   if (!spreadsheetId) { showErrorBanner("Connect Google Sheets first."); return; }
   const statusEl = document.getElementById("sheets-export-status");
   const btn = document.getElementById("btn-sheets-export");
   btn.disabled = true;
+  sheetsExportInProgress = true;
+  await acquireExportWakeLock();
   try {
     statusEl.textContent = "Setting up sheets…";
     const sheetIds = await ensureSheetsExist(spreadsheetId);
@@ -4383,6 +4432,8 @@ document.getElementById("btn-sheets-export").addEventListener("click", async () 
     showErrorBanner(`Sheets export failed: ${e.message}`);
   } finally {
     btn.disabled = false;
+    sheetsExportInProgress = false;
+    releaseExportWakeLock();
   }
 });
 
@@ -4546,8 +4597,14 @@ async function initAll() {
   await loadInteractiveScoringSetting();
   await loadInteractiveIterationsSetting();
   state.sheets.spreadsheetId = await loadStoredSheetsFileId();
+  const storedToken = await loadStoredSheetsToken();
+  if (storedToken && storedToken.tokenExpiresAt > Date.now()) {
+    state.sheets.accessToken = storedToken.accessToken;
+    state.sheets.tokenExpiresAt = storedToken.tokenExpiresAt;
+  }
   renderGoogleSignInStatus();
   renderSheetsFileStatus();
+  renderSheetsConnectStatus();
   document.getElementById("log-empty-state").hidden = state.attachments.length === 0 ? false : true;
 }
 initAll();

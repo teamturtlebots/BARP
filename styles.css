@@ -203,28 +203,20 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 
 /* Mission editor list */
 .mission-list { display: flex; flex-direction: column; gap: 8px; }
-.base-robot-carousel {
-  display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; margin-bottom: 6px;
-}
-.base-robot-photo-item { position: relative; flex: none; }
-.base-robot-photo-item img {
-  width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); display: block;
-}
-.base-robot-photo-remove {
-  position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 50%;
-  background: var(--ink-deep); color: var(--paper); border: none; font-size: 0.65rem;
-  display: flex; align-items: center; justify-content: center; cursor: pointer; line-height: 1;
-}
-.base-robot-photo-add {
-  flex: none; width: 72px; height: 72px; border-radius: 8px; border: 1.5px dashed var(--line);
-  background: var(--paper-2); color: var(--text-soft); font-size: 1.4rem; font-weight: 600;
-  display: flex; align-items: center; justify-content: center; cursor: pointer;
-}
 .base-robot-info { margin-bottom: 6px; }
-.port-map { display: flex; flex-direction: column; gap: 6px; }
-.port-row { display: flex; align-items: center; gap: 10px; }
-.port-label { flex: none; width: 56px; font-weight: 700; font-size: 0.82rem; color: var(--ink-deep); }
-.port-select { flex: 1; padding: 6px 8px; font-size: 0.82rem; }
+.port-diagram-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
+.port-diagram { width: 100%; max-width: 220px; height: auto; }
+.hub-body { fill: var(--paper-2); stroke: var(--line); stroke-width: 2; }
+.hub-bolt { fill: var(--line); }
+.hub-screen { fill: var(--ink-deep); }
+.hub-btn { fill: var(--amber); }
+.hub-speaker { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.port-hit { cursor: pointer; }
+.port-connector { fill: var(--paper); stroke: var(--ink-deep); stroke-width: 1.5; }
+.port-hit.assigned .port-connector { fill: var(--moss); stroke: var(--moss); }
+.port-letter { font: 700 9px var(--body); fill: var(--ink-deep); }
+.port-hit.assigned .port-letter { fill: var(--paper); }
+.port-type-label { font: 600 7px var(--body); fill: var(--text-soft); }
 .mission-row {
   background: var(--paper-2);
   border: 1px solid var(--line);
