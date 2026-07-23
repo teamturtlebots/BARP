@@ -1,5 +1,5 @@
 // Bump this when you change any cached file so phones pick up the update.
-const CACHE_NAME = "barp-v36";
+const CACHE_NAME = "barp-v37";
 const ASSETS = [
   "./",
   "./index.html",

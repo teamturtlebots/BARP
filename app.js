@@ -289,6 +289,26 @@ function getEntryPhotos(entry) {
 }
 // Base Robot used to store a single .photo; now it's .photos (an array, so
 // the carousel can hold more than one picture) — same normalization pattern.
+// Base Robot's port map: 6 physical ports (A-F), each assignable to one of
+// these. Only 4 motor slots exist in hardware (2 drive + 2 attachment), so
+// each motor type can only be assigned to one port at a time; sensors have
+// no such limit (e.g. two color sensors is fine).
+const BASE_ROBOT_MOTOR_TYPES = [
+  { id: "leftDrive", label: "Left Drive Motor" },
+  { id: "rightDrive", label: "Right Drive Motor" },
+  { id: "leftAttachment", label: "Left Attachment Motor" },
+  { id: "rightAttachment", label: "Right Attachment Motor" },
+];
+const BASE_ROBOT_SENSOR_TYPES = [
+  { id: "color", label: "Color Sensor" },
+  { id: "force", label: "Force Sensor" },
+  { id: "distance", label: "Distance Sensor" },
+];
+const BASE_ROBOT_PORTS = ["A", "B", "C", "D", "E", "F"];
+function baseRobotPortTypeLabel(id) {
+  return (BASE_ROBOT_MOTOR_TYPES.find((t) => t.id === id) || BASE_ROBOT_SENSOR_TYPES.find((t) => t.id === id) || {}).label || "";
+}
+
 function getBaseRobotPhotos(att) {
   if (!att) return [];
   if (Array.isArray(att.photos)) return att.photos.filter(Boolean);
@@ -737,6 +757,50 @@ function renderAttachmentsSetup() {
         });
       });
       document.getElementById("base-robot-photo-add-btn").addEventListener("click", () => document.getElementById("base-robot-photo-input").click());
+    }
+
+    const infoArea = document.getElementById("base-robot-info");
+    if (infoArea && baseRobot) {
+      const count = await iterationCount(baseRobot.id);
+      const ports = baseRobot.ports || {};
+      infoArea.innerHTML = `
+        <p class="empty-sub" style="margin:0 0 10px;">${count} iteration${count === 1 ? "" : "s"} logged</p>
+        <div class="port-map">
+          ${BASE_ROBOT_PORTS.map((port) => `
+            <div class="port-row">
+              <span class="port-label">Port ${port}</span>
+              <select class="text-input port-select" data-port="${port}">
+                <option value="">&mdash; Unassigned &mdash;</option>
+                <optgroup label="Motors">
+                  ${BASE_ROBOT_MOTOR_TYPES.map((t) => `<option value="${t.id}" ${ports[port] === t.id ? "selected" : ""}>${t.label}</option>`).join("")}
+                </optgroup>
+                <optgroup label="Sensors">
+                  ${BASE_ROBOT_SENSOR_TYPES.map((t) => `<option value="${t.id}" ${ports[port] === t.id ? "selected" : ""}>${t.label}</option>`).join("")}
+                </optgroup>
+              </select>
+            </div>
+          `).join("")}
+        </div>
+      `;
+      infoArea.querySelectorAll(".port-select").forEach((sel) => {
+        sel.addEventListener("change", async () => {
+          const port = sel.dataset.port;
+          const newVal = sel.value;
+          const isMotor = BASE_ROBOT_MOTOR_TYPES.some((t) => t.id === newVal);
+          if (isMotor) {
+            const conflictPort = Object.keys(ports).find((p) => p !== port && ports[p] === newVal);
+            if (conflictPort) {
+              alert(`${baseRobotPortTypeLabel(newVal)} is already assigned to Port ${conflictPort}.`);
+              sel.value = ports[port] || "";
+              return;
+            }
+          }
+          if (newVal) ports[port] = newVal; else delete ports[port];
+          baseRobot.ports = ports;
+          await dbPut("attachments", baseRobot);
+          syncToTeamDrive();
+        });
+      });
     }
 
     list.innerHTML = "";
@@ -3963,20 +4027,21 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
       },
     })));
   }
-  // Colors confirmed from the reference template: green Success Rate header,
-  // red bold run-total cells, light-blue ISODD category banding, and a
-  // fixed 0/50%/100% red-yellow-green scale on Success Rate (not
-  // percentile-based — it's a metric that's inherently bounded to 0-100%).
+  // Colors confirmed from the reference template: red bold run-total cells,
+  // light-blue ISODD category banding, and a fixed 0/50%/100% red-yellow-green
+  // scale on Success Rate (not percentile-based — it's a metric that's
+  // inherently bounded to 0-100%). The Success Rate header itself is left
+  // plain, same as every other header on this sheet.
   await sheetsBatchUpdate(spreadsheetId, [
+    { repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: successCol - 1, endColumnIndex: successCol },
+        cell: { userEnteredFormat: {} },
+        fields: "userEnteredFormat(backgroundColor,textFormat)",
+    } },
     { repeatCell: {
         range: { sheetId, startRowIndex: 1, endRowIndex: lastTaskRow, startColumnIndex: successCol - 1, endColumnIndex: successCol },
         cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: "0%" } } },
         fields: "userEnteredFormat.numberFormat",
-    } },
-    { repeatCell: {
-        range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: successCol - 1, endColumnIndex: successCol },
-        cell: { userEnteredFormat: { backgroundColor: { red: 0, green: 1, blue: 0 }, textFormat: { bold: true } } },
-        fields: "userEnteredFormat(backgroundColor,textFormat)",
     } },
     { repeatCell: {
         range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: firstFlagCol - 1, endColumnIndex: lastFlagCol },

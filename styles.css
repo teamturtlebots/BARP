@@ -220,6 +220,11 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   background: var(--paper-2); color: var(--text-soft); font-size: 1.4rem; font-weight: 600;
   display: flex; align-items: center; justify-content: center; cursor: pointer;
 }
+.base-robot-info { margin-bottom: 6px; }
+.port-map { display: flex; flex-direction: column; gap: 6px; }
+.port-row { display: flex; align-items: center; gap: 10px; }
+.port-label { flex: none; width: 56px; font-weight: 700; font-size: 0.82rem; color: var(--ink-deep); }
+.port-select { flex: 1; padding: 6px 8px; font-size: 0.82rem; }
 .mission-row {
   background: var(--paper-2);
   border: 1px solid var(--line);
