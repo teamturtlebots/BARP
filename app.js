@@ -3961,6 +3961,19 @@ function computeTimeDataForSheets() {
 }
 async function writeTimeDataSheet(spreadsheetId, sheetId) {
   const { weekKeys, table } = computeTimeDataForSheets();
+  // If an earlier export had more weeks (or different data) than this one,
+  // the old header/merge for those extra columns never got cleared — values.update
+  // only touches the exact range it's given, so anything beyond the new
+  // (possibly narrower) range just sat there forever, looking like a
+  // duplicated week. Wipe a generous swath first so nothing can linger.
+  await sheetsBatchUpdate(spreadsheetId, [
+    { unmergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 60 } } },
+    { repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: 500, startColumnIndex: 0, endColumnIndex: 60 },
+        cell: {},
+        fields: "userEnteredValue,userEnteredFormat",
+    } },
+  ]);
   const header1 = ["Run #", "Run Name", ...weekKeys.flatMap((wk) => [`Week of ${wk}`, ""])];
   const header2 = ["", "", ...weekKeys.flatMap(() => ["Operation Time (sec)", "Run Time (sec)"])];
   const rows = table.map((r) => [r.runNum, r.name, ...weekKeys.flatMap((wk) => [r.weeks[wk].avgOperation, r.weeks[wk].avgRun])]);
@@ -3991,14 +4004,14 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
   const successCol = lastFlagCol + 1;
 
   // Everything from the run columns onward shifts left/right depending on
-  // how many runs are completed — so a *previous* export with more runs
-  // than this one leaves stale formatting (e.g. the red-filled overall
-  // average cell) sitting out past where this export's data now ends,
-  // never cleared, looking like a fixed cell that's "always" red. Wipe a
-  // generous swath of row 1 first so nothing lingers from an earlier run.
+  // how many runs are completed, and the number of data rows shifts with
+  // however many missions/tasks are configured — so a *previous* export
+  // with more of either leaves stale content sitting out past where this
+  // export's data now ends, never cleared. Wipe a generous area first so
+  // nothing lingers from an earlier export.
   await sheetsBatchUpdate(spreadsheetId, [
     { repeatCell: {
-        range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: firstFlagCol - 1, endColumnIndex: firstFlagCol - 1 + 100 },
+        range: { sheetId, startRowIndex: 0, endRowIndex: 500, startColumnIndex: 0, endColumnIndex: 60 },
         cell: {},
         fields: "userEnteredValue,userEnteredFormat",
     } },
@@ -4155,6 +4168,16 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
   if (existingCharts.length) {
     await sheetsBatchUpdate(spreadsheetId, existingCharts.map((c) => ({ deleteEmbeddedObject: { objectId: c.chartId } })));
   }
+  // Same reasoning again: if a previous export had more runs/missions than
+  // this one, its data tables were taller, and the extra trailing rows
+  // would otherwise never get cleared.
+  await sheetsBatchUpdate(spreadsheetId, [
+    { repeatCell: {
+        range: { sheetId, startRowIndex: 19, endRowIndex: 500, startColumnIndex: 0, endColumnIndex: 60 },
+        cell: {},
+        fields: "userEnteredValue,userEnteredFormat",
+    } },
+  ]);
 
   // Layout: 0-indexed rows 0-18 are reserved for the row of charts; every
   // data table's header starts at row 19 or later.
@@ -4324,6 +4347,16 @@ async function writeAttachmentsSheet(spreadsheetId, sheetId, onProgress) {
   const sizeLabel = { small: "Small change", moderate: "Moderate change", major: "Major change" };
   const MAX_PHOTO_COLS = 3;
   const header = ["Attachment", "Date", "Size", "What Changed", "Why Changed", ...Array.from({ length: MAX_PHOTO_COLS }, (_, i) => `Photo ${i + 1}`)];
+
+  // If a previous export had more entries than this one (e.g. some got
+  // deleted since), its trailing rows were never cleared. Wipe first.
+  await sheetsBatchUpdate(spreadsheetId, [
+    { repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: 2000, startColumnIndex: 0, endColumnIndex: 20 },
+        cell: {},
+        fields: "userEnteredValue,userEnteredFormat",
+    } },
+  ]);
 
   // Flatten every (entry, photo) pair across the whole export into one list
   // so uploads can run several at once — 4 concurrent is a reasonable
