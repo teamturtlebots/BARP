@@ -203,14 +203,6 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 
 /* Mission editor list */
 .mission-list { display: flex; flex-direction: column; gap: 8px; }
-.base-robot-info { margin-bottom: 6px; }
-.port-diagram-wrap { display: flex; justify-content: center; margin-bottom: 4px; }
-.port-diagram { width: 100%; max-width: 320px; height: auto; }
-.hub-body { fill: var(--paper-2); stroke: var(--line); stroke-width: 2; }
-.port-hit { cursor: pointer; }
-.port-connector { fill: var(--paper); stroke: var(--ink-deep); stroke-width: 1.5; }
-.port-letter { font: 700 9px var(--body); fill: var(--ink-deep); }
-.port-type-label { font: 600 7px var(--body); fill: var(--text-soft); }
 .mission-row {
   background: var(--paper-2);
   border: 1px solid var(--line);

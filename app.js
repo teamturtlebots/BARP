@@ -287,24 +287,6 @@ function getEntryPhotos(entry) {
   if (entry.photo) return [entry.photo];
   return [];
 }
-// Base Robot's port map: 6 physical ports (A-F), each assignable to one of
-// these. Only 4 motor slots exist in hardware (2 drive + 2 attachment), so
-// each motor type can only be assigned to one port at a time; sensors have
-// no such limit (e.g. two color sensors is fine).
-const BASE_ROBOT_MOTOR_TYPES = [
-  { id: "leftDrive", label: "Left Drive Motor", short: "L Drive" },
-  { id: "rightDrive", label: "Right Drive Motor", short: "R Drive" },
-  { id: "leftAttachment", label: "Left Attachment Motor", short: "L Att." },
-  { id: "rightAttachment", label: "Right Attachment Motor", short: "R Att." },
-];
-const BASE_ROBOT_SENSOR_TYPES = [
-  { id: "color", label: "Color Sensor", short: "Color" },
-  { id: "force", label: "Force Sensor", short: "Force" },
-  { id: "distance", label: "Distance Sensor", short: "Dist." },
-];
-function baseRobotPortType(id) {
-  return BASE_ROBOT_MOTOR_TYPES.find((t) => t.id === id) || BASE_ROBOT_SENSOR_TYPES.find((t) => t.id === id) || null;
-}
 
 function esc(str) {
   return String(str ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -695,82 +677,14 @@ async function renderEntryList() {
 // ---- Attachment management (Setup tab) ----
 document.getElementById("btn-record-iteration").addEventListener("click", () => openRecordIterationModal());
 
-function openPortPickerModal(baseRobot, port) {
-  const ports = baseRobot.ports || {};
-  openModal(`
-    <h2>Port ${port}</h2>
-    <div class="iter-attachment-grid">
-      <button type="button" class="iter-attachment-btn${!ports[port] ? " active" : ""}" data-val="">Unassigned</button>
-      ${BASE_ROBOT_MOTOR_TYPES.map((t) => `<button type="button" class="iter-attachment-btn${ports[port] === t.id ? " active" : ""}" data-val="${t.id}">${t.label}</button>`).join("")}
-      ${BASE_ROBOT_SENSOR_TYPES.map((t) => `<button type="button" class="iter-attachment-btn${ports[port] === t.id ? " active" : ""}" data-val="${t.id}">${t.label}</button>`).join("")}
-    </div>
-    <div class="modal-actions"><button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button></div>
-  `);
-  document.getElementById("m-cancel").addEventListener("click", closeModal);
-  document.querySelectorAll(".iter-attachment-grid .iter-attachment-btn").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const newVal = btn.dataset.val;
-      const isMotor = BASE_ROBOT_MOTOR_TYPES.some((t) => t.id === newVal);
-      if (isMotor) {
-        const conflictPort = Object.keys(ports).find((p) => p !== port && ports[p] === newVal);
-        if (conflictPort) { alert(`${baseRobotPortType(newVal).label} is already assigned to Port ${conflictPort}.`); return; }
-      }
-      if (newVal) ports[port] = newVal; else delete ports[port];
-      baseRobot.ports = ports;
-      await dbPut("attachments", baseRobot);
-      closeModal();
-      renderAttachmentsSetup();
-      syncToTeamDrive();
-    });
-  });
-}
-
 function renderAttachmentsSetup() {
   const list = document.getElementById("attachment-setup-list");
   const editing = state.editingAttachmentOrder;
   renderAttachmentOrderToolbar();
 
-  const baseRobot = state.attachments.find((a) => a.isBaseRobot);
   const realAttachments = state.attachments.filter((a) => !a.isBaseRobot);
 
   (async () => {
-    const infoArea = document.getElementById("base-robot-info");
-    if (infoArea && baseRobot) {
-      const count = await iterationCount(baseRobot.id);
-      const ports = baseRobot.ports || {};
-      // Grid reads left-to-right, top-to-bottom: E C A / F D B.
-      const GRID = [
-        [{ id: "E" }, { id: "C" }, { id: "A" }],
-        [{ id: "F" }, { id: "D" }, { id: "B" }],
-      ];
-      const COL_X = [55, 110, 165];
-      const ROW_Y = [45, 95];
-      const portGroup = (p, cx, cy) => {
-        const type = baseRobotPortType(ports[p.id]);
-        return `
-          <g class="port-hit${type ? " assigned" : ""}" data-port="${p.id}">
-            <rect class="port-connector" x="${cx - 18}" y="${cy - 18}" width="36" height="36" rx="4"></rect>
-            <text class="port-letter" x="${cx}" y="${cy - 3}" text-anchor="middle">${p.id}</text>
-            <text class="port-type-label" x="${cx}" y="${cy + 12}" text-anchor="middle">${type ? esc(type.short) : "&mdash;"}</text>
-          </g>
-        `;
-      };
-      // A simple top-down schematic — 11:7 rectangle with slightly rounded
-      // corners, ports arranged in a 2x3 grid. Tap any port to change it.
-      infoArea.innerHTML = `
-        <p class="empty-sub" style="margin:0 0 8px;">${count} iteration${count === 1 ? "" : "s"} logged</p>
-        <div class="port-diagram-wrap">
-          <svg viewBox="0 0 220 140" class="port-diagram">
-            <rect class="hub-body" x="5" y="5" width="210" height="130" rx="8"></rect>
-            ${GRID.map((row, r) => row.map((p, c) => portGroup(p, COL_X[c], ROW_Y[r])).join("")).join("")}
-          </svg>
-        </div>
-      `;
-      infoArea.querySelectorAll(".port-hit").forEach((el) => {
-        el.addEventListener("click", () => openPortPickerModal(baseRobot, el.dataset.port));
-      });
-    }
-
     list.innerHTML = "";
     if (!realAttachments.length) {
       list.innerHTML = `<p class="empty-sub">No attachments yet.${editing ? "" : " Tap Edit to add one."}</p>`;
