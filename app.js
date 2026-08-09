@@ -441,29 +441,37 @@ async function enforceBaseRobotName() {
   const robot = (await dbGetAll("attachments")).find((a) => a.isBaseRobot && !a.deleted);
   if (robot && robot.name !== "Base Robot") { robot.name = "Base Robot"; await dbPut("attachments", robot); }
 }
-async function ensureBaseRobotExists() {
+// Merges any duplicate active Base Robots down to one, migrating logged
+// iterations from the extras onto the survivor. Returns true if it merged
+// anything. Split out from ensureBaseRobotExists so it can also run every
+// time remote attachment data changes — running it only once at cold start
+// (the original version of this fix) meant it almost always ran *before*
+// Firestore had actually synced any duplicates down, so it could never see
+// what it needed to clean up. It has to re-check on every sync, not just once.
+async function dedupeBaseRobots() {
   const all = await dbGetAll("attachments");
   const activeBaseRobots = all.filter((a) => a.isBaseRobot && !a.deleted).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-  if (activeBaseRobots.length > 1) {
-    // Self-heal duplicates created by the old race before this fix: keep the
-    // oldest, fold every other one's logged iterations into it, soft-delete the rest.
-    const survivor = activeBaseRobots[0];
-    survivor.name = "Base Robot";
-    await dbPut("attachments", survivor);
-    for (const dup of activeBaseRobots.slice(1)) {
-      const dupEntries = await dbGetByIndex("entries", "byAttachment", dup.id);
-      for (const e of dupEntries) { e.attachmentId = survivor.id; await dbPut("entries", e); }
-      dup.deleted = true;
-      dup.deletedAt = Date.now();
-      await dbPut("attachments", dup);
-    }
-    return;
+  if (activeBaseRobots.length <= 1) return false;
+  const survivor = activeBaseRobots[0];
+  survivor.name = "Base Robot";
+  await dbPut("attachments", survivor);
+  for (const dup of activeBaseRobots.slice(1)) {
+    const dupEntries = await dbGetByIndex("entries", "byAttachment", dup.id);
+    for (const e of dupEntries) { e.attachmentId = survivor.id; await dbPut("entries", e); }
+    dup.deleted = true;
+    dup.deletedAt = Date.now();
+    await dbPut("attachments", dup);
   }
-  if (activeBaseRobots.length === 1) {
+  return true;
+}
+async function ensureBaseRobotExists() {
+  if (await dedupeBaseRobots()) return;
+  const all = await dbGetAll("attachments");
+  const existing = all.find((a) => a.isBaseRobot && !a.deleted);
+  if (existing) {
     // The rename lock only stops future edits — this corrects a name that
     // got changed before the lock existed (or by any other stray write).
-    const robot = activeBaseRobots[0];
-    if (robot.name !== "Base Robot") { robot.name = "Base Robot"; await dbPut("attachments", robot); }
+    if (existing.name !== "Base Robot") { existing.name = "Base Robot"; await dbPut("attachments", existing); }
     return;
   }
   const softDeleted = all.find((a) => a.isBaseRobot);
@@ -1398,12 +1406,58 @@ function unusedBankTasks(bankMission) {
   const used = usedBankTaskIds();
   return visibleTasks(bankMission).filter((t) => !used.has(t.id));
 }
+// Same bug class as Base Robot: two devices loading for the first time
+// before Firestore has synced anything down would each independently seed
+// their own full 15-mission set with random IDs, creating real duplicate
+// Firestore documents. Fixed here the same two ways — fixed, deterministic
+// IDs (so simultaneous first-loads land on the exact same documents instead
+// of creating new ones) plus a dedupe pass that can also run later if any
+// duplicates already exist from before this fix.
+async function dedupeMissionBank() {
+  const all = await dbGetAll("missionBank");
+  const active = all.filter((m) => !m.deleted);
+  const groups = new Map();
+  for (const m of active) {
+    const key = m.number != null ? `n:${m.number}` : `name:${(m.name || "").toLowerCase()}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(m);
+  }
+  let mergedAny = false;
+  const assignedMissions = await dbGetAll("missions");
+  for (const group of groups.values()) {
+    if (group.length <= 1) continue;
+    mergedAny = true;
+    group.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    const survivor = group[0];
+    for (const dup of group.slice(1)) {
+      // Anything already assigned to a Run from the duplicate's tasks gets
+      // remapped onto the survivor's matching task (by name) so it doesn't
+      // go orphaned.
+      for (const assigned of assignedMissions) {
+        let touched = false;
+        for (const t of assigned.tasks || []) {
+          if (!t.bankTaskId) continue;
+          const dupTask = (dup.tasks || []).find((dt) => dt.id === t.bankTaskId);
+          if (!dupTask) continue;
+          const match = (survivor.tasks || []).find((st) => st.name === dupTask.name);
+          if (match) { t.bankTaskId = match.id; touched = true; }
+        }
+        if (touched) await dbPut("missions", assigned);
+      }
+      dup.deleted = true;
+      dup.deletedAt = Date.now();
+      await dbPut("missionBank", dup);
+    }
+  }
+  return mergedAny;
+}
 async function ensureMissionBankSeeded() {
+  const merged = await dedupeMissionBank();
   const existing = await dbGetAll("missionBank");
-  if (existing.length) return; // already set up (or cleared on purpose) — never re-seed over that
-  const bool = (name, points) => ({ id: crypto.randomUUID(), name, type: "bool", points });
-  const num = (name, max, pointsPerUnit) => ({ id: crypto.randomUUID(), name, type: "number", max, pointsPerUnit });
-  const choice = (name, options) => ({ id: crypto.randomUUID(), name, type: "choice", options });
+  if (existing.length) { if (merged) await loadMissionBank(); return; } // already set up (or cleared on purpose) — never re-seed over that
+  const bool = (name, points) => ({ name, type: "bool", points });
+  const num = (name, max, pointsPerUnit) => ({ name, type: "number", max, pointsPerUnit });
+  const choice = (name, options) => ({ name, type: "choice", options });
   // Seeded once from the official BIOGLOW (2026-27) Robot Game Rulebook so
   // there's a real starting point instead of a blank page — but the PDF's
   // two-column layout scrambled some scoring text out of order during
@@ -1471,7 +1525,9 @@ async function ensureMissionBankSeeded() {
     ] },
   ];
   for (const [i, m] of seasonMissions.entries()) {
-    await dbPut("missionBank", { id: crypto.randomUUID(), order: i, number: m.number, name: m.name, tasks: m.tasks, taskSeq: m.tasks.length });
+    const missionId = `season-mission-${m.number}`;
+    const tasks = m.tasks.map((t, ti) => ({ ...t, id: `${missionId}-t${ti}` }));
+    await dbPut("missionBank", { id: missionId, order: i, number: m.number, name: m.name, tasks, taskSeq: tasks.length, createdAt: Date.now() });
   }
   await loadMissionBank();
 }
@@ -4830,11 +4886,11 @@ function startFirestoreListeners() {
   });
 }
 async function refreshAfterRemoteChange(storeName) {
-  if (storeName === "attachments") { await enforceBaseRobotName(); await renumberAttachments(); await loadAttachments(); syncToTeamDrive(); }
+  if (storeName === "attachments") { await dedupeBaseRobots(); await enforceBaseRobotName(); await renumberAttachments(); await loadAttachments(); syncToTeamDrive(); }
   else if (storeName === "entries") { renderAttachmentChips(); await renderEntryList(); await renderIterationTotal(); renderAttachmentsSetup(); }
   else if (storeName === "runGroups") { await loadRunGroups(); await loadMissions(); }
   else if (storeName === "missions") { await loadMissions(); renderRunGroups(); }
-  else if (storeName === "missionBank") { await loadMissionBank(); }
+  else if (storeName === "missionBank") { const merged = await dedupeMissionBank(); await loadMissionBank(); if (merged) syncToTeamDrive(); }
   else if (storeName === "runs") { await loadRuns(); }
 }
 
