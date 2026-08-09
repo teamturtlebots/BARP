@@ -9,7 +9,7 @@ if ("serviceWorker" in navigator) {
 
 // ---------- IndexedDB helper ----------
 const DB_NAME = "barp-db-v1";
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 let dbPromise = null;
 
 function createStores(db) {
@@ -22,6 +22,13 @@ function createStores(db) {
   }
   if (!db.objectStoreNames.contains("missions")) {
     db.createObjectStore("missions", { keyPath: "id", autoIncrement: true });
+  }
+  // The season-wide mission library — authored once, independent of any
+  // particular Run — that Runs pull specific missions/tasks from. Same
+  // record shape as "missions" (number/name/tasks), just not tied to a
+  // runGroupId.
+  if (!db.objectStoreNames.contains("missionBank")) {
+    db.createObjectStore("missionBank", { keyPath: "id", autoIncrement: true });
   }
   // "runGroups" = the "Run" concept in FLL terms: one leave-and-return trip,
   // containing several missions. Not to be confused with the "runs" store
@@ -132,6 +139,9 @@ const state = {
   filterInitialized: false,
   entries: [],
   missions: [],
+  missionBank: [], // season-wide mission library — see createStores() comment
+  expandedBankMissions: new Set(),
+  editingMissionBankOrder: false,
   runGroups: [], // "Run" = one leave-and-return trip, grouping several missions
   runs: [],
   expandedMissions: new Set(),
@@ -504,7 +514,7 @@ async function renderIterationTotal() {
   const baseRobotCount = baseRobot ? all.filter((e) => e.attachmentId === baseRobot.id).length : 0;
   const mainCount = all.length - baseRobotCount;
   const line = document.getElementById("iteration-total-line");
-  line.textContent = mainCount ? `${mainCount} total engineering iteration${mainCount === 1 ? "" : "s"} logged` : "";
+  line.textContent = mainCount ? `${mainCount} total attachment iteration${mainCount === 1 ? "" : "s"} logged` : "";
   const baseLine = document.getElementById("base-robot-iteration-total-line");
   if (baseLine) baseLine.textContent = baseRobotCount ? `${baseRobotCount} base robot iteration${baseRobotCount === 1 ? "" : "s"} logged` : "";
 }
@@ -722,12 +732,13 @@ function renderAttachmentsSetup() {
         list.appendChild(row);
       } else {
         const count = await iterationCount(att.id);
+        const runNames = (att.runGroupIds || []).map((gid) => state.runGroups.find((g) => g.id === gid)).filter(Boolean).map(runGroupDisplayName);
         row.className = "mission-row";
         row.innerHTML = `
           ${att.photo ? `<img class="att-thumb" src="${att.photo}" alt="">` : ""}
           <div class="m-info">
             <div class="m-name">#${esc(att.number)} ${esc(att.name)}</div>
-            <div class="m-sub">${count} iteration${count === 1 ? "" : "s"} logged</div>
+            <div class="m-sub">${count} iteration${count === 1 ? "" : "s"} logged${runNames.length ? ` &middot; ${runNames.map(esc).join(", ")}` : ""}</div>
           </div>
         `;
         list.appendChild(row);
@@ -798,6 +809,17 @@ function openAttachmentModal(att) {
     <h2>${isEdit ? (att.isBaseRobot ? "Edit Base Robot" : "Edit attachment") : "New attachment"}</h2>
     <div class="field"><label>Name</label><input class="text-input" id="m-att-name" type="text" value="${isEdit ? (att.isBaseRobot ? "Base Robot" : esc(att.name)) : ""}" placeholder="e.g. Coral claw" ${att && att.isBaseRobot ? "disabled" : ""}></div>
     <div class="field">
+      <label>Used in which Run(s)?</label>
+      <p class="empty-sub" style="margin:0 0 6px;">Pick one or more, or leave all unchecked if this attachment got combined with another one for a Run.</p>
+      <div class="checkbox-list">
+        ${state.runGroups.length ? state.runGroups.map((g) => `
+          <label class="checkbox-row checkbox-row-standalone">
+            <input type="checkbox" data-gid="${g.id}" ${isEdit && (att.runGroupIds || []).includes(g.id) ? "checked" : ""}> ${esc(runGroupDisplayName(g))}
+          </label>
+        `).join("") : `<p class="empty-sub">No Runs set up yet.</p>`}
+      </div>
+    </div>
+    <div class="field">
       <label>Picture (optional)</label>
       <div class="photo-preview-wrap" id="att-photo-preview-wrap">${pendingAttPhoto ? `<img class="photo-preview" src="${pendingAttPhoto}">` : ""}</div>
       <div class="camera-view" id="att-camera-view" hidden>
@@ -836,6 +858,7 @@ function openAttachmentModal(att) {
     if (!name) { alert("Give this attachment a name."); return; }
     const record = isEdit ? att : { id: crypto.randomUUID(), order: state.attachments.length, number: state.attachments.length + 1 };
     record.name = name;
+    record.runGroupIds = Array.from(document.querySelectorAll("#modal-box [data-gid]:checked")).map((el) => el.dataset.gid);
     record.photo = pendingAttPhoto;
     if (!isEdit) record.createdAt = Date.now();
     const id = await dbPut("attachments", record);
@@ -1352,6 +1375,106 @@ async function loadMissions() {
   state.missions = (await dbGetAll("missions")).filter((m) => !m.deleted).sort((a, b) => a.order - b.order);
   state.missions.forEach((m) => { if (!m.tasks) m.tasks = []; if (m.taskSeq === undefined) m.taskSeq = 0; });
 }
+async function loadMissionBank() {
+  state.missionBank = (await dbGetAll("missionBank")).filter((m) => !m.deleted).sort((a, b) => a.order - b.order);
+  state.missionBank.forEach((m) => { if (!m.tasks) m.tasks = []; if (m.taskSeq === undefined) m.taskSeq = 0; });
+  renderMissionBank();
+}
+// A bank task is "used" once it's been copied onto some Run's mission list
+// (tracked via bankTaskId on the copy) — this is what makes "only use each
+// mission once" and "assign part of a mission" work: each task in the bank
+// can only be claimed by one Run at a time, and a bank mission with some
+// tasks claimed and others not is exactly a partially-assigned mission.
+function usedBankTaskIds() {
+  const used = new Set();
+  for (const m of state.missions) {
+    for (const t of visibleTasks(m)) {
+      if (t.bankTaskId) used.add(t.bankTaskId);
+    }
+  }
+  return used;
+}
+function unusedBankTasks(bankMission) {
+  const used = usedBankTaskIds();
+  return visibleTasks(bankMission).filter((t) => !used.has(t.id));
+}
+async function ensureMissionBankSeeded() {
+  const existing = await dbGetAll("missionBank");
+  if (existing.length) return; // already set up (or cleared on purpose) — never re-seed over that
+  const bool = (name, points) => ({ id: crypto.randomUUID(), name, type: "bool", points });
+  const num = (name, max, pointsPerUnit) => ({ id: crypto.randomUUID(), name, type: "number", max, pointsPerUnit });
+  const choice = (name, options) => ({ id: crypto.randomUUID(), name, type: "choice", options });
+  // Seeded once from the official BIOGLOW (2026-27) Robot Game Rulebook so
+  // there's a real starting point instead of a blank page — but the PDF's
+  // two-column layout scrambled some scoring text out of order during
+  // extraction, so a few missions (flagged below) are a best-effort
+  // reconstruction. Double-check point values, task splits, and exact
+  // counts ("each") against the real rulebook or official scoring
+  // calculator before relying on this — everything here is fully editable.
+  const seasonMissions = [
+    { number: 1, name: "Drone Survey", tasks: [
+      bool("Drone no longer touching the mat", 20),
+      bool("Bonus: LiDAR map flipped, scan marker at least partly in survey area", 10),
+    ] },
+    { number: 2, name: "Exploding Seeds", tasks: [
+      num("Seeds no longer touching the stalk (each)", 3, 10), // exact seed count unclear — verify max
+    ] },
+    { number: 3, name: "Flip the Rock", tasks: [
+      bool("Research flag is down", 20),
+      bool("Bonus: rock returned to original starting position", 10),
+    ] },
+    { number: 4, name: "Lucky Leaves", tasks: [
+      bool("One leaf completely removed from nest", 10),
+      bool("Bonus: second leaf removed + katydid in original position", 20),
+    ] },
+    { number: 5, name: "Reaching Roots", tasks: [
+      choice("Plant root extended", [{ label: "Partially extended", points: 10 }, { label: "Completely extended", points: 20 }]),
+    ] },
+    { number: 6, name: "Leafcutter Frenzy", tasks: [
+      num("Ant touching nest + leaf fragment contained (each)", 2, 10), // exact fragment count unclear — verify max
+    ] },
+    { number: 7, name: "Humongous Fungus", tasks: [
+      bool("Mycelium completely extended", 20),
+      num("Bonus: connection with opposing team's root (up to 2)", 2, 10),
+    ] },
+    { number: 8, name: "Tangled", tasks: [
+      bool("Vine touching the mat", 30),
+    ] },
+    { number: 9, name: "Research Platform", tasks: [
+      bool("Research platform raised", 10),
+      bool("Camera trap deployed", 10),
+    ] },
+    { number: 10, name: "Fragile Microhabitats", tasks: [
+      bool("Seed no longer touching the tree", 10), // best-effort reconstruction — verify against rulebook
+    ] },
+    { number: 11, name: "Window to the Past", tasks: [
+      bool("Root cover down, touching the mat", 20),
+    ] },
+    { number: 12, name: "Forest Elder", tasks: [
+      bool("Cane completely raised, touching the tree", 20),
+      bool("Support tie around the post", 10),
+      bool("Spider habitat in original starting position", 10),
+      bool("Snail habitat in original starting position", 10),
+    ] },
+    { number: 13, name: "Keystone Species", tasks: [
+      bool("Keystone species on restoration platform + young trees raised", 30),
+    ] },
+    { number: 14, name: "Seeds of Renewal", tasks: [
+      num("Seeds contained within replantation station (each)", 3, 5), // exact seed count unclear — verify max
+      num("Bonus: seeds also touching the mat (each)", 3, 5),
+    ] },
+    { number: 15, name: "Biocentric Architecture", tasks: [
+      bool("Nesting canopy raised", 10),
+      bool("Garden skylight completely in", 10),
+      bool("Compost hatch completely opened, touching the mat", 10),
+      bool("Environmental bonus (matches the dock's ecological need)", 10),
+    ] },
+  ];
+  for (const [i, m] of seasonMissions.entries()) {
+    await dbPut("missionBank", { id: crypto.randomUUID(), order: i, number: m.number, name: m.name, tasks: m.tasks, taskSeq: m.tasks.length });
+  }
+  await loadMissionBank();
+}
 // Deleted tasks stay in mission.tasks (so they can be restored later) — every
 // place that displays or scores a mission's tasks should read through this,
 // not mission.tasks directly, so a soft-deleted task doesn't show up in the
@@ -1368,16 +1491,16 @@ async function restoreDeletedMission(id) {
   renderRunGroups();
   syncToTeamDrive();
 }
-async function restoreDeletedTask(missionId, taskId) {
-  const m = await dbGet("missions", missionId);
+async function restoreDeletedTask(missionId, taskId, storeName = "missions") {
+  const m = await dbGet(storeName, missionId);
   if (!m) return;
   const t = (m.tasks || []).find((tt) => tt.id === taskId);
   if (!t) return;
   delete t.deleted;
   delete t.deletedAt;
-  await dbPut("missions", m);
-  await loadMissions();
-  renderRunGroups();
+  await dbPut(storeName, m);
+  if (storeName === "missionBank") { await loadMissionBank(); renderMissionBank(); }
+  else { await loadMissions(); renderRunGroups(); }
   syncToTeamDrive();
 }
 
@@ -1385,6 +1508,229 @@ function taskSubLabel(t) {
   if (t.type === "bool") return `Yes/No · ${taskMaxPoints(t)} pts`;
   if (t.type === "number") return `Count 0–${t.max} · ${t.pointsPerUnit} pt/each · max ${taskMaxPoints(t)}`;
   return `Multi-state · max ${taskMaxPoints(t)} pts`;
+}
+
+// ---- Mission Bank (season-wide mission library) ----
+
+function renderMissionBankOrderToolbar() {
+  const el = document.getElementById("missionbank-order-toolbar-top");
+  if (!el) return;
+  const editing = state.editingMissionBankOrder;
+  el.innerHTML = editing
+    ? `<div class="edit-mode-toolbar">
+         <div class="btn-group"><button type="button" class="btn btn-amber btn-sm" id="btn-add-bankmission">+ Mission</button></div>
+         <div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-save-bank-order">Save</button><button type="button" class="btn-small-link" id="btn-cancel-bank-order">Cancel</button></div>
+       </div>`
+    : `<div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-edit-bank-order">Edit</button></div>`;
+  if (editing) {
+    document.getElementById("btn-add-bankmission").addEventListener("click", () => openBankMissionModal(null));
+    document.getElementById("btn-save-bank-order").addEventListener("click", saveMissionBankOrder);
+    document.getElementById("btn-cancel-bank-order").addEventListener("click", async () => {
+      state.editingMissionBankOrder = false;
+      await loadMissionBank();
+      renderMissionBank();
+    });
+  } else {
+    document.getElementById("btn-edit-bank-order").addEventListener("click", () => {
+      state.editingMissionBankOrder = true;
+      renderMissionBank();
+    });
+  }
+}
+
+async function saveMissionBankOrder() {
+  const missionEls = [...document.querySelectorAll("#missionbank-list > [data-bmid]")];
+  missionEls.forEach((el, idx) => {
+    const m = state.missionBank.find((x) => x.id === el.dataset.bmid);
+    if (!m) return;
+    m.order = idx;
+    const taskEls = [...el.querySelectorAll(".task-list > [data-tid]")];
+    if (taskEls.length) {
+      const reordered = taskEls.map((te) => visibleTasks(m).find((t) => t.id === te.dataset.tid)).filter(Boolean);
+      const deletedTasks = m.tasks.filter((t) => t.deleted);
+      m.tasks = [...reordered, ...deletedTasks];
+    }
+  });
+  for (const m of state.missionBank) await dbPut("missionBank", m);
+  state.editingMissionBankOrder = false;
+  await loadMissionBank();
+  renderMissionBank();
+  syncToTeamDrive();
+}
+
+function renderMissionBank() {
+  renderMissionBankOrderToolbar();
+  const list = document.getElementById("missionbank-list");
+  if (!list) return;
+  const editing = state.editingMissionBankOrder;
+  list.innerHTML = "";
+  if (!state.missionBank.length) {
+    list.innerHTML = `<p class="empty-sub">No missions yet.${editing ? "" : " Tap Edit to add one."}</p>`;
+    return;
+  }
+  const used = usedBankTaskIds();
+  state.missionBank.forEach((m) => {
+    const expanded = editing ? true : state.expandedBankMissions.has(m.id);
+    const tasks = visibleTasks(m);
+    const usedCount = tasks.filter((t) => used.has(t.id)).length;
+    const wrap = document.createElement("div");
+    wrap.dataset.bmid = m.id;
+    wrap.className = "mission-group";
+    wrap.innerHTML = `
+      <div class="mission-row mission-group-head${editing ? "" : " mission-expand-target"}" data-act="expand">
+        ${editing ? `<span class="drag-handle">&#9776;</span>` : ""}
+        <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
+        <div class="m-info">
+          <div class="m-name">${m.number != null ? `#${esc(m.number)} ` : ""}${esc(m.name)}</div>
+          <div class="m-sub">${tasks.length} task${tasks.length === 1 ? "" : "s"} &middot; max ${missionMaxPoints(m)} pts${usedCount ? ` &middot; ${usedCount}/${tasks.length} assigned to a Run` : ""}</div>
+        </div>
+        ${editing ? `<button class="btn-icon btn-icon-add" data-act="add-task" title="Add a task">&#43;</button><button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>` : ""}
+      </div>
+      <div class="task-list" ${expanded ? "" : "hidden"}></div>
+    `;
+    const bankOpts = { storeName: "missionBank", onChange: async () => { await loadMissionBank(); renderMissionBank(); }, expandSet: state.expandedBankMissions };
+    if (!editing) {
+      wrap.querySelector('[data-act="expand"]').addEventListener("click", () => {
+        if (expanded) state.expandedBankMissions.delete(m.id); else state.expandedBankMissions.add(m.id);
+        renderMissionBank();
+      });
+    } else {
+      wrap.querySelector('[data-act="add-task"]').addEventListener("click", () => openTaskModal(m, null, bankOpts));
+      wrap.querySelector('[data-act="edit"]').addEventListener("click", () => openBankMissionModal(m));
+      wrap.querySelector('[data-act="del"]').addEventListener("click", async () => {
+        if (usedCount) { alert(`"${m.name}" has ${usedCount} task${usedCount === 1 ? "" : "s"} already assigned to a Run — remove ${usedCount === 1 ? "it" : "them"} from the Run first.`); return; }
+        if (!confirm(`Delete mission "${m.name}" and all its tasks?`)) return;
+        m.deleted = true;
+        m.deletedAt = Date.now();
+        await dbPut("missionBank", m);
+        await loadMissionBank();
+        renderMissionBank();
+        syncToTeamDrive();
+        showUndoToast(`Deleted mission "${m.name}".`, async () => {
+          const bm = await dbGet("missionBank", m.id);
+          if (!bm) return;
+          delete bm.deleted;
+          delete bm.deletedAt;
+          await dbPut("missionBank", bm);
+          await loadMissionBank();
+          renderMissionBank();
+          syncToTeamDrive();
+        });
+      });
+    }
+    if (expanded) renderTaskList(wrap.querySelector(".task-list"), m, bankOpts);
+    list.appendChild(wrap);
+  });
+  if (editing && state.missionBank.length) makeSortable(list);
+}
+
+function openBankMissionModal(m) {
+  const isEdit = !!m;
+  openModal(`
+    <h2>${isEdit ? "Edit mission" : "New mission"}</h2>
+    <div class="field"><label>Official mission number</label><input class="text-input" id="m-mission-number" type="number" value="${isEdit && m.number != null ? m.number : ""}" placeholder="e.g. 7"></div>
+    <div class="field"><label>Mission name</label><input class="text-input" id="m-mission-name" value="${isEdit ? esc(m.name) : ""}" placeholder="e.g. Coral nursery"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
+      <button class="btn btn-primary" id="m-save" type="button">Save</button>
+    </div>
+  `);
+  document.getElementById("m-cancel").addEventListener("click", closeModal);
+  document.getElementById("m-save").addEventListener("click", async () => {
+    const name = document.getElementById("m-mission-name").value.trim();
+    if (!name) { alert("Name this mission."); return; }
+    const numberVal = document.getElementById("m-mission-number").value.trim();
+    const record = isEdit ? m : { id: crypto.randomUUID(), order: state.missionBank.length, tasks: [], taskSeq: 0 };
+    record.name = name;
+    record.number = numberVal === "" ? null : Number(numberVal);
+    const id = await dbPut("missionBank", record);
+    closeModal();
+    if (!isEdit) state.expandedBankMissions.add(id);
+    await loadMissionBank();
+    renderMissionBank();
+    syncToTeamDrive();
+  });
+}
+
+// Adding a mission to a Run now pulls from the bank instead of typing a new
+// one from scratch: pick a bank mission, then pick which of its still-unused
+// tasks go to this Run (supports splitting one mission's tasks across
+// multiple Runs — whatever's left unchecked stays available for another Run).
+function openAddMissionFromBankModal(group) {
+  const used = usedBankTaskIds();
+  const available = state.missionBank
+    .map((bm) => ({ bm, remaining: visibleTasks(bm).filter((t) => !used.has(t.id)) }))
+    .filter((x) => x.remaining.length > 0);
+  if (!available.length) {
+    openModal(`
+      <h2>Add mission</h2>
+      <p class="empty-sub">Every mission in the bank is already fully assigned to a Run. Add more missions, or free some up, in Missions &amp; Tasks first.</p>
+      <div class="modal-actions"><button class="btn btn-ghost" id="m-cancel" type="button">Close</button></div>
+    `);
+    document.getElementById("m-cancel").addEventListener("click", closeModal);
+    return;
+  }
+  openModal(`
+    <h2>Add mission to ${esc(runGroupDisplayName(group))}</h2>
+    <p class="empty-sub">Pick a mission from the bank. If it's split across Runs, you'll choose which tasks next.</p>
+    <div class="iter-attachment-grid">
+      ${available.map(({ bm, remaining }) => `
+        <button type="button" class="iter-attachment-btn" data-bmid="${bm.id}">
+          ${bm.number != null ? `#${esc(bm.number)} ` : ""}${esc(bm.name)}
+          <span style="display:block; font-weight:400; font-size:0.8em; opacity:0.75;">${remaining.length}${remaining.length !== visibleTasks(bm).length ? ` of ${visibleTasks(bm).length}` : ""} task${remaining.length === 1 ? "" : "s"} available</span>
+        </button>
+      `).join("")}
+    </div>
+    <div class="modal-actions"><button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button></div>
+  `);
+  document.getElementById("m-cancel").addEventListener("click", closeModal);
+  document.querySelectorAll(".iter-attachment-grid [data-bmid]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const bm = state.missionBank.find((x) => x.id === btn.dataset.bmid);
+      openPickMissionTasksModal(bm, group);
+    });
+  });
+}
+
+function openPickMissionTasksModal(bankMission, group) {
+  const used = usedBankTaskIds();
+  const remaining = visibleTasks(bankMission).filter((t) => !used.has(t.id));
+  openModal(`
+    <h2>${esc(bankMission.name)}</h2>
+    <p class="empty-sub">Choose which tasks go to ${esc(runGroupDisplayName(group))}. Leave some unchecked if this mission is split across multiple Runs.</p>
+    <div class="checkbox-list">
+      ${remaining.map((t) => `
+        <label class="checkbox-row checkbox-row-standalone">
+          <input type="checkbox" checked data-tid="${t.id}"> ${esc(t.name)} <span style="opacity:0.7;">(${taskSubLabel(t)})</span>
+        </label>
+      `).join("")}
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
+      <button class="btn btn-primary" id="m-save" type="button">Add</button>
+    </div>
+  `);
+  document.getElementById("m-cancel").addEventListener("click", closeModal);
+  document.getElementById("m-save").addEventListener("click", async () => {
+    const checkedIds = Array.from(document.querySelectorAll("[data-tid]:checked")).map((el) => el.dataset.tid);
+    if (!checkedIds.length) { alert("Pick at least one task."); return; }
+    const selectedTasks = remaining
+      .filter((t) => checkedIds.includes(t.id))
+      .map((t) => ({ ...JSON.parse(JSON.stringify(t)), id: crypto.randomUUID(), bankTaskId: t.id }));
+    const record = {
+      id: crypto.randomUUID(), order: 9999, runGroupId: group.id,
+      number: bankMission.number, name: bankMission.name, bankMissionId: bankMission.id,
+      tasks: selectedTasks, taskSeq: selectedTasks.length,
+    };
+    const id = await dbPut("missions", record);
+    closeModal();
+    state.expandedMissions.add(id);
+    state.expandedRunGroups.add(group.id);
+    await recomputeGlobalMissionOrder();
+    await loadMissions();
+    renderRunGroups();
+    syncToTeamDrive();
+  });
 }
 
 // ---- Runs (leave-and-return trips), each holding several missions ----
@@ -1517,7 +1863,7 @@ function renderRunGroups() {
       });
     } else {
       const addBtn = wrap.querySelector('[data-act="add-mission"]');
-      if (addBtn) addBtn.addEventListener("click", () => openMissionNameModal(null, g));
+      if (addBtn) addBtn.addEventListener("click", () => openAddMissionFromBankModal(g));
       const editBtn = wrap.querySelector('[data-act="edit"]');
       if (editBtn) editBtn.addEventListener("click", () => openRunGroupModal(g));
       const delBtn = wrap.querySelector('[data-act="del"]');
@@ -1745,8 +2091,10 @@ function optionRowHtml(label = "", points = 0) {
   </div>`;
 }
 
-function renderTaskList(container, mission) {
-  const editing = state.editingAllOrder;
+function renderTaskList(container, mission, opts = {}) {
+  const storeName = opts.storeName || "missions";
+  const onChange = opts.onChange || (async () => { await loadMissions(); renderRunGroups(); });
+  const editing = storeName === "missionBank" ? state.editingMissionBankOrder : state.editingAllOrder;
   container.innerHTML = "";
   visibleTasks(mission).forEach((t) => {
     const row = document.createElement("div");
@@ -1759,17 +2107,16 @@ function renderTaskList(container, mission) {
         <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
         <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
       `;
-      row.querySelector('[data-act="edit"]').addEventListener("click", () => openTaskModal(mission, t));
+      row.querySelector('[data-act="edit"]').addEventListener("click", () => openTaskModal(mission, t, opts));
       row.querySelector('[data-act="del"]').addEventListener("click", async () => {
         if (!confirm(`Delete task "${t.name}"?`)) return;
         t.deleted = true;
         t.deletedAt = Date.now();
-        await dbPut("missions", mission);
-        await loadMissions();
-        renderRunGroups();
+        await dbPut(storeName, mission);
+        await onChange();
         syncToTeamDrive();
         showUndoToast(`Deleted task "${t.name}".`, async () => {
-          await restoreDeletedTask(mission.id, t.id);
+          await restoreDeletedTask(mission.id, t.id, storeName);
         });
       });
       container.appendChild(row);
@@ -1787,7 +2134,10 @@ function renderTaskList(container, mission) {
   if (editing && visibleTasks(mission).length) makeSortable(container);
 }
 
-function openTaskModal(mission, t) {
+function openTaskModal(mission, t, opts = {}) {
+  const storeName = opts.storeName || "missions";
+  const onChange = opts.onChange || (async () => { await loadMissions(); renderRunGroups(); });
+  const expandSet = opts.expandSet || state.expandedMissions;
   const isEdit = !!t;
   const type = t?.type || "bool";
   openModal(`
@@ -1857,11 +2207,10 @@ function openTaskModal(mission, t) {
       delete record.points; delete record.max; delete record.pointsPerUnit;
     }
     if (!isEdit) { mission.tasks.push(record); }
-    await dbPut("missions", mission);
+    await dbPut(storeName, mission);
     closeModal();
-    await loadMissions();
-    state.expandedMissions.add(mission.id);
-    renderRunGroups();
+    await onChange();
+    expandSet.add(mission.id);
     syncToTeamDrive();
   });
 }
@@ -3650,7 +3999,7 @@ document.getElementById("file-import-backup").addEventListener("change", async (
 // it persists sign-in across reloads on its own (stored in IndexedDB by the
 // SDK), so there's no more manual silent-reissue logic needed here.
 state.firebaseUser = null;
-const FIRESTORE_COLLECTIONS = ["attachments", "entries", "runGroups", "missions", "runs"];
+const FIRESTORE_COLLECTIONS = ["attachments", "entries", "runGroups", "missions", "missionBank", "runs"];
 let firestoreListenersStarted = false;
 
 function initFirebaseAuth() {
@@ -4485,6 +4834,7 @@ async function refreshAfterRemoteChange(storeName) {
   else if (storeName === "entries") { renderAttachmentChips(); await renderEntryList(); await renderIterationTotal(); renderAttachmentsSetup(); }
   else if (storeName === "runGroups") { await loadRunGroups(); await loadMissions(); }
   else if (storeName === "missions") { await loadMissions(); renderRunGroups(); }
+  else if (storeName === "missionBank") { await loadMissionBank(); }
   else if (storeName === "runs") { await loadRuns(); }
 }
 
@@ -4566,6 +4916,8 @@ async function initAll() {
   await ensureBaseRobotExists();
   await loadAttachments();
   await loadMissions();
+  await loadMissionBank();
+  await ensureMissionBankSeeded();
   await loadRunGroups();
   await loadRuns();
   await loadEquipmentInspectionSetting();

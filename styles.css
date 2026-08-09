@@ -658,6 +658,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .checkbox-row:last-child { border-bottom: none; }
 .checkbox-row-standalone { border-bottom: none; padding-left: 0; }
 .checkbox-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--moss); flex: none; }
+.checkbox-list { display: flex; flex-direction: column; gap: 2px; margin: 8px 0; max-height: 45vh; overflow-y: auto; }
 
 /* --- Added: redesigned one-task-at-a-time guided run screen --- */
 .gfs-cancel-x, .gfs-back-btn {
