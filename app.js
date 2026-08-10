@@ -1498,17 +1498,14 @@ async function ensureMissionBankSeeded() {
       bool("Research platform raised", 10),
       bool("Camera trap deployed", 10),
     ] },
-    { number: 10, name: "Fragile Microhabitats", tasks: [
-      bool("Seed no longer touching the tree", 10), // best-effort reconstruction — verify against rulebook
-    ] },
     { number: 11, name: "Window to the Past", tasks: [
       bool("Root cover down, touching the mat", 20),
+      bool("Mission completed (tracking only)", 0),
     ] },
     { number: 12, name: "Forest Elder", tasks: [
       bool("Cane completely raised, touching the tree", 20),
       bool("Support tie around the post", 10),
-      bool("Spider habitat in original starting position", 10),
-      bool("Snail habitat in original starting position", 10),
+      bool("Mission completed (tracking only)", 0),
     ] },
     { number: 13, name: "Keystone Species", tasks: [
       bool("Keystone species on restoration platform + young trees raised", 30),
@@ -1530,6 +1527,49 @@ async function ensureMissionBankSeeded() {
     await dbPut("missionBank", { id: missionId, order: i, number: m.number, name: m.name, tasks, taskSeq: tasks.length, createdAt: Date.now() });
   }
   await loadMissionBank();
+}
+// One-time correction for banks already seeded before this fix existed:
+// Fragile Microhabitats (#10) turned out to be a bad reconstruction of the
+// scrambled rulebook PDF — its "tasks" actually belonged to Forest Elder,
+// which is why they were removed from there too. Matches by mission
+// *number* (not id) so it works whether the bank has the newer fixed IDs or
+// older random ones from before that fix. Every check here is idempotent —
+// safe to run on every device even if a couple of them apply it around the
+// same time before syncing, since they'll all converge on the same result.
+async function applyMissionBankContentFix1() {
+  const alreadyApplied = await dbGet("meta", "missionBankFix1Applied");
+  if (alreadyApplied?.value) return;
+  const bank = await dbGetAll("missionBank");
+  let touched = false;
+
+  const m10 = bank.find((m) => m.number === 10 && !m.deleted);
+  if (m10) { m10.deleted = true; m10.deletedAt = Date.now(); await dbPut("missionBank", m10); touched = true; }
+
+  const m12 = bank.find((m) => m.number === 12 && !m.deleted);
+  if (m12) {
+    m12.tasks = m12.tasks || [];
+    for (const t of m12.tasks) {
+      if (/spider habitat|snail habitat/i.test(t.name) && !t.deleted) { t.deleted = true; t.deletedAt = Date.now(); touched = true; }
+    }
+    if (!m12.tasks.some((t) => t.id === "fix1-forest-elder-tracker")) {
+      m12.tasks.push({ id: "fix1-forest-elder-tracker", name: "Mission completed (tracking only)", type: "bool", points: 0 });
+      touched = true;
+    }
+    await dbPut("missionBank", m12);
+  }
+
+  const m11 = bank.find((m) => m.number === 11 && !m.deleted);
+  if (m11) {
+    m11.tasks = m11.tasks || [];
+    if (!m11.tasks.some((t) => t.id === "fix1-window-tracker")) {
+      m11.tasks.push({ id: "fix1-window-tracker", name: "Mission completed (tracking only)", type: "bool", points: 0 });
+      await dbPut("missionBank", m11);
+      touched = true;
+    }
+  }
+
+  await dbPut("meta", { key: "missionBankFix1Applied", value: true });
+  if (touched) { await loadMissionBank(); syncToTeamDrive(); }
 }
 // Deleted tasks stay in mission.tasks (so they can be restored later) — every
 // place that displays or scores a mission's tasks should read through this,
@@ -4974,6 +5014,7 @@ async function initAll() {
   await loadMissions();
   await loadMissionBank();
   await ensureMissionBankSeeded();
+  await applyMissionBankContentFix1();
   await loadRunGroups();
   await loadRuns();
   await loadEquipmentInspectionSetting();
