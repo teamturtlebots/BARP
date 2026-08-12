@@ -23,10 +23,11 @@ function createStores(db) {
   if (!db.objectStoreNames.contains("missions")) {
     db.createObjectStore("missions", { keyPath: "id", autoIncrement: true });
   }
-  // The season-wide mission library — authored once, independent of any
-  // particular Run — that Runs pull specific missions/tasks from. Same
-  // record shape as "missions" (number/name/tasks), just not tied to a
-  // runGroupId.
+  // Legacy/unused: missions are now a hardcoded SEASON_MISSIONS constant in
+  // app.js instead of user-editable/synced data (that data-storage approach
+  // is what caused the season-mission duplication bugs). Kept as an empty
+  // object store rather than removed, since deleting an IndexedDB store
+  // requires a schema migration that isn't worth it for something this inert.
   if (!db.objectStoreNames.contains("missionBank")) {
     db.createObjectStore("missionBank", { keyPath: "id", autoIncrement: true });
   }
@@ -139,9 +140,7 @@ const state = {
   filterInitialized: false,
   entries: [],
   missions: [],
-  missionBank: [], // season-wide mission library — see createStores() comment
-  expandedBankMissions: new Set(),
-  editingMissionBankOrder: false,
+  expandedBankMissions: new Set(), // which SEASON_MISSIONS rows are expanded in the read-only Missions & Tasks view
   runGroups: [], // "Run" = one leave-and-return trip, grouping several missions
   runs: [],
   expandedMissions: new Set(),
@@ -1383,11 +1382,71 @@ async function loadMissions() {
   state.missions = (await dbGetAll("missions")).filter((m) => !m.deleted).sort((a, b) => a.order - b.order);
   state.missions.forEach((m) => { if (!m.tasks) m.tasks = []; if (m.taskSeq === undefined) m.taskSeq = 0; });
 }
-async function loadMissionBank() {
-  state.missionBank = (await dbGetAll("missionBank")).filter((m) => !m.deleted).sort((a, b) => a.order - b.order);
-  state.missionBank.forEach((m) => { if (!m.tasks) m.tasks = []; if (m.taskSeq === undefined) m.taskSeq = 0; });
-  renderMissionBank();
-}
+// The season's missions, hardcoded and read-only — not stored in the
+// database or synced at all, specifically so there's nothing left to
+// duplicate, migrate, or get out of sync between devices. Seeded from the
+// official BIOGLOW (2026-27) Robot Game Rulebook; a couple of missions
+// needed hand-reconstruction because the rulebook PDF's two-column layout
+// scrambled some scoring text during extraction (see notes below) — double
+// check point values / task splits against the real rulebook before relying
+// on this for real. If anything here needs to change, it has to be edited
+// in code (ask Claude, or edit the SEASON_MISSIONS constant directly).
+const SEASON_MISSIONS = [
+  { id: "sm-1", number: 1, name: "Drone Survey", tasks: [
+    { id: "sm-1-t0", name: "Drone no longer touching the mat", type: "bool", points: 20 },
+    { id: "sm-1-t1", name: "Bonus: LiDAR map flipped, scan marker at least partly in survey area", type: "bool", points: 10 },
+  ] },
+  { id: "sm-2", number: 2, name: "Exploding Seeds", tasks: [
+    { id: "sm-2-t0", name: "Seeds no longer touching the stalk (each)", type: "number", max: 3, pointsPerUnit: 10 }, // exact seed count unclear — verify max
+  ] },
+  { id: "sm-3", number: 3, name: "Flip the Rock", tasks: [
+    { id: "sm-3-t0", name: "Research flag is down", type: "bool", points: 20 },
+    { id: "sm-3-t1", name: "Bonus: rock returned to original starting position", type: "bool", points: 10 },
+  ] },
+  { id: "sm-4", number: 4, name: "Lucky Leaves", tasks: [
+    { id: "sm-4-t0", name: "One leaf completely removed from nest", type: "bool", points: 10 },
+    { id: "sm-4-t1", name: "Bonus: second leaf removed + katydid in original position", type: "bool", points: 20 },
+  ] },
+  { id: "sm-5", number: 5, name: "Reaching Roots", tasks: [
+    { id: "sm-5-t0", name: "Plant root extended", type: "choice", options: [{ label: "Partially extended", points: 10 }, { label: "Completely extended", points: 20 }] },
+  ] },
+  { id: "sm-6", number: 6, name: "Leafcutter Frenzy", tasks: [
+    { id: "sm-6-t0", name: "Ant touching nest + leaf fragment contained (each)", type: "number", max: 2, pointsPerUnit: 10 }, // exact fragment count unclear — verify max
+  ] },
+  { id: "sm-7", number: 7, name: "Humongous Fungus", tasks: [
+    { id: "sm-7-t0", name: "Mycelium completely extended", type: "bool", points: 20 },
+    { id: "sm-7-t1", name: "Bonus: connection with opposing team's root (up to 2)", type: "number", max: 2, pointsPerUnit: 10 },
+  ] },
+  { id: "sm-8", number: 8, name: "Tangled", tasks: [
+    { id: "sm-8-t0", name: "Vine touching the mat", type: "bool", points: 30 },
+  ] },
+  { id: "sm-9", number: 9, name: "Research Platform", tasks: [
+    { id: "sm-9-t0", name: "Research platform raised", type: "bool", points: 10 },
+    { id: "sm-9-t1", name: "Camera trap deployed", type: "bool", points: 10 },
+  ] },
+  { id: "sm-11", number: 11, name: "Window to the Past", tasks: [
+    { id: "sm-11-t0", name: "Root cover down, touching the mat", type: "bool", points: 20 },
+    { id: "sm-11-t1", name: "Mission completed (tracking only)", type: "bool", points: 0 },
+  ] },
+  { id: "sm-12", number: 12, name: "Forest Elder", tasks: [
+    { id: "sm-12-t0", name: "Cane completely raised, touching the tree", type: "bool", points: 20 },
+    { id: "sm-12-t1", name: "Support tie around the post", type: "bool", points: 10 },
+    { id: "sm-12-t2", name: "Mission completed (tracking only)", type: "bool", points: 0 },
+  ] },
+  { id: "sm-13", number: 13, name: "Keystone Species", tasks: [
+    { id: "sm-13-t0", name: "Keystone species on restoration platform + young trees raised", type: "bool", points: 30 },
+  ] },
+  { id: "sm-14", number: 14, name: "Seeds of Renewal", tasks: [
+    { id: "sm-14-t0", name: "Seeds contained within replantation station (each)", type: "number", max: 3, pointsPerUnit: 5 }, // exact seed count unclear — verify max
+    { id: "sm-14-t1", name: "Bonus: seeds also touching the mat (each)", type: "number", max: 3, pointsPerUnit: 5 },
+  ] },
+  { id: "sm-15", number: 15, name: "Biocentric Architecture", tasks: [
+    { id: "sm-15-t0", name: "Nesting canopy raised", type: "bool", points: 10 },
+    { id: "sm-15-t1", name: "Garden skylight completely in", type: "bool", points: 10 },
+    { id: "sm-15-t2", name: "Compost hatch completely opened, touching the mat", type: "bool", points: 10 },
+    { id: "sm-15-t3", name: "Environmental bonus (matches the dock's ecological need)", type: "bool", points: 10 },
+  ] },
+];
 // A bank task is "used" once it's been copied onto some Run's mission list
 // (tracked via bankTaskId on the copy) — this is what makes "only use each
 // mission once" and "assign part of a mission" work: each task in the bank
@@ -1401,175 +1460,6 @@ function usedBankTaskIds() {
     }
   }
   return used;
-}
-function unusedBankTasks(bankMission) {
-  const used = usedBankTaskIds();
-  return visibleTasks(bankMission).filter((t) => !used.has(t.id));
-}
-// Same bug class as Base Robot: two devices loading for the first time
-// before Firestore has synced anything down would each independently seed
-// their own full 15-mission set with random IDs, creating real duplicate
-// Firestore documents. Fixed here the same two ways — fixed, deterministic
-// IDs (so simultaneous first-loads land on the exact same documents instead
-// of creating new ones) plus a dedupe pass that can also run later if any
-// duplicates already exist from before this fix.
-async function dedupeMissionBank() {
-  const all = await dbGetAll("missionBank");
-  const active = all.filter((m) => !m.deleted);
-  const groups = new Map();
-  for (const m of active) {
-    const key = m.number != null ? `n:${m.number}` : `name:${(m.name || "").toLowerCase()}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(m);
-  }
-  let mergedAny = false;
-  const assignedMissions = await dbGetAll("missions");
-  for (const group of groups.values()) {
-    if (group.length <= 1) continue;
-    mergedAny = true;
-    group.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-    const survivor = group[0];
-    for (const dup of group.slice(1)) {
-      // Anything already assigned to a Run from the duplicate's tasks gets
-      // remapped onto the survivor's matching task (by name) so it doesn't
-      // go orphaned.
-      for (const assigned of assignedMissions) {
-        let touched = false;
-        for (const t of assigned.tasks || []) {
-          if (!t.bankTaskId) continue;
-          const dupTask = (dup.tasks || []).find((dt) => dt.id === t.bankTaskId);
-          if (!dupTask) continue;
-          const match = (survivor.tasks || []).find((st) => st.name === dupTask.name);
-          if (match) { t.bankTaskId = match.id; touched = true; }
-        }
-        if (touched) await dbPut("missions", assigned);
-      }
-      dup.deleted = true;
-      dup.deletedAt = Date.now();
-      await dbPut("missionBank", dup);
-    }
-  }
-  return mergedAny;
-}
-async function ensureMissionBankSeeded() {
-  const merged = await dedupeMissionBank();
-  const existing = await dbGetAll("missionBank");
-  if (existing.length) { if (merged) await loadMissionBank(); return; } // already set up (or cleared on purpose) — never re-seed over that
-  const bool = (name, points) => ({ name, type: "bool", points });
-  const num = (name, max, pointsPerUnit) => ({ name, type: "number", max, pointsPerUnit });
-  const choice = (name, options) => ({ name, type: "choice", options });
-  // Seeded once from the official BIOGLOW (2026-27) Robot Game Rulebook so
-  // there's a real starting point instead of a blank page — but the PDF's
-  // two-column layout scrambled some scoring text out of order during
-  // extraction, so a few missions (flagged below) are a best-effort
-  // reconstruction. Double-check point values, task splits, and exact
-  // counts ("each") against the real rulebook or official scoring
-  // calculator before relying on this — everything here is fully editable.
-  const seasonMissions = [
-    { number: 1, name: "Drone Survey", tasks: [
-      bool("Drone no longer touching the mat", 20),
-      bool("Bonus: LiDAR map flipped, scan marker at least partly in survey area", 10),
-    ] },
-    { number: 2, name: "Exploding Seeds", tasks: [
-      num("Seeds no longer touching the stalk (each)", 3, 10), // exact seed count unclear — verify max
-    ] },
-    { number: 3, name: "Flip the Rock", tasks: [
-      bool("Research flag is down", 20),
-      bool("Bonus: rock returned to original starting position", 10),
-    ] },
-    { number: 4, name: "Lucky Leaves", tasks: [
-      bool("One leaf completely removed from nest", 10),
-      bool("Bonus: second leaf removed + katydid in original position", 20),
-    ] },
-    { number: 5, name: "Reaching Roots", tasks: [
-      choice("Plant root extended", [{ label: "Partially extended", points: 10 }, { label: "Completely extended", points: 20 }]),
-    ] },
-    { number: 6, name: "Leafcutter Frenzy", tasks: [
-      num("Ant touching nest + leaf fragment contained (each)", 2, 10), // exact fragment count unclear — verify max
-    ] },
-    { number: 7, name: "Humongous Fungus", tasks: [
-      bool("Mycelium completely extended", 20),
-      num("Bonus: connection with opposing team's root (up to 2)", 2, 10),
-    ] },
-    { number: 8, name: "Tangled", tasks: [
-      bool("Vine touching the mat", 30),
-    ] },
-    { number: 9, name: "Research Platform", tasks: [
-      bool("Research platform raised", 10),
-      bool("Camera trap deployed", 10),
-    ] },
-    { number: 11, name: "Window to the Past", tasks: [
-      bool("Root cover down, touching the mat", 20),
-      bool("Mission completed (tracking only)", 0),
-    ] },
-    { number: 12, name: "Forest Elder", tasks: [
-      bool("Cane completely raised, touching the tree", 20),
-      bool("Support tie around the post", 10),
-      bool("Mission completed (tracking only)", 0),
-    ] },
-    { number: 13, name: "Keystone Species", tasks: [
-      bool("Keystone species on restoration platform + young trees raised", 30),
-    ] },
-    { number: 14, name: "Seeds of Renewal", tasks: [
-      num("Seeds contained within replantation station (each)", 3, 5), // exact seed count unclear — verify max
-      num("Bonus: seeds also touching the mat (each)", 3, 5),
-    ] },
-    { number: 15, name: "Biocentric Architecture", tasks: [
-      bool("Nesting canopy raised", 10),
-      bool("Garden skylight completely in", 10),
-      bool("Compost hatch completely opened, touching the mat", 10),
-      bool("Environmental bonus (matches the dock's ecological need)", 10),
-    ] },
-  ];
-  for (const [i, m] of seasonMissions.entries()) {
-    const missionId = `season-mission-${m.number}`;
-    const tasks = m.tasks.map((t, ti) => ({ ...t, id: `${missionId}-t${ti}` }));
-    await dbPut("missionBank", { id: missionId, order: i, number: m.number, name: m.name, tasks, taskSeq: tasks.length, createdAt: Date.now() });
-  }
-  await loadMissionBank();
-}
-// One-time correction for banks already seeded before this fix existed:
-// Fragile Microhabitats (#10) turned out to be a bad reconstruction of the
-// scrambled rulebook PDF — its "tasks" actually belonged to Forest Elder,
-// which is why they were removed from there too. Matches by mission
-// *number* (not id) so it works whether the bank has the newer fixed IDs or
-// older random ones from before that fix. Every check here is idempotent —
-// safe to run on every device even if a couple of them apply it around the
-// same time before syncing, since they'll all converge on the same result.
-async function applyMissionBankContentFix1() {
-  const alreadyApplied = await dbGet("meta", "missionBankFix1Applied");
-  if (alreadyApplied?.value) return;
-  const bank = await dbGetAll("missionBank");
-  let touched = false;
-
-  const m10 = bank.find((m) => m.number === 10 && !m.deleted);
-  if (m10) { m10.deleted = true; m10.deletedAt = Date.now(); await dbPut("missionBank", m10); touched = true; }
-
-  const m12 = bank.find((m) => m.number === 12 && !m.deleted);
-  if (m12) {
-    m12.tasks = m12.tasks || [];
-    for (const t of m12.tasks) {
-      if (/spider habitat|snail habitat/i.test(t.name) && !t.deleted) { t.deleted = true; t.deletedAt = Date.now(); touched = true; }
-    }
-    if (!m12.tasks.some((t) => t.id === "fix1-forest-elder-tracker")) {
-      m12.tasks.push({ id: "fix1-forest-elder-tracker", name: "Mission completed (tracking only)", type: "bool", points: 0 });
-      touched = true;
-    }
-    await dbPut("missionBank", m12);
-  }
-
-  const m11 = bank.find((m) => m.number === 11 && !m.deleted);
-  if (m11) {
-    m11.tasks = m11.tasks || [];
-    if (!m11.tasks.some((t) => t.id === "fix1-window-tracker")) {
-      m11.tasks.push({ id: "fix1-window-tracker", name: "Mission completed (tracking only)", type: "bool", points: 0 });
-      await dbPut("missionBank", m11);
-      touched = true;
-    }
-  }
-
-  await dbPut("meta", { key: "missionBankFix1Applied", value: true });
-  if (touched) { await loadMissionBank(); syncToTeamDrive(); }
 }
 // Deleted tasks stay in mission.tasks (so they can be restored later) — every
 // place that displays or scores a mission's tasks should read through this,
@@ -1595,8 +1485,8 @@ async function restoreDeletedTask(missionId, taskId, storeName = "missions") {
   delete t.deleted;
   delete t.deletedAt;
   await dbPut(storeName, m);
-  if (storeName === "missionBank") { await loadMissionBank(); renderMissionBank(); }
-  else { await loadMissions(); renderRunGroups(); }
+  await loadMissions();
+  renderRunGroups();
   syncToTeamDrive();
 }
 
@@ -1606,145 +1496,35 @@ function taskSubLabel(t) {
   return `Multi-state · max ${taskMaxPoints(t)} pts`;
 }
 
-// ---- Mission Bank (season-wide mission library) ----
-
-function renderMissionBankOrderToolbar() {
-  const el = document.getElementById("missionbank-order-toolbar-top");
-  if (!el) return;
-  const editing = state.editingMissionBankOrder;
-  el.innerHTML = editing
-    ? `<div class="edit-mode-toolbar">
-         <div class="btn-group"><button type="button" class="btn btn-amber btn-sm" id="btn-add-bankmission">+ Mission</button></div>
-         <div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-save-bank-order">Save</button><button type="button" class="btn-small-link" id="btn-cancel-bank-order">Cancel</button></div>
-       </div>`
-    : `<div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-edit-bank-order">Edit</button></div>`;
-  if (editing) {
-    document.getElementById("btn-add-bankmission").addEventListener("click", () => openBankMissionModal(null));
-    document.getElementById("btn-save-bank-order").addEventListener("click", saveMissionBankOrder);
-    document.getElementById("btn-cancel-bank-order").addEventListener("click", async () => {
-      state.editingMissionBankOrder = false;
-      await loadMissionBank();
-      renderMissionBank();
-    });
-  } else {
-    document.getElementById("btn-edit-bank-order").addEventListener("click", () => {
-      state.editingMissionBankOrder = true;
-      renderMissionBank();
-    });
-  }
-}
-
-async function saveMissionBankOrder() {
-  const missionEls = [...document.querySelectorAll("#missionbank-list > [data-bmid]")];
-  missionEls.forEach((el, idx) => {
-    const m = state.missionBank.find((x) => x.id === el.dataset.bmid);
-    if (!m) return;
-    m.order = idx;
-    const taskEls = [...el.querySelectorAll(".task-list > [data-tid]")];
-    if (taskEls.length) {
-      const reordered = taskEls.map((te) => visibleTasks(m).find((t) => t.id === te.dataset.tid)).filter(Boolean);
-      const deletedTasks = m.tasks.filter((t) => t.deleted);
-      m.tasks = [...reordered, ...deletedTasks];
-    }
-  });
-  for (const m of state.missionBank) await dbPut("missionBank", m);
-  state.editingMissionBankOrder = false;
-  await loadMissionBank();
-  renderMissionBank();
-  syncToTeamDrive();
-}
+// ---- Mission Bank (season-wide mission library — read-only, hardcoded) ----
 
 function renderMissionBank() {
-  renderMissionBankOrderToolbar();
   const list = document.getElementById("missionbank-list");
   if (!list) return;
-  const editing = state.editingMissionBankOrder;
   list.innerHTML = "";
-  if (!state.missionBank.length) {
-    list.innerHTML = `<p class="empty-sub">No missions yet.${editing ? "" : " Tap Edit to add one."}</p>`;
-    return;
-  }
   const used = usedBankTaskIds();
-  state.missionBank.forEach((m) => {
-    const expanded = editing ? true : state.expandedBankMissions.has(m.id);
-    const tasks = visibleTasks(m);
-    const usedCount = tasks.filter((t) => used.has(t.id)).length;
+  SEASON_MISSIONS.forEach((m) => {
+    const expanded = state.expandedBankMissions.has(m.id);
+    const usedCount = m.tasks.filter((t) => used.has(t.id)).length;
     const wrap = document.createElement("div");
     wrap.dataset.bmid = m.id;
     wrap.className = "mission-group";
     wrap.innerHTML = `
-      <div class="mission-row mission-group-head${editing ? "" : " mission-expand-target"}" data-act="expand">
-        ${editing ? `<span class="drag-handle">&#9776;</span>` : ""}
+      <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
         <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
-          <div class="m-name">${m.number != null ? `#${esc(m.number)} ` : ""}${esc(m.name)}</div>
-          <div class="m-sub">${tasks.length} task${tasks.length === 1 ? "" : "s"} &middot; max ${missionMaxPoints(m)} pts${usedCount ? ` &middot; ${usedCount}/${tasks.length} assigned to a Run` : ""}</div>
+          <div class="m-name">#${esc(m.number)} ${esc(m.name)}</div>
+          <div class="m-sub">${m.tasks.length} task${m.tasks.length === 1 ? "" : "s"} &middot; max ${missionMaxPoints(m)} pts${usedCount ? ` &middot; ${usedCount}/${m.tasks.length} assigned to a Run` : ""}</div>
         </div>
-        ${editing ? `<button class="btn-icon btn-icon-add" data-act="add-task" title="Add a task">&#43;</button><button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>` : ""}
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
-    const bankOpts = { storeName: "missionBank", onChange: async () => { await loadMissionBank(); renderMissionBank(); }, expandSet: state.expandedBankMissions };
-    if (!editing) {
-      wrap.querySelector('[data-act="expand"]').addEventListener("click", () => {
-        if (expanded) state.expandedBankMissions.delete(m.id); else state.expandedBankMissions.add(m.id);
-        renderMissionBank();
-      });
-    } else {
-      wrap.querySelector('[data-act="add-task"]').addEventListener("click", () => openTaskModal(m, null, bankOpts));
-      wrap.querySelector('[data-act="edit"]').addEventListener("click", () => openBankMissionModal(m));
-      wrap.querySelector('[data-act="del"]').addEventListener("click", async () => {
-        if (usedCount) { alert(`"${m.name}" has ${usedCount} task${usedCount === 1 ? "" : "s"} already assigned to a Run — remove ${usedCount === 1 ? "it" : "them"} from the Run first.`); return; }
-        if (!confirm(`Delete mission "${m.name}" and all its tasks?`)) return;
-        m.deleted = true;
-        m.deletedAt = Date.now();
-        await dbPut("missionBank", m);
-        await loadMissionBank();
-        renderMissionBank();
-        syncToTeamDrive();
-        showUndoToast(`Deleted mission "${m.name}".`, async () => {
-          const bm = await dbGet("missionBank", m.id);
-          if (!bm) return;
-          delete bm.deleted;
-          delete bm.deletedAt;
-          await dbPut("missionBank", bm);
-          await loadMissionBank();
-          renderMissionBank();
-          syncToTeamDrive();
-        });
-      });
-    }
-    if (expanded) renderTaskList(wrap.querySelector(".task-list"), m, bankOpts);
+    wrap.querySelector('[data-act="expand"]').addEventListener("click", () => {
+      if (expanded) state.expandedBankMissions.delete(m.id); else state.expandedBankMissions.add(m.id);
+      renderMissionBank();
+    });
+    if (expanded) renderTaskList(wrap.querySelector(".task-list"), m, { readOnly: true });
     list.appendChild(wrap);
-  });
-  if (editing && state.missionBank.length) makeSortable(list);
-}
-
-function openBankMissionModal(m) {
-  const isEdit = !!m;
-  openModal(`
-    <h2>${isEdit ? "Edit mission" : "New mission"}</h2>
-    <div class="field"><label>Official mission number</label><input class="text-input" id="m-mission-number" type="number" value="${isEdit && m.number != null ? m.number : ""}" placeholder="e.g. 7"></div>
-    <div class="field"><label>Mission name</label><input class="text-input" id="m-mission-name" value="${isEdit ? esc(m.name) : ""}" placeholder="e.g. Coral nursery"></div>
-    <div class="modal-actions">
-      <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
-      <button class="btn btn-primary" id="m-save" type="button">Save</button>
-    </div>
-  `);
-  document.getElementById("m-cancel").addEventListener("click", closeModal);
-  document.getElementById("m-save").addEventListener("click", async () => {
-    const name = document.getElementById("m-mission-name").value.trim();
-    if (!name) { alert("Name this mission."); return; }
-    const numberVal = document.getElementById("m-mission-number").value.trim();
-    const record = isEdit ? m : { id: crypto.randomUUID(), order: state.missionBank.length, tasks: [], taskSeq: 0 };
-    record.name = name;
-    record.number = numberVal === "" ? null : Number(numberVal);
-    const id = await dbPut("missionBank", record);
-    closeModal();
-    if (!isEdit) state.expandedBankMissions.add(id);
-    await loadMissionBank();
-    renderMissionBank();
-    syncToTeamDrive();
   });
 }
 
@@ -1754,7 +1534,7 @@ function openBankMissionModal(m) {
 // multiple Runs — whatever's left unchecked stays available for another Run).
 function openAddMissionFromBankModal(group) {
   const used = usedBankTaskIds();
-  const available = state.missionBank
+  const available = SEASON_MISSIONS
     .map((bm) => ({ bm, remaining: visibleTasks(bm).filter((t) => !used.has(t.id)) }))
     .filter((x) => x.remaining.length > 0);
   if (!available.length) {
@@ -1782,7 +1562,7 @@ function openAddMissionFromBankModal(group) {
   document.getElementById("m-cancel").addEventListener("click", closeModal);
   document.querySelectorAll(".iter-attachment-grid [data-bmid]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const bm = state.missionBank.find((x) => x.id === btn.dataset.bmid);
+      const bm = SEASON_MISSIONS.find((x) => x.id === btn.dataset.bmid);
       openPickMissionTasksModal(bm, group);
     });
   });
@@ -2190,7 +1970,7 @@ function optionRowHtml(label = "", points = 0) {
 function renderTaskList(container, mission, opts = {}) {
   const storeName = opts.storeName || "missions";
   const onChange = opts.onChange || (async () => { await loadMissions(); renderRunGroups(); });
-  const editing = storeName === "missionBank" ? state.editingMissionBankOrder : state.editingAllOrder;
+  const editing = opts.readOnly ? false : state.editingAllOrder;
   container.innerHTML = "";
   visibleTasks(mission).forEach((t) => {
     const row = document.createElement("div");
@@ -4095,7 +3875,7 @@ document.getElementById("file-import-backup").addEventListener("change", async (
 // it persists sign-in across reloads on its own (stored in IndexedDB by the
 // SDK), so there's no more manual silent-reissue logic needed here.
 state.firebaseUser = null;
-const FIRESTORE_COLLECTIONS = ["attachments", "entries", "runGroups", "missions", "missionBank", "runs"];
+const FIRESTORE_COLLECTIONS = ["attachments", "entries", "runGroups", "missions", "runs"];
 let firestoreListenersStarted = false;
 
 function initFirebaseAuth() {
@@ -4930,7 +4710,6 @@ async function refreshAfterRemoteChange(storeName) {
   else if (storeName === "entries") { renderAttachmentChips(); await renderEntryList(); await renderIterationTotal(); renderAttachmentsSetup(); }
   else if (storeName === "runGroups") { await loadRunGroups(); await loadMissions(); }
   else if (storeName === "missions") { await loadMissions(); renderRunGroups(); }
-  else if (storeName === "missionBank") { const merged = await dedupeMissionBank(); await loadMissionBank(); if (merged) syncToTeamDrive(); }
   else if (storeName === "runs") { await loadRuns(); }
 }
 
@@ -5012,9 +4791,7 @@ async function initAll() {
   await ensureBaseRobotExists();
   await loadAttachments();
   await loadMissions();
-  await loadMissionBank();
-  await ensureMissionBankSeeded();
-  await applyMissionBankContentFix1();
+  renderMissionBank(); // hardcoded SEASON_MISSIONS — nothing to load
   await loadRunGroups();
   await loadRuns();
   await loadEquipmentInspectionSetting();
