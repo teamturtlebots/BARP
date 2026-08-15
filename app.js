@@ -383,11 +383,49 @@ const PRECISION_TOKENS_START = 6;
 // countdown.
 const EQUIPMENT_INSPECTION_BONUS = 20;
 
-function runMaxPoints(missions) { return missions.reduce((sum, m) => sum + missionMaxPoints(m), 0) + 50 + EQUIPMENT_INSPECTION_BONUS; }
+// Mission 10 ("Fragile Microhabitats") isn't assignable to a Run — it's a flat
+// 10-point bonus tracked per-run on the side, like Precision Tokens. It's
+// earned by default and lost entirely (not per-object) the moment either the
+// spider or the snail icon gets clicked (i.e. that object was knocked down
+// during the run, however that happened).
+const MISSION10_BONUS = 10;
+function mission10Bonus(run) {
+  return (run?.mission10SpiderDown || run?.mission10SnailDown) ? 0 : MISSION10_BONUS;
+}
+// Shared "Mission 10" row for the Bonuses section of both the live guided-run
+// overview screen and the past-run breakdown editor — a manual fallback for
+// the same spider/snail state the side widget sets during the run itself.
+function mission10BonusRowHTML(run) {
+  const spiderDown = !!run.mission10SpiderDown;
+  const snailDown = !!run.mission10SnailDown;
+  return `
+    <div class="gfs-task-row gfs-task-row-wrap">
+      <span class="gfs-task-name">Mission 10: Fragile Microhabitats <span class="gfs-task-pts">+${mission10Bonus(run)} / ${MISSION10_BONUS} pts</span></span>
+      <div class="gfs-choice-strip">
+        <button type="button" class="gfs-choice-btn${!spiderDown ? " active" : ""}" data-special="m10spider" data-val="up">&#128375;&#65039; Spider OK</button>
+        <button type="button" class="gfs-choice-btn${spiderDown ? " active" : ""}" data-special="m10spider" data-val="down">&#128375;&#65039; Knocked down</button>
+      </div>
+      <div class="gfs-choice-strip">
+        <button type="button" class="gfs-choice-btn${!snailDown ? " active" : ""}" data-special="m10snail" data-val="up">&#128012; Snail OK</button>
+        <button type="button" class="gfs-choice-btn${snailDown ? " active" : ""}" data-special="m10snail" data-val="down">&#128012; Knocked down</button>
+      </div>
+    </div>`;
+}
+function bindMission10BonusRow(scopeSelector, run, onChange) {
+  document.querySelectorAll(`${scopeSelector} [data-special="m10spider"]`).forEach((btn) => {
+    btn.addEventListener("click", () => { run.mission10SpiderDown = btn.dataset.val === "down"; onChange(); });
+  });
+  document.querySelectorAll(`${scopeSelector} [data-special="m10snail"]`).forEach((btn) => {
+    btn.addEventListener("click", () => { run.mission10SnailDown = btn.dataset.val === "down"; onChange(); });
+  });
+}
+
+function runMaxPoints(missions) { return missions.reduce((sum, m) => sum + missionMaxPoints(m), 0) + 50 + EQUIPMENT_INSPECTION_BONUS + MISSION10_BONUS; }
 function runTotal(run, missions) {
   return missions.reduce((sum, m) => sum + missionScoreForRun(m, run), 0)
     + precisionTokenBonus(run.precisionTokensRemaining ?? 0)
-    + (run.equipmentInspectionPassed ? EQUIPMENT_INSPECTION_BONUS : 0);
+    + (run.equipmentInspectionPassed ? EQUIPMENT_INSPECTION_BONUS : 0)
+    + mission10Bonus(run);
 }
 
 // ==========================================================
@@ -1411,7 +1449,7 @@ const SEASON_MISSIONS = [
     { id: "sm-5-t0", name: "Plant root extended", type: "choice", options: [{ label: "Partially extended", points: 10 }, { label: "Completely extended", points: 20 }] },
   ] },
   { id: "sm-6", number: 6, name: "Leafcutter Frenzy", tasks: [
-    { id: "sm-6-t0", name: "Ant touching nest + leaf fragment contained (each)", type: "number", max: 2, pointsPerUnit: 10 }, // exact fragment count unclear — verify max
+    { id: "sm-6-t0", name: "Ant touching nest + leaf fragment contained (each)", type: "number", max: 4, pointsPerUnit: 10 },
   ] },
   { id: "sm-7", number: 7, name: "Humongous Fungus", tasks: [
     { id: "sm-7-t0", name: "Mycelium completely extended", type: "bool", points: 20 },
@@ -1423,6 +1461,12 @@ const SEASON_MISSIONS = [
   { id: "sm-9", number: 9, name: "Research Platform", tasks: [
     { id: "sm-9-t0", name: "Research platform raised", type: "bool", points: 10 },
     { id: "sm-9-t1", name: "Camera trap deployed", type: "bool", points: 10 },
+  ] },
+  // Mission 10 isn't assigned to a Run like the others — it's tracked
+  // automatically per-run (like Precision Tokens) via the spider/snail
+  // icons on the side widget during a Guided Run. See mission10Bonus().
+  { id: "sm-10", number: 10, name: "Fragile Microhabitats", notAssignable: true, tasks: [
+    { id: "sm-10-t0", name: "Spider and snail stay undisturbed for the whole run", type: "bool", points: 10 },
   ] },
   { id: "sm-11", number: 11, name: "Window to the Past", tasks: [
     { id: "sm-11-t0", name: "Root cover down, touching the mat", type: "bool", points: 20 },
@@ -1437,8 +1481,8 @@ const SEASON_MISSIONS = [
     { id: "sm-13-t0", name: "Keystone species on restoration platform + young trees raised", type: "bool", points: 30 },
   ] },
   { id: "sm-14", number: 14, name: "Seeds of Renewal", tasks: [
-    { id: "sm-14-t0", name: "Seeds contained within replantation station (each)", type: "number", max: 3, pointsPerUnit: 5 }, // exact seed count unclear — verify max
-    { id: "sm-14-t1", name: "Bonus: seeds also touching the mat (each)", type: "number", max: 3, pointsPerUnit: 5 },
+    { id: "sm-14-t0", name: "Seeds contained within replantation station (each)", type: "number", max: 4, pointsPerUnit: 5 },
+    { id: "sm-14-t1", name: "Bonus: seeds also touching the mat (each)", type: "number", max: 4, pointsPerUnit: 5 },
   ] },
   { id: "sm-15", number: 15, name: "Biocentric Architecture", tasks: [
     { id: "sm-15-t0", name: "Nesting canopy raised", type: "bool", points: 10 },
@@ -1514,7 +1558,7 @@ function renderMissionBank() {
         <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
           <div class="m-name">#${esc(m.number)} ${esc(m.name)}</div>
-          <div class="m-sub">${m.tasks.length} task${m.tasks.length === 1 ? "" : "s"} &middot; max ${missionMaxPoints(m)} pts${usedCount ? ` &middot; ${usedCount}/${m.tasks.length} assigned to a Run` : ""}</div>
+          <div class="m-sub">${m.tasks.length} task${m.tasks.length === 1 ? "" : "s"} &middot; max ${missionMaxPoints(m)} pts &middot; ${m.notAssignable ? "tracked automatically, like Precision Tokens (not assignable to a Run)" : (usedCount ? `${usedCount}/${m.tasks.length} assigned to a Run` : "not yet assigned")}</div>
         </div>
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
@@ -1535,6 +1579,7 @@ function renderMissionBank() {
 function openAddMissionFromBankModal(group) {
   const used = usedBankTaskIds();
   const available = SEASON_MISSIONS
+    .filter((bm) => !bm.notAssignable)
     .map((bm) => ({ bm, remaining: visibleTasks(bm).filter((t) => !used.has(t.id)) }))
     .filter((x) => x.remaining.length > 0);
   if (!available.length) {
@@ -2258,14 +2303,50 @@ function playSoundAndWait(key, fallbackMs) {
   });
 }
 
-// ---- Precision tokens ----
+// ---- Precision tokens + Mission 10 side widget ----
+// Small vertical rectangle that floats over the guided-run screen: a coin
+// (Precision Tokens, counts down 6→0 same as before) stacked above two
+// critter icons for Mission 10 (spider, snail) — click one when that object
+// gets knocked down mid-run to gray it out and drop the flat Mission 10
+// bonus. Mission 10 is never assigned to a Run's mission list, so this is
+// the only place its state lives.
 function precisionTokenWidgetHTML() {
-  const remaining = state.guidedRun?.run?.precisionTokensRemaining ?? 0;
-  return `<button type="button" class="precision-token-btn" id="grn-token-btn">&#129689; Precision Tokens: <span id="grn-token-count">${remaining}</span></button>`;
+  const run = state.guidedRun?.run;
+  const remaining = run?.precisionTokensRemaining ?? 0;
+  const spiderDown = !!run?.mission10SpiderDown;
+  const snailDown = !!run?.mission10SnailDown;
+  return `
+    <div class="side-widget" id="grn-side-widget">
+      <button type="button" class="side-widget-btn side-widget-coin" id="grn-token-btn" title="Precision Tokens">
+        <span class="side-widget-icon">&#129689;</span>
+        <span class="side-widget-count" id="grn-token-count">${remaining}</span>
+      </button>
+      <button type="button" class="side-widget-btn side-widget-critter${spiderDown ? " is-down" : ""}" id="grn-m10-spider" title="Mission 10: spider knocked down">
+        <span class="side-widget-icon">&#128375;&#65039;</span>
+      </button>
+      <button type="button" class="side-widget-btn side-widget-critter${snailDown ? " is-down" : ""}" id="grn-m10-snail" title="Mission 10: snail knocked down">
+        <span class="side-widget-icon">&#128012;</span>
+      </button>
+    </div>
+  `;
 }
 function wirePrecisionTokenButton() {
-  const btn = document.getElementById("grn-token-btn");
-  if (btn) btn.addEventListener("click", usePrecisionToken);
+  const tokenBtn = document.getElementById("grn-token-btn");
+  if (tokenBtn) tokenBtn.addEventListener("click", usePrecisionToken);
+  document.querySelectorAll(".side-widget-critter").forEach((btn) => {
+    btn.addEventListener("click", () => toggleMission10Object(btn.id === "grn-m10-spider" ? "Spider" : "Snail"));
+  });
+}
+async function toggleMission10Object(which) {
+  const run = state.guidedRun?.run;
+  if (!run) return;
+  const key = `mission10${which}Down`;
+  run[key] = !run[key];
+  await dbPut("runs", run);
+  const btn = document.getElementById(`grn-m10-${which.toLowerCase()}`);
+  if (btn) btn.classList.toggle("is-down", !!run[key]);
+  const pointsEl = document.getElementById("grn-points");
+  if (pointsEl) pointsEl.textContent = `${liveScoreHTML()} pts`;
 }
 async function usePrecisionToken() {
   const run = state.guidedRun?.run;
@@ -2398,6 +2479,8 @@ async function actuallyStartRun() {
     inProgress: true,
     precisionTokensRemaining: PRECISION_TOKENS_START,
     equipmentInspectionPassed: pendingEquipmentInspection,
+    mission10SpiderDown: false,
+    mission10SnailDown: false,
     rawScores: {},
     missionTimings: [],
     transitionTimings: [],
@@ -2824,6 +2907,7 @@ function renderOverviewBody() {
         `<button type="button" class="gfs-num-btn${tokensLeft === i ? " active" : ""}" data-special="tokens" data-val="${i}">${i}</button>`
       ).join("")}</div>
     </div>
+    ${mission10BonusRowHTML(run)}
   </div>`;
   body.innerHTML = bonusHTML + state.runGroups.map((leg) => {
     const legMissions = getLegMissions(leg);
@@ -2859,6 +2943,7 @@ function bindOverviewEvents() {
       renderOverviewBody();
     });
   });
+  bindMission10BonusRow("#gfs-overview-body", state.guidedRun.run, renderOverviewBody);
   document.querySelectorAll('#gfs-overview-body [data-type="bool"] .gfs-choice-btn').forEach((btn) => {
     btn.addEventListener("click", () => {
       state.guidedRun.run.rawScores[btn.dataset.tid] = btn.dataset.val === "yes";
@@ -3189,6 +3274,7 @@ function renderBreakdownScoresTab() {
         `<button type="button" class="gfs-num-btn${tokensLeft === i ? " active" : ""}" data-special="tokens" data-val="${i}">${i}</button>`
       ).join("")}</div>
     </div>
+    ${mission10BonusRowHTML(run)}
   </div>`;
   const sectionsHTML = state.runGroups.map((leg) => {
     const legMissions = getLegMissions(leg);
@@ -3220,6 +3306,7 @@ function bindBreakdownEditEvents() {
   document.querySelectorAll('#brk-body [data-special="tokens"]').forEach((btn) => {
     btn.addEventListener("click", () => { run.precisionTokensRemaining = Number(btn.dataset.val); renderBreakdownScoresTab(); refreshBreakdownTotal(); });
   });
+  bindMission10BonusRow("#brk-body", run, () => { renderBreakdownScoresTab(); refreshBreakdownTotal(); });
   document.querySelectorAll('#brk-body [data-type="bool"] .gfs-choice-btn').forEach((btn) => {
     btn.addEventListener("click", () => { run.rawScores[btn.dataset.tid] = btn.dataset.val === "yes"; renderBreakdownScoresTab(); refreshBreakdownTotal(); });
   });
