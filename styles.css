@@ -695,7 +695,15 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .side-widget-btn:active { transform: scale(0.92); }
 .side-widget-coin { background: var(--amber); color: var(--ink-deep); }
 .side-widget-count { font-family: var(--mono); font-weight: 700; font-size: 0.7rem; }
+.side-widget-critter { position: relative; }
 .side-widget-critter.is-down { opacity: 0.4; filter: grayscale(1); background: rgba(255,255,255,0.04); }
+.side-widget-critter.is-down::before,
+.side-widget-critter.is-down::after {
+  content: ""; position: absolute; top: 6px; bottom: 6px; left: 50%; width: 3px;
+  background: var(--coral); border-radius: 2px; filter: none; opacity: 1;
+}
+.side-widget-critter.is-down::before { transform: translateX(-50%) rotate(45deg); }
+.side-widget-critter.is-down::after { transform: translateX(-50%) rotate(-45deg); }
 
 
 .gfs-task-prompt { font-family: var(--display); font-size: 1.25rem; font-weight: 700; color: var(--ink-deep); margin-bottom: 20px; }

@@ -1419,6 +1419,40 @@ async function recomputeGlobalMissionOrder() {
 async function loadMissions() {
   state.missions = (await dbGetAll("missions")).filter((m) => !m.deleted).sort((a, b) => a.order - b.order);
   state.missions.forEach((m) => { if (!m.tasks) m.tasks = []; if (m.taskSeq === undefined) m.taskSeq = 0; });
+  let anyChanged = false;
+  for (const m of state.missions) {
+    if (syncMissionFromBank(m)) { await dbPut("missions", m); anyChanged = true; }
+  }
+  if (anyChanged) syncToTeamDrive();
+}
+// Assigned missions are deep-copied from SEASON_MISSIONS when picked (see
+// openPickMissionTasksModal) so each Run's copy can be scored independently,
+// but each keeps a bankMissionId, and each task a bankTaskId, pointing back
+// to the bank. Re-apply the bank's current name/points/max onto every
+// loaded mission (and its tasks) so editing SEASON_MISSIONS — e.g. changing
+// a mission's max points — propagates to every Run that already has that
+// mission assigned, without having to re-add it. Record identity
+// (id/order/runGroupId), completion state (rawScores, keyed by task.id),
+// and deleted flags are never touched. Tasks that were never selected for a
+// given Run stay that way — this only updates tasks already assigned, it
+// never adds ones newly added to the bank after the fact.
+function syncMissionFromBank(m) {
+  const bm = SEASON_MISSIONS.find((x) => x.id === m.bankMissionId);
+  if (!bm) return false; // bank mission removed/renumbered id — leave the snapshot as-is
+  let changed = false;
+  if (m.name !== bm.name) { m.name = bm.name; changed = true; }
+  if (m.number !== bm.number) { m.number = bm.number; changed = true; }
+  for (const t of m.tasks || []) {
+    if (t.deleted || !t.bankTaskId) continue;
+    const bt = (bm.tasks || []).find((x) => x.id === t.bankTaskId);
+    if (!bt) continue; // bank task removed — leave this instance as-is
+    if (t.name !== bt.name) { t.name = bt.name; changed = true; }
+    if (t.type !== bt.type) { t.type = bt.type; changed = true; }
+    if (t.points !== bt.points) { t.points = bt.points; changed = true; }
+    if (t.max !== bt.max) { t.max = bt.max; changed = true; }
+    if (t.pointsPerUnit !== bt.pointsPerUnit) { t.pointsPerUnit = bt.pointsPerUnit; changed = true; }
+  }
+  return changed;
 }
 // The season's missions, hardcoded and read-only — not stored in the
 // database or synced at all, specifically so there's nothing left to
