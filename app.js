@@ -528,6 +528,45 @@ async function ensureBaseRobotExists() {
     createdAt: Date.now(),
   });
 }
+// Merges duplicate non-Base-Robot attachments that share a name (trimmed,
+// case-insensitive), migrating logged iterations and run-group tags from
+// the extras onto the oldest one. This is the same problem dedupeBaseRobots
+// solves, generalized: two teammates working offline can each add "the
+// same" attachment before either has ever synced, so nothing catches it at
+// creation time — they get separate random IDs, and Firestore just ends up
+// with two or three separate docs once everyone's local copies merge.
+// Called both right before a push (so we never write a duplicate up in the
+// first place) and after every remote attachments change (so a device that
+// pulls someone else's duplicate cleans it up too).
+async function dedupeAttachmentsByName() {
+  const all = await dbGetAll("attachments");
+  const byName = new Map();
+  for (const a of all) {
+    if (a.deleted || a.isBaseRobot) continue;
+    const key = (a.name || "").trim().toLowerCase();
+    if (!key) continue;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(a);
+  }
+  let mergedAny = false;
+  for (const dupes of byName.values()) {
+    if (dupes.length <= 1) continue;
+    dupes.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    const survivor = dupes[0];
+    for (const dup of dupes.slice(1)) {
+      const dupEntries = await dbGetByIndex("entries", "byAttachment", dup.id);
+      for (const e of dupEntries) { e.attachmentId = survivor.id; await dbPut("entries", e); }
+      survivor.runGroupIds = Array.from(new Set([...(survivor.runGroupIds || []), ...(dup.runGroupIds || [])]));
+      if (!survivor.photo && dup.photo) survivor.photo = dup.photo;
+      dup.deleted = true;
+      dup.deletedAt = Date.now();
+      await dbPut("attachments", dup);
+    }
+    await dbPut("attachments", survivor);
+    mergedAny = true;
+  }
+  return mergedAny;
+}
 async function restoreDeletedAttachment(id) {
   const att = await dbGet("attachments", id);
   if (!att) return;
@@ -1387,6 +1426,50 @@ function stopRecognizer() { if (recognizer) { try { recognizer.stop(); } catch (
 async function loadRunGroups() {
   state.runGroups = (await dbGetAll("runGroups")).filter((g) => !g.deleted).sort((a, b) => a.order - b.order);
   renderRunGroups();
+}
+// Same problem as dedupeAttachmentsByName, for Run Groups (the named legs
+// under the Runs tab): merges duplicates that share a name (trimmed,
+// case-insensitive — blank-named groups are skipped, since a single
+// unnamed leg is a deliberate one-leg-season setup, not a duplicate),
+// repointing every mission, attachment tag, and logged mission-timing that
+// referenced the extras onto the oldest one before soft-deleting them.
+async function dedupeRunGroupsByName() {
+  const all = await dbGetAll("runGroups");
+  const byName = new Map();
+  for (const g of all) {
+    if (g.deleted) continue;
+    const key = (g.name || "").trim().toLowerCase();
+    if (!key) continue;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(g);
+  }
+  let mergedAny = false;
+  for (const dupes of byName.values()) {
+    if (dupes.length <= 1) continue;
+    dupes.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const survivor = dupes[0];
+    for (const dup of dupes.slice(1)) {
+      for (const m of await dbGetAll("missions")) {
+        if (m.runGroupId === dup.id) { m.runGroupId = survivor.id; await dbPut("missions", m); }
+      }
+      for (const a of await dbGetAll("attachments")) {
+        if ((a.runGroupIds || []).includes(dup.id)) {
+          a.runGroupIds = Array.from(new Set(a.runGroupIds.map((id) => (id === dup.id ? survivor.id : id))));
+          await dbPut("attachments", a);
+        }
+      }
+      for (const r of await dbGetAll("runs")) {
+        let touched = false;
+        for (const mt of r.missionTimings || []) if (mt.runGroupId === dup.id) { mt.runGroupId = survivor.id; mt.runGroupName = survivor.name; touched = true; }
+        if (touched) await dbPut("runs", r);
+      }
+      dup.deleted = true;
+      dup.deletedAt = Date.now();
+      await dbPut("runGroups", dup);
+    }
+    mergedAny = true;
+  }
+  return mergedAny;
 }
 async function restoreDeletedRunGroup(id) {
   const g = await dbGet("runGroups", id);
@@ -3998,6 +4081,7 @@ document.getElementById("file-import-backup").addEventListener("change", async (
 state.firebaseUser = null;
 const FIRESTORE_COLLECTIONS = ["attachments", "entries", "runGroups", "missions", "runs"];
 let firestoreListenersStarted = false;
+let signInPromptShown = false; // only show the auto sign-in-prompt once per page load
 
 function initFirebaseAuth() {
   if (!window.firebaseAuth) {
@@ -4011,6 +4095,39 @@ function initFirebaseAuth() {
       firestoreListenersStarted = true;
       startFirestoreListeners();
       purgeOldTrash(); // re-run now that state.firebaseUser is actually set, so the Firestore-side purge (which was skipped at page load, before sign-in resolved) gets a chance to run
+    }
+    // Firebase Auth tries to silently restore a persisted session on load;
+    // this callback firing is how we know whether that worked. If it
+    // resolved with no user, the auto sign-in didn't find (or couldn't
+    // restore) one — prompt once so the person doesn't have to remember to
+    // dig into Settings to sync with their team. Everything still works
+    // fully offline if they close it, so this never blocks anything.
+    if (!user && !signInPromptShown) {
+      signInPromptShown = true;
+      showSignInPrompt();
+    }
+  });
+}
+function showSignInPrompt() {
+  if (state.firebaseUser) return; // already signed in by the time this got called
+  openModal(`
+    <h2>Sign in to sync</h2>
+    <p class="empty-sub">Sign in with Google to keep this device in sync with your team's data. You can keep using BARP fully offline without signing in.</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="signin-prompt-dismiss" type="button">Not now</button>
+      <button class="btn btn-primary" id="signin-prompt-btn" type="button">&#128100; Sign in with Google</button>
+    </div>
+  `);
+  document.getElementById("signin-prompt-dismiss").addEventListener("click", () => closeModal());
+  document.getElementById("signin-prompt-btn").addEventListener("click", async () => {
+    if (!window.firebaseAuth) { showErrorBanner("Sign-in isn't ready yet — check your internet connection and try again."); return; }
+    try {
+      await window.firebaseFns.signInWithPopup(window.firebaseAuth, new window.firebaseFns.GoogleAuthProvider());
+      closeModal();
+    } catch (e) {
+      if (e.code !== "auth/popup-closed-by-user" && e.code !== "auth/cancelled-popup-request") {
+        showErrorBanner(`Sign-in failed: ${e.message}`);
+      }
     }
   });
 }
@@ -4794,6 +4911,13 @@ function syncToTeamDrive() {
     });
 }
 async function performFirestoreSync() {
+  // Dedupe locally before gathering anything to push, so we never write a
+  // duplicate up to the team in the first place — see dedupeAttachmentsByName
+  // and dedupeRunGroupsByName for why these happen (two teammates adding
+  // "the same" thing offline, before either has synced).
+  await dedupeBaseRobots();
+  await dedupeAttachmentsByName();
+  await dedupeRunGroupsByName();
   const { collection, doc, setDoc } = window.firebaseFns;
   const db = window.firebaseDb;
   const writes = [];
@@ -4827,9 +4951,9 @@ function startFirestoreListeners() {
   });
 }
 async function refreshAfterRemoteChange(storeName) {
-  if (storeName === "attachments") { await dedupeBaseRobots(); await enforceBaseRobotName(); await renumberAttachments(); await loadAttachments(); syncToTeamDrive(); }
+  if (storeName === "attachments") { await dedupeBaseRobots(); await dedupeAttachmentsByName(); await enforceBaseRobotName(); await renumberAttachments(); await loadAttachments(); syncToTeamDrive(); }
   else if (storeName === "entries") { renderAttachmentChips(); await renderEntryList(); await renderIterationTotal(); renderAttachmentsSetup(); }
-  else if (storeName === "runGroups") { await loadRunGroups(); await loadMissions(); }
+  else if (storeName === "runGroups") { await dedupeRunGroupsByName(); await loadRunGroups(); await loadMissions(); syncToTeamDrive(); }
   else if (storeName === "missions") { await loadMissions(); renderRunGroups(); }
   else if (storeName === "runs") { await loadRuns(); }
 }
