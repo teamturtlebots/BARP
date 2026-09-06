@@ -383,14 +383,15 @@ const PRECISION_TOKENS_START = 6;
 // countdown.
 const EQUIPMENT_INSPECTION_BONUS = 20;
 
-// Mission 10 ("Fragile Microhabitats") isn't assignable to a Run — it's a flat
-// 10-point bonus tracked per-run on the side, like Precision Tokens. It's
-// earned by default and lost entirely (not per-object) the moment either the
-// spider or the snail icon gets clicked (i.e. that object was knocked down
-// during the run, however that happened).
-const MISSION10_BONUS = 10;
+// Mission 10 ("Fragile Microhabitats") isn't assignable to a Run — it's
+// tracked per-run on the side, like Precision Tokens. Each critter is worth
+// 10 on its own (20 total) and lost independently the moment its icon gets
+// clicked (i.e. that object was knocked down during the run) — knocking
+// over just the spider only costs the spider's 10, not the snail's too.
+const MISSION10_CRITTER_BONUS = 10;
+const MISSION10_BONUS = MISSION10_CRITTER_BONUS * 2;
 function mission10Bonus(run) {
-  return (run?.mission10SpiderDown || run?.mission10SnailDown) ? 0 : MISSION10_BONUS;
+  return (run?.mission10SpiderDown ? 0 : MISSION10_CRITTER_BONUS) + (run?.mission10SnailDown ? 0 : MISSION10_CRITTER_BONUS);
 }
 // Shared "Mission 10" row for the Bonuses section of both the live guided-run
 // overview screen and the past-run breakdown editor — a manual fallback for
@@ -402,11 +403,11 @@ function mission10BonusRowHTML(run) {
     <div class="gfs-task-row gfs-task-row-wrap">
       <span class="gfs-task-name">Mission 10: Fragile Microhabitats <span class="gfs-task-pts">+${mission10Bonus(run)} / ${MISSION10_BONUS} pts</span></span>
       <div class="gfs-choice-strip">
-        <button type="button" class="gfs-choice-btn${!spiderDown ? " active" : ""}" data-special="m10spider" data-val="up">&#128375;&#65039; Spider OK</button>
+        <button type="button" class="gfs-choice-btn${!spiderDown ? " active" : ""}" data-special="m10spider" data-val="up">&#128375;&#65039; Spider OK (+${MISSION10_CRITTER_BONUS})</button>
         <button type="button" class="gfs-choice-btn${spiderDown ? " active" : ""}" data-special="m10spider" data-val="down">&#128375;&#65039; Knocked down</button>
       </div>
       <div class="gfs-choice-strip">
-        <button type="button" class="gfs-choice-btn${!snailDown ? " active" : ""}" data-special="m10snail" data-val="up">&#128012; Snail OK</button>
+        <button type="button" class="gfs-choice-btn${!snailDown ? " active" : ""}" data-special="m10snail" data-val="up">&#128012; Snail OK (+${MISSION10_CRITTER_BONUS})</button>
         <button type="button" class="gfs-choice-btn${snailDown ? " active" : ""}" data-special="m10snail" data-val="down">&#128012; Knocked down</button>
       </div>
     </div>`;
@@ -426,6 +427,24 @@ function runTotal(run, missions) {
     + precisionTokenBonus(run.precisionTokensRemaining ?? 0)
     + (run.equipmentInspectionPassed ? EQUIPMENT_INSPECTION_BONUS : 0)
     + mission10Bonus(run);
+}
+// The score exactly as it stood the instant time ran out — captured once in
+// handleTimeExpired() and never touched again, even if "keep going after
+// buzzer" lets scoring continue past it. Returns null when there's nothing
+// to show separately: either time never ran out, or keep-going was off, in
+// which case the final score already *is* the timed score.
+function runTimedTotal(run, missions) {
+  if (!run.timedSnapshot) return null;
+  return runTotal(run.timedSnapshot, missions);
+}
+// Renders "<timed> timed · <final> final" when the two diverge (only
+// possible with keep-going-after-buzzer), otherwise just the plain total —
+// used everywhere a run's score is shown as a single big number.
+function scoreDisplayHTML(run, missions) {
+  const timed = runTimedTotal(run, missions);
+  const finalScore = runTotal(run, missions);
+  if (timed == null) return `${finalScore}`;
+  return `<span class="gfs-timer-dual">${timed} <span class="gfs-timer-sub">timed</span> &middot; ${finalScore} <span class="gfs-timer-sub">final</span></span>`;
 }
 
 // ==========================================================
@@ -1578,12 +1597,16 @@ const SEASON_MISSIONS = [
   { id: "sm-9", number: 9, name: "Research Platform", tasks: [
     { id: "sm-9-t0", name: "Research platform raised", type: "bool", points: 10 },
     { id: "sm-9-t1", name: "Camera trap deployed", type: "bool", points: 10 },
+    { id: "sm-9-t2", name: "The seed is no longer touching the tree", type: "bool", points: 10 },
   ] },
   // Mission 10 isn't assigned to a Run like the others — it's tracked
   // automatically per-run (like Precision Tokens) via the spider/snail
   // icons on the side widget during a Guided Run. See mission10Bonus().
+  // Each critter is worth 10 on its own (max 20), lost independently —
+  // knocking over just the spider only costs the spider's 10, not both.
   { id: "sm-10", number: 10, name: "Fragile Microhabitats", notAssignable: true, tasks: [
-    { id: "sm-10-t0", name: "Spider and snail stay undisturbed for the whole run", type: "bool", points: 10 },
+    { id: "sm-10-t0", name: "Spider undisturbed for the whole run", type: "bool", points: 10 },
+    { id: "sm-10-t1", name: "Snail undisturbed for the whole run", type: "bool", points: 10 },
   ] },
   { id: "sm-11", number: 11, name: "Window to the Past", tasks: [
     { id: "sm-11-t0", name: "Root cover down, touching the mat", type: "bool", points: 20 },
@@ -1592,10 +1615,11 @@ const SEASON_MISSIONS = [
   { id: "sm-12", number: 12, name: "Forest Elder", tasks: [
     { id: "sm-12-t0", name: "Cane completely raised, touching the tree", type: "bool", points: 20 },
     { id: "sm-12-t1", name: "Support tie around the post", type: "bool", points: 10 },
-    { id: "sm-12-t2", name: "Mission completed (tracking only)", type: "bool", points: 0 },
+    { id: "sm-12-t2", name: "Seed collected (tracking only)", type: "bool", points: 0 },
   ] },
   { id: "sm-13", number: 13, name: "Keystone Species", tasks: [
     { id: "sm-13-t0", name: "Keystone species on restoration platform + young trees raised", type: "bool", points: 30 },
+    { id: "sm-13-t1", name: "Seed collected (tracking only)", type: "bool", points: 0 },
   ] },
   { id: "sm-14", number: 14, name: "Seeds of Renewal", tasks: [
     { id: "sm-14-t0", name: "Seeds contained within replantation station (each)", type: "number", max: 4, pointsPerUnit: 5 },
@@ -2669,7 +2693,32 @@ function handleTimeExpired() {
   const header = document.querySelector(".gfs-header");
   if (header) header.classList.add("header-danger");
 
+  // Snapshot exactly where things stood the instant time ran out — used by
+  // the Timing tab to draw a marker at this point in the run. Only
+  // meaningful in interactive mode, where missionIdxInLeg/missionStartTs
+  // actually track a mission in progress; the free-form overview mode
+  // never advances them, and never records missionTimings at all.
+  if (state.interactiveScoringEnabled) {
+    const leg = state.runGroups[gr.legIdx];
+    const legMissions = leg ? getLegMissions(leg) : [];
+    const currentMission = legMissions[gr.missionIdxInLeg];
+    gr.run.timeExpiredAt = Date.now();
+    gr.run.timeExpiredMissionId = currentMission ? currentMission.id : null;
+    gr.run.timeExpiredMissionElapsedMs = Date.now() - gr.missionStartTs;
+  }
+
   if (state.keepGoingAfterBuzzer) {
+    // Freeze the score exactly as it stood when time ran out as the
+    // "Timed" score — scoring can keep going after this (it becomes the
+    // "Final"/untimed score), but the timed one never changes again.
+    gr.run.timedSnapshot = {
+      rawScores: JSON.parse(JSON.stringify(gr.run.rawScores || {})),
+      precisionTokensRemaining: gr.run.precisionTokensRemaining,
+      equipmentInspectionPassed: gr.run.equipmentInspectionPassed,
+      mission10SpiderDown: gr.run.mission10SpiderDown,
+      mission10SnailDown: gr.run.mission10SnailDown,
+    };
+    dbPut("runs", gr.run);
     // Let the user keep scoring — the timer keeps running (now counting up
     // past zero as overtime) instead of freezing the screen and forcing the
     // final overview the moment the clock hits zero.
@@ -2679,6 +2728,7 @@ function handleTimeExpired() {
     return;
   }
 
+  dbPut("runs", gr.run);
   const el = document.getElementById("grn-timer");
   if (el) el.textContent = fmtDuration(0);
   // Freeze the screen — no score changes, no precision token spending —
@@ -2706,7 +2756,10 @@ function liveTimerHTML() {
 }
 function liveScoreHTML() {
   if (!state.guidedRun) return "0 / 0";
-  return `${runTotal(state.guidedRun.run, state.missions)}`;
+  const { run } = state.guidedRun;
+  const timed = runTimedTotal(run, state.missions);
+  const finalScore = runTotal(run, state.missions);
+  return timed == null ? `${finalScore}` : `${timed} timed / ${finalScore} final`;
 }
 
 function openGuidedFullscreen(html) {
@@ -2984,11 +3037,11 @@ function renderGuidedOverview() {
       ${isLive ? `
         <div class="gfs-timer-row" style="justify-content:center; gap:24px;">
           <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
-          <div class="gfs-timer" id="gfs-overview-total">${runTotal(run, state.missions)}</div>
+          <div class="gfs-timer" id="gfs-overview-total">${scoreDisplayHTML(run, state.missions)}</div>
         </div>
         <div class="gfs-timer-label">time left &middot; score &middot; fill in scores below as you go</div>
       ` : `
-        <div class="gfs-timer" id="gfs-overview-total">${runTotal(run, state.missions)}</div>
+        <div class="gfs-timer" id="gfs-overview-total">${scoreDisplayHTML(run, state.missions)}</div>
         <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs)} total time &middot; review below or save now</div>
       `}
       <button class="btn btn-primary btn-full" id="grn-save-top" type="button" style="margin-top:12px;">&#10003; Save &amp; Finish</button>
@@ -3084,7 +3137,7 @@ function bindOverviewEvents() {
 
 function updateOverviewTotal() {
   const el = document.getElementById("gfs-overview-total");
-  if (el) el.textContent = `${runTotal(state.guidedRun.run, state.missions)}`;
+  if (el) el.innerHTML = scoreDisplayHTML(state.guidedRun.run, state.missions);
 }
 
 async function finalizeGuidedRun() {
@@ -3329,7 +3382,7 @@ function renderRunBreakdown(run) {
         <button type="button" class="brk-edit-icon-btn" id="brk-edit-btn" title="Edit">&#9998;&#65039;</button>
         <div class="guided-phase-badge">${esc(run.label)}</div>
       </div>
-      <div class="gfs-timer" id="brk-total">${runTotal(run, state.missions)}</div>
+      <div class="gfs-timer" id="brk-total">${scoreDisplayHTML(run, state.missions)}</div>
       <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs || 0)} total time &middot; avg operation time ${avgOp !== null ? fmtDuration(avgOp) : "&mdash;"}</div>
       <div class="brk-tabs">
         <button type="button" class="brk-tab-btn" data-tab="scores">Scores</button>
@@ -3442,7 +3495,7 @@ function bindBreakdownEditEvents() {
 function refreshBreakdownTotal() {
   const { run } = state.breakdown;
   const el = document.getElementById("brk-total");
-  if (el) el.textContent = `${runTotal(run, state.missions)}`;
+  if (el) el.innerHTML = scoreDisplayHTML(run, state.missions);
 }
 
 function renderBreakdownTimingTab() {
@@ -3450,6 +3503,17 @@ function renderBreakdownTimingTab() {
   const body = document.getElementById("brk-body");
   const missionTimings = run.missionTimings || [];
   const transitions = run.transitionTimings || [];
+  // "Time ran out" marker: drawn right before whichever mission was in
+  // progress the instant the buzzer sounded (see handleTimeExpired). If
+  // that mission was never actually finished (keep-going-after-buzzer was
+  // off), it has no row of its own here at all, so the marker just lands at
+  // the very end of what *was* completed instead — still "before" it, since
+  // there's nothing to be before.
+  let timeMarkerInserted = !run.timeExpiredAt;
+  const timeMarkerHTML = () => {
+    const elapsed = run.timeExpiredMissionElapsedMs != null ? fmtDuration(run.timeExpiredMissionElapsedMs) : null;
+    return `<div class="brk-time-marker"><span class="brk-time-marker-line"></span><span class="brk-time-marker-label">&#9201;&#65039; Time ran out${elapsed ? ` &middot; ${elapsed} into this mission` : ""}</span></div>`;
+  };
   let html = "";
   let transIdx = 0;
   let lastGroupId;
@@ -3473,12 +3537,18 @@ function renderBreakdownTimingTab() {
       groupRows = "";
       groupTotal = 0;
     }
+    if (!timeMarkerInserted && mt.missionId === run.timeExpiredMissionId) {
+      groupRows += timeMarkerHTML();
+      timeMarkerInserted = true;
+    }
     groupName = mt.runGroupName;
     groupTotal += mt.durationMs;
     groupRows += `<div class="gfs-task-row"><span class="gfs-task-name">${esc(mt.missionName)}</span><span class="gfs-task-pts">${fmtDuration(mt.durationMs)}</span></div>`;
     lastGroupId = mt.runGroupId;
   });
+  if (!timeMarkerInserted && groupName) { groupRows += timeMarkerHTML(); timeMarkerInserted = true; }
   flushGroup();
+  if (!timeMarkerInserted) html += timeMarkerHTML(); // nothing was completed at all before time ran out
   const avgOpTime = transitions.length ? transitions.reduce((s, t) => s + t.durationMs, 0) / transitions.length : 0;
   body.className = "gfs-body";
   body.innerHTML = `<p class="empty-sub">Avg operation time: ${transitions.length ? fmtDuration(avgOpTime) : "—"}</p>`

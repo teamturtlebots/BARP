@@ -562,6 +562,8 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 }
 .gfs-mission-name { color: var(--paper); font-size: 1.3rem; margin: 6px 0 10px; }
 .gfs-timer { font-family: var(--mono); font-size: 2.6rem; color: var(--amber); font-weight: 700; line-height: 1; }
+.gfs-timer-dual { font-size: 0.42em; }
+.gfs-timer-sub { font-size: 0.7em; opacity: 0.65; text-transform: uppercase; letter-spacing: 0.03em; }
 .gfs-timer-row { display: flex; align-items: baseline; justify-content: center; gap: 18px; }
 .gfs-points { font-family: var(--mono); font-size: 1.3rem; color: var(--paper); font-weight: 600; opacity: 0.85; }
 .gfs-timer-label { font-size: 0.72rem; color: var(--moss-light); text-transform: uppercase; letter-spacing: 0.04em; }
@@ -620,6 +622,9 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 }
 .brk-readonly button { pointer-events: none; }
 .brk-transition-row { font-style: normal; font-size: 1.05rem; font-weight: 600; color: var(--text); margin: 6px 0 18px; }
+.brk-time-marker { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+.brk-time-marker-line { flex: 1; height: 2px; background: var(--coral); border-radius: 1px; }
+.brk-time-marker-label { font-size: 0.78rem; font-weight: 700; color: var(--coral); white-space: nowrap; }
 .gfs-task-list { display: flex; flex-direction: column; gap: 8px; }
 
 .gfs-task-row {
