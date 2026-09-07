@@ -4448,9 +4448,12 @@ document.getElementById("btn-sheets-connect").addEventListener("click", async ()
 
 // ---- Sheet 1: Time Data ----
 // Rows are the Runs you actually set up in the app (state.runGroups — "Run
-// 1", "Run 2", etc.), not the official season missions — same organization
-// as tapping into a saved run's Timing tab: a Run's total time, and below it
-// the time for each mission currently assigned to that Run.
+// 1", "Run 2", etc.), not the official season missions. Each week gets two
+// columns: PrepTime (the transition/setup time right before that Run
+// starts) and Run Time (how long that Run's missions actually took) — same
+// two figures the original sheet tracked, just keyed by Run instead of by
+// official mission. A "Total Time" row at the bottom sums PrepTime + Run
+// Time across every Run, per week.
 function computeTimeDataForSheets() {
   const completed = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   function weekStart(ts) {
@@ -4459,74 +4462,69 @@ function computeTimeDataForSheets() {
     d.setDate(d.getDate() - d.getDay());
     return d.toISOString().slice(0, 10);
   }
-  const missionEntries = []; // { missionId, weekKey, durationMs } — one per mission timing
-  const groupEntries = []; // { runGroupId, weekKey, durationMs } — one per Run per completed game run (missions summed)
+  const runTimeEntries = []; // { runGroupId, weekKey, durationMs } — a Run's missions, summed, per completed game run
+  const prepTimeEntries = []; // { runGroupId, weekKey, durationMs } — the transition time right before that Run started
   completed.forEach((run) => {
     const weekKey = weekStart(run.startedAt || 0);
     const groupTotals = {};
-    (run.missionTimings || []).forEach((mt) => {
-      missionEntries.push({ missionId: mt.missionId, weekKey, durationMs: mt.durationMs });
-      groupTotals[mt.runGroupId] = (groupTotals[mt.runGroupId] || 0) + mt.durationMs;
-    });
-    Object.entries(groupTotals).forEach(([runGroupId, durationMs]) => groupEntries.push({ runGroupId, weekKey, durationMs }));
+    (run.missionTimings || []).forEach((mt) => { groupTotals[mt.runGroupId] = (groupTotals[mt.runGroupId] || 0) + mt.durationMs; });
+    Object.entries(groupTotals).forEach(([runGroupId, durationMs]) => runTimeEntries.push({ runGroupId, weekKey, durationMs }));
+    (run.transitionTimings || []).forEach((t) => prepTimeEntries.push({ runGroupId: t.beforeRunGroupId, weekKey, durationMs: t.durationMs }));
   });
-  const weekKeys = [...new Set([...missionEntries, ...groupEntries].map((e) => e.weekKey))].sort();
-  const avgSecByWeek = (entries) => {
-    const weeks = {};
-    weekKeys.forEach((wk) => {
-      const vals = entries.filter((e) => e.weekKey === wk).map((e) => e.durationMs);
-      weeks[wk] = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length / 1000) : "";
-    });
-    return weeks;
+  const weekKeys = [...new Set([...runTimeEntries, ...prepTimeEntries].map((e) => e.weekKey))].sort();
+  const avgSec = (entries, runGroupId, wk) => {
+    const vals = entries.filter((e) => e.runGroupId === runGroupId && e.weekKey === wk).map((e) => e.durationMs);
+    return vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length / 1000) : "";
   };
   const sortedGroups = state.runGroups.slice().sort((a, b) => a.order - b.order);
-  const table = sortedGroups.map((g) => ({
-    runNum: runGroupNumber(g),
-    name: runGroupDisplayName(g),
-    weeks: avgSecByWeek(groupEntries.filter((e) => e.runGroupId === g.id)),
-    missions: getLegMissions(g).map((m) => ({
-      name: m.name,
-      weeks: avgSecByWeek(missionEntries.filter((e) => e.missionId === m.id)),
-    })),
-  }));
+  const table = sortedGroups.map((g) => {
+    const weeks = {};
+    weekKeys.forEach((wk) => { weeks[wk] = { prep: avgSec(prepTimeEntries, g.id, wk), run: avgSec(runTimeEntries, g.id, wk) }; });
+    return { runNum: runGroupNumber(g), name: runGroupDisplayName(g), weeks };
+  });
   return { weekKeys, table };
 }
 async function writeTimeDataSheet(spreadsheetId, sheetId) {
   const { weekKeys, table } = computeTimeDataForSheets();
-  // If an earlier export had more weeks (or more Run/mission rows) than this
-  // one, the old content never got cleared — values.update only touches the
+  // If an earlier export had more weeks (or more Run rows) than this one,
+  // the old content never got cleared — values.update only touches the
   // exact range it's given, so anything beyond the new (possibly narrower)
   // range just sat there forever. Wipe a generous swath first so nothing lingers.
   await sheetsBatchUpdate(spreadsheetId, [
-    { unmergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 60 } } },
+    { unmergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 60 } } },
     { repeatCell: {
         range: { sheetId, startRowIndex: 0, endRowIndex: 500, startColumnIndex: 0, endColumnIndex: 60 },
         cell: {},
         fields: "userEnteredValue,userEnteredFormat",
     } },
   ]);
-  const header = ["Run #", "Run Name", ...weekKeys.map((wk) => `Week of ${wk} (sec)`)];
-  const rows = [];
-  table.forEach((r) => {
-    rows.push({ vals: [r.runNum, r.name, ...weekKeys.map((wk) => r.weeks[wk])], bold: true });
-    r.missions.forEach((m) => {
-      rows.push({ vals: ["", `  ${m.name}`, ...weekKeys.map((wk) => m.weeks[wk])], bold: false });
-    });
-  });
-  await sheetsValuesUpdate(spreadsheetId, `'Time Data'!A1`, [header, ...rows.map((r) => r.vals)]);
-  // Bold each Run's total row (not its mission sub-rows) so it reads the
-  // same way the in-app run breakdown does — a bold total with plain detail
-  // lines underneath.
-  await sheetsBatchUpdate(spreadsheetId, rows.map((r, i) => ({
-    repeatCell: {
-      range: { sheetId, startRowIndex: i + 1, endRowIndex: i + 2, startColumnIndex: 0, endColumnIndex: 2 + weekKeys.length },
-      cell: { userEnteredFormat: { textFormat: { bold: r.bold } } },
-      fields: "userEnteredFormat.textFormat",
+  const fmtDate = (wk) => { const d = new Date(`${wk}T00:00:00`); return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`; };
+  const header1 = ["Run #", "Run Name", ...weekKeys.flatMap((wk) => [fmtDate(wk), ""])];
+  const header2 = ["", "", ...weekKeys.flatMap(() => ["PrepTime", "Run Time"])];
+  const dataRows = table.map((r) => [r.runNum, r.name, ...weekKeys.flatMap((wk) => [r.weeks[wk].prep, r.weeks[wk].run])]);
+  const totalRow = ["Total Time", "", ...weekKeys.flatMap((wk) => {
+    const sum = table.reduce((s, r) => s + (Number(r.weeks[wk].prep) || 0) + (Number(r.weeks[wk].run) || 0), 0);
+    return ["", sum];
+  })];
+  await sheetsValuesUpdate(spreadsheetId, `'Time Data'!A1`, [header1, header2, ...dataRows, totalRow]);
+  const lastRowIdx = 2 + dataRows.length; // 0-indexed row of the Total Time row
+  await sheetsBatchUpdate(spreadsheetId, [
+    { repeatCell: {
+        range: { sheetId, startRowIndex: lastRowIdx, endRowIndex: lastRowIdx + 1, startColumnIndex: 0, endColumnIndex: 2 + weekKeys.length * 2 },
+        cell: { userEnteredFormat: { textFormat: { bold: true } } },
+        fields: "userEnteredFormat.textFormat",
+    } },
+  ]);
+  const merges = weekKeys.map((_, i) => ({
+    mergeCells: {
+      range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 2 + i * 2, endColumnIndex: 4 + i * 2 },
+      mergeType: "MERGE_ALL",
     },
-  })));
+  }));
+  if (merges.length) await sheetsBatchUpdate(spreadsheetId, merges);
   // Auto-fit every column to its content so run names / long headers don't overflow.
   await sheetsBatchUpdate(spreadsheetId, [
-    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 2 + weekKeys.length } } },
+    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 2 + weekKeys.length * 2 } } },
   ]);
 }
 
@@ -4840,9 +4838,9 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
 // ---- Sheet: Backup ----
 // A full JSON backup of the entire app — the exact same data the Settings →
 // "Export full backup (.json)" button produces — stored as text inside the
-// spreadsheet itself. A single Sheets cell caps out at 50,000 characters, so
-// the JSON is split across one row per chunk in column A; row 1 explains how
-// to reconstruct it (concatenate column A, in row order, from row 2 down).
+// spreadsheet itself, 50,000 characters (Sheets' max per cell) per row in
+// column A. Row 1 explains how to reconstruct it: concatenate column A, in
+// row order starting at row 2, into one string.
 async function writeBackupSheet(spreadsheetId, sheetId) {
   const data = {
     version: 2,
@@ -4855,13 +4853,13 @@ async function writeBackupSheet(spreadsheetId, sheetId) {
     runGroups: await dbGetAll("runGroups"),
   };
   const json = JSON.stringify(data);
-  const CHUNK_LEN = 45000; // stays safely under Sheets' 50,000-char cell limit
+  const CELL_LIMIT = 50000; // Sheets' actual max characters per cell
   const chunks = [];
-  for (let i = 0; i < json.length; i += CHUNK_LEN) chunks.push(json.slice(i, i + CHUNK_LEN));
+  for (let i = 0; i < json.length; i += CELL_LIMIT) chunks.push(json.slice(i, i + CELL_LIMIT));
   if (!chunks.length) chunks.push("");
 
-  // Wipe whatever was there before — a previous backup could have been
-  // longer (more rows) or shorter than this one.
+  // Wipe whatever was there before — a previous backup could have needed
+  // more or fewer rows than this one.
   await sheetsBatchUpdate(spreadsheetId, [
     { repeatCell: {
         range: { sheetId, startRowIndex: 0, endRowIndex: Math.max(chunks.length + 5, 500), startColumnIndex: 0, endColumnIndex: 2 },
