@@ -1610,7 +1610,7 @@ const SEASON_MISSIONS = [
   ] },
   { id: "sm-11", number: 11, name: "Window to the Past", tasks: [
     { id: "sm-11-t0", name: "Root cover down, touching the mat", type: "bool", points: 20 },
-    { id: "sm-11-t1", name: "Mission completed (tracking only)", type: "bool", points: 0 },
+    { id: "sm-11-t1", name: "Seed collected (tracking only)", type: "bool", points: 0 },
   ] },
   { id: "sm-12", number: 12, name: "Forest Elder", tasks: [
     { id: "sm-12-t0", name: "Cane completely raised, touching the tree", type: "bool", points: 20 },
@@ -1619,7 +1619,6 @@ const SEASON_MISSIONS = [
   ] },
   { id: "sm-13", number: 13, name: "Keystone Species", tasks: [
     { id: "sm-13-t0", name: "Keystone species on restoration platform + young trees raised", type: "bool", points: 30 },
-    { id: "sm-13-t1", name: "Seed collected (tracking only)", type: "bool", points: 0 },
   ] },
   { id: "sm-14", number: 14, name: "Seeds of Renewal", tasks: [
     { id: "sm-14-t0", name: "Seeds contained within replantation station (each)", type: "number", max: 4, pointsPerUnit: 5 },
@@ -3558,7 +3557,7 @@ function renderBreakdownTimingTab() {
 // ==========================================================
 // ANALYSIS TAB — across every completed run, not just one
 // ==========================================================
-state.analysis = { subTab: "trend" };
+state.analysis = { subTab: "trend", dateFrom: null, dateTo: null };
 
 function renderAnalysisTab() {
   document.querySelectorAll(".analysis-tab-btn").forEach((btn) => {
@@ -3584,8 +3583,10 @@ function fmtPPS(x) { return x == null ? "—" : x.toFixed(2); }
 // A task/mission's "success rate" is its average earned points as a percent
 // of max — this handles partial-credit tasks (number/choice) properly, not
 // just plain achieved/not-achieved.
-function computeMissionAnalytics() {
-  const completed = state.runs.filter((r) => !r.inProgress);
+// `completed` is passed in (rather than recomputed from state.runs here) so
+// callers can scope this to a date range (in-app Analysis filter) or to
+// every run ever (Google Sheets export) using the exact same logic.
+function computeMissionAnalytics(completed) {
   return state.missions.map((m) => {
     const max = missionMaxPoints(m);
     const scores = completed.map((r) => missionScoreForRun(m, r));
@@ -3597,14 +3598,56 @@ function computeMissionAnalytics() {
     return { mission: m, successRate, avgTimeMs, pointsPerSec, order: m.order };
   });
 }
-function computeTaskAnalytics(mission) {
-  const completed = state.runs.filter((r) => !r.inProgress);
+function computeTaskAnalytics(mission, completed) {
   return visibleTasks(mission).map((t, idx) => {
     const max = taskMaxPoints(t);
-    const scores = completed.map((r) => pointsFromRawTask(t, (r.rawScores || {})[t.id]));
-    const successRate = max > 0 && completed.length ? (scores.reduce((a, b) => a + b, 0) / completed.length) / max : null;
+    let successRate;
+    if (max > 0) {
+      const scores = completed.map((r) => pointsFromRawTask(t, (r.rawScores || {})[t.id]));
+      successRate = completed.length ? (scores.reduce((a, b) => a + b, 0) / completed.length) / max : null;
+    } else if (t.type === "bool") {
+      // 0-point "tracking only" tasks (e.g. Seed collected) have no points
+      // to average, so success rate is just how often it happened.
+      successRate = completed.length ? completed.filter((r) => !!(r.rawScores || {})[t.id]).length / completed.length : null;
+    } else {
+      successRate = null;
+    }
     return { task: t, successRate, order: idx };
   });
+}
+// Bonuses that score every run but aren't part of state.missions at all —
+// Mission 10 is deliberately excluded from ever being assignable to a Run
+// (see notAssignable above), and Precision Tokens / Equipment Inspection
+// were never "missions" in the first place — so none of the three ever
+// showed up in the Missions Analysis table. These give each the same
+// {successRate, avgTimeMs, pointsPerSec} shape as a real mission row (time
+// isn't tracked for any of them, so avgTimeMs/pointsPerSec stay null), plus
+// task-shaped subRows so Mission 10's Spider/Snail can each get their own
+// line, matching how a real mission's tasks break out underneath it.
+function computeBonusAnalytics(completed) {
+  const n = completed.length;
+  const rate = (fn, max) => (n && max ? completed.reduce((s, r) => s + fn(r), 0) / n / max : null);
+  return [
+    {
+      name: "Equipment Inspection",
+      successRate: n ? completed.filter((r) => r.equipmentInspectionPassed).length / n : null,
+      avgTimeMs: null, pointsPerSec: null, subRows: [],
+    },
+    {
+      name: "Precision Tokens",
+      successRate: rate((r) => precisionTokenBonus(r.precisionTokensRemaining ?? 0), PRECISION_TOKEN_BONUS[PRECISION_TOKENS_START]),
+      avgTimeMs: null, pointsPerSec: null, subRows: [],
+    },
+    {
+      name: "Fragile Microhabitats (Mission 10)",
+      successRate: rate((r) => mission10Bonus(r), MISSION10_BONUS),
+      avgTimeMs: null, pointsPerSec: null,
+      subRows: [
+        { name: "Spider undisturbed for the whole run", successRate: n ? completed.filter((r) => !r.mission10SpiderDown).length / n : null },
+        { name: "Snail undisturbed for the whole run", successRate: n ? completed.filter((r) => !r.mission10SnailDown).length / n : null },
+      ],
+    },
+  ];
 }
 
 let scoreTrendOutsideClickWired = false;
@@ -3699,45 +3742,88 @@ function heatCellHTML(text, frac) {
     : `<td style="background:${heatColor(frac)}; color:#1a1a1a;">${text}</td>`;
 }
 
+// Date range filter for the Missions analysis — lives only in memory (not
+// persisted), same lifespan as the rest of state.analysis.
+function filterRunsByAnalysisDateRange(runs) {
+  const { dateFrom, dateTo } = state.analysis;
+  if (!dateFrom && !dateTo) return runs;
+  const fromTs = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : null;
+  const toTs = dateTo ? new Date(`${dateTo}T23:59:59.999`).getTime() : null;
+  return runs.filter((r) => {
+    if (!r.startedAt) return true; // undated runs stay visible rather than silently vanishing
+    if (fromTs != null && r.startedAt < fromTs) return false;
+    if (toTs != null && r.startedAt > toTs) return false;
+    return true;
+  });
+}
+function bindAnalysisDateFilterEvents() {
+  const fromEl = document.getElementById("analysis-date-from");
+  const toEl = document.getElementById("analysis-date-to");
+  const clearEl = document.getElementById("analysis-date-clear");
+  if (fromEl) fromEl.addEventListener("change", () => { state.analysis.dateFrom = fromEl.value || null; renderMissionsAnalysisTable(); });
+  if (toEl) toEl.addEventListener("change", () => { state.analysis.dateTo = toEl.value || null; renderMissionsAnalysisTable(); });
+  if (clearEl) clearEl.addEventListener("click", () => { state.analysis.dateFrom = null; state.analysis.dateTo = null; renderMissionsAnalysisTable(); });
+}
+function analysisDateFilterHTML() {
+  const { dateFrom, dateTo } = state.analysis;
+  return `
+    <div class="run-filter-row">
+      <label class="field" style="margin-bottom:0;"><span style="display:block; font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.03em;">From</span><input type="date" id="analysis-date-from" class="text-input" value="${dateFrom || ""}"></label>
+      <label class="field" style="margin-bottom:0;"><span style="display:block; font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.03em;">To</span><input type="date" id="analysis-date-to" class="text-input" value="${dateTo || ""}"></label>
+      <button type="button" class="btn btn-ghost btn-sm" id="analysis-date-clear">Clear</button>
+    </div>
+  `;
+}
 function renderMissionsAnalysisTable() {
   const body = document.getElementById("analysis-missions-body");
-  if (!state.runs.some((r) => !r.inProgress)) {
-    body.innerHTML = `<p class="empty-sub">No completed game runs yet.</p>`;
+  const filterHTML = analysisDateFilterHTML();
+  const completed = filterRunsByAnalysisDateRange(state.runs.filter((r) => !r.inProgress));
+  if (!completed.length) {
+    body.innerHTML = filterHTML + `<p class="empty-sub">No completed game runs in this range.</p>`;
+    bindAnalysisDateFilterEvents();
     return;
   }
-  const data = computeMissionAnalytics().sort((a, b) => a.order - b.order);
+  const data = computeMissionAnalytics(completed).sort((a, b) => a.order - b.order);
+  const bonusData = computeBonusAnalytics(completed);
   const ppsVals = data.map((d) => d.pointsPerSec);
   const timeVals = data.map((d) => d.avgTimeMs);
 
+  const missionRowHTML = (name, successRate, pointsPerSec, avgTimeMs, subRowsHTML) => `
+    <tr class="analysis-mission-row">
+      <td class="analysis-mission-name">${esc(name)}</td>
+      ${heatCellHTML(fmtPPS(pointsPerSec), heatFrac(pointsPerSec, ppsVals, false))}
+      ${heatCellHTML(avgTimeMs != null ? fmtDuration(avgTimeMs) : "—", heatFrac(avgTimeMs, timeVals, true))}
+      ${heatCellHTML(fmtPct(successRate), successRate)}
+    </tr>
+    ${subRowsHTML}
+  `;
+  const subRowHTML = (name, tsr) => `
+    <tr class="analysis-task-row">
+      <td class="analysis-subtable-name">${esc(name)}</td>
+      <td></td><td></td>
+      ${heatCellHTML(fmtPct(tsr), tsr)}
+    </tr>
+  `;
+
   const rows = data.map(({ mission, successRate, pointsPerSec, avgTimeMs }) => {
-    const taskData = computeTaskAnalytics(mission).sort((a, b) => a.order - b.order);
+    const taskData = computeTaskAnalytics(mission, completed).sort((a, b) => a.order - b.order);
     const taskRowsHTML = taskData.length
-      ? taskData.map(({ task, successRate: tsr }) =>
-          `<tr class="analysis-task-row">
-             <td class="analysis-subtable-name">${esc(task.name)}</td>
-             <td></td><td></td>
-             ${heatCellHTML(fmtPct(tsr), tsr)}
-           </tr>`
-        ).join("")
+      ? taskData.map(({ task, successRate: tsr }) => subRowHTML(task.name, tsr)).join("")
       : `<tr class="analysis-task-row"><td class="analysis-subtable-name" colspan="4"><p class="empty-sub" style="margin:4px 0;">No tasks in this mission.</p></td></tr>`;
-    return `
-      <tr class="analysis-mission-row">
-        <td class="analysis-mission-name">${esc(mission.name)}</td>
-        ${heatCellHTML(fmtPPS(pointsPerSec), heatFrac(pointsPerSec, ppsVals, false))}
-        ${heatCellHTML(avgTimeMs != null ? fmtDuration(avgTimeMs) : "—", heatFrac(avgTimeMs, timeVals, true))}
-        ${heatCellHTML(fmtPct(successRate), successRate)}
-      </tr>
-      ${taskRowsHTML}
-    `;
+    return missionRowHTML(mission.name, successRate, pointsPerSec, avgTimeMs, taskRowsHTML);
+  }).join("") + bonusData.map(({ name, successRate, pointsPerSec, avgTimeMs, subRows }) => {
+    const subRowsHTML = subRows.map((s) => subRowHTML(s.name, s.successRate)).join("");
+    return missionRowHTML(name, successRate, pointsPerSec, avgTimeMs, subRowsHTML);
   }).join("");
 
-  body.innerHTML = `
+  body.innerHTML = filterHTML + `
     <table class="analysis-table">
       <thead><tr><th>Mission</th><th>Pts/sec</th><th>Time</th><th>Success</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <p class="empty-sub">Green = best, red = worst. Success is colored on a fixed 0–100% scale; Pts/sec and Time are relative to your other missions.</p>
   `;
+  bindAnalysisDateFilterEvents();
 }
 
 // ---- Scoresheet-style CSV export ----
@@ -4309,7 +4395,9 @@ async function sheetsCreateSpreadsheet() {
     headers: { Authorization: `Bearer ${state.sheets.accessToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       properties: { title: "BARP Team Export" },
-      sheets: [{ properties: { title: "Time Data" } }, { properties: { title: "Score Data" } }, { properties: { title: "Analysis" } }, { properties: { title: "Attachments" } }],
+      // "Score Data" isn't created up front — writeScoreDataSheet manages its
+      // own tab(s) (one per 10 scored runs, named by date range).
+      sheets: [{ properties: { title: "Time Data" } }, { properties: { title: "Analysis" } }, { properties: { title: "Attachments" } }, { properties: { title: "Backup" } }],
     }),
   });
   if (!res.ok) throw new Error(`Couldn't create the spreadsheet (${res.status})`);
@@ -4359,10 +4447,10 @@ document.getElementById("btn-sheets-connect").addEventListener("click", async ()
 });
 
 // ---- Sheet 1: Time Data ----
-// Operation time for a mission = the gap since the previous mission ended
-// (or, if it's the first mission of a new leg, that leg's transition time).
-// The very first mission of the whole run has no preceding operation time,
-// same as your reference file's own "first mission always blank" pattern.
+// Rows are the Runs you actually set up in the app (state.runGroups — "Run
+// 1", "Run 2", etc.), not the official season missions — same organization
+// as tapping into a saved run's Timing tab: a Run's total time, and below it
+// the time for each mission currently assigned to that Run.
 function computeTimeDataForSheets() {
   const completed = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   function weekStart(ts) {
@@ -4371,70 +4459,74 @@ function computeTimeDataForSheets() {
     d.setDate(d.getDate() - d.getDay());
     return d.toISOString().slice(0, 10);
   }
-  const entries = [];
+  const missionEntries = []; // { missionId, weekKey, durationMs } — one per mission timing
+  const groupEntries = []; // { runGroupId, weekKey, durationMs } — one per Run per completed game run (missions summed)
   completed.forEach((run) => {
-    let prevEnd = null, prevGroupId = null;
+    const weekKey = weekStart(run.startedAt || 0);
+    const groupTotals = {};
     (run.missionTimings || []).forEach((mt) => {
-      let operationMs = null;
-      if (prevEnd != null) {
-        if (mt.runGroupId !== prevGroupId) {
-          const trans = (run.transitionTimings || []).find((t) => t.beforeRunGroupId === mt.runGroupId);
-          operationMs = trans ? trans.durationMs : null;
-        } else {
-          operationMs = mt.startTs - prevEnd;
-        }
-      }
-      entries.push({ missionId: mt.missionId, weekKey: weekStart(run.startedAt || mt.startTs), operationMs, runMs: mt.durationMs });
-      prevEnd = mt.endTs;
-      prevGroupId = mt.runGroupId;
+      missionEntries.push({ missionId: mt.missionId, weekKey, durationMs: mt.durationMs });
+      groupTotals[mt.runGroupId] = (groupTotals[mt.runGroupId] || 0) + mt.durationMs;
     });
+    Object.entries(groupTotals).forEach(([runGroupId, durationMs]) => groupEntries.push({ runGroupId, weekKey, durationMs }));
   });
-  const missionOrder = state.missions.slice().sort((a, b) => a.order - b.order);
-  const weekKeys = [...new Set(entries.map((e) => e.weekKey))].sort();
-  const table = missionOrder.map((m, idx) => {
+  const weekKeys = [...new Set([...missionEntries, ...groupEntries].map((e) => e.weekKey))].sort();
+  const avgSecByWeek = (entries) => {
     const weeks = {};
     weekKeys.forEach((wk) => {
-      const matches = entries.filter((e) => e.missionId === m.id && e.weekKey === wk);
-      const opVals = matches.map((e) => e.operationMs).filter((v) => v != null);
-      const runVals = matches.map((e) => e.runMs).filter((v) => v != null);
-      weeks[wk] = {
-        avgOperation: opVals.length ? Math.round(opVals.reduce((a, b) => a + b, 0) / opVals.length / 1000) : "",
-        avgRun: runVals.length ? Math.round(runVals.reduce((a, b) => a + b, 0) / runVals.length / 1000) : "",
-      };
+      const vals = entries.filter((e) => e.weekKey === wk).map((e) => e.durationMs);
+      weeks[wk] = vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length / 1000) : "";
     });
-    return { runNum: idx + 1, name: m.name, weeks };
-  });
+    return weeks;
+  };
+  const sortedGroups = state.runGroups.slice().sort((a, b) => a.order - b.order);
+  const table = sortedGroups.map((g) => ({
+    runNum: runGroupNumber(g),
+    name: runGroupDisplayName(g),
+    weeks: avgSecByWeek(groupEntries.filter((e) => e.runGroupId === g.id)),
+    missions: getLegMissions(g).map((m) => ({
+      name: m.name,
+      weeks: avgSecByWeek(missionEntries.filter((e) => e.missionId === m.id)),
+    })),
+  }));
   return { weekKeys, table };
 }
 async function writeTimeDataSheet(spreadsheetId, sheetId) {
   const { weekKeys, table } = computeTimeDataForSheets();
-  // If an earlier export had more weeks (or different data) than this one,
-  // the old header/merge for those extra columns never got cleared — values.update
-  // only touches the exact range it's given, so anything beyond the new
-  // (possibly narrower) range just sat there forever, looking like a
-  // duplicated week. Wipe a generous swath first so nothing can linger.
+  // If an earlier export had more weeks (or more Run/mission rows) than this
+  // one, the old content never got cleared — values.update only touches the
+  // exact range it's given, so anything beyond the new (possibly narrower)
+  // range just sat there forever. Wipe a generous swath first so nothing lingers.
   await sheetsBatchUpdate(spreadsheetId, [
-    { unmergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 60 } } },
+    { unmergeCells: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 60 } } },
     { repeatCell: {
         range: { sheetId, startRowIndex: 0, endRowIndex: 500, startColumnIndex: 0, endColumnIndex: 60 },
         cell: {},
         fields: "userEnteredValue,userEnteredFormat",
     } },
   ]);
-  const header1 = ["Run #", "Run Name", ...weekKeys.flatMap((wk) => [`Week of ${wk}`, ""])];
-  const header2 = ["", "", ...weekKeys.flatMap(() => ["Operation Time (sec)", "Run Time (sec)"])];
-  const rows = table.map((r) => [r.runNum, r.name, ...weekKeys.flatMap((wk) => [r.weeks[wk].avgOperation, r.weeks[wk].avgRun])]);
-  await sheetsValuesUpdate(spreadsheetId, `'Time Data'!A1`, [header1, header2, ...rows]);
-  const merges = weekKeys.map((_, i) => ({
-    mergeCells: {
-      range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 2 + i * 2, endColumnIndex: 4 + i * 2 },
-      mergeType: "MERGE_ALL",
+  const header = ["Run #", "Run Name", ...weekKeys.map((wk) => `Week of ${wk} (sec)`)];
+  const rows = [];
+  table.forEach((r) => {
+    rows.push({ vals: [r.runNum, r.name, ...weekKeys.map((wk) => r.weeks[wk])], bold: true });
+    r.missions.forEach((m) => {
+      rows.push({ vals: ["", `  ${m.name}`, ...weekKeys.map((wk) => m.weeks[wk])], bold: false });
+    });
+  });
+  await sheetsValuesUpdate(spreadsheetId, `'Time Data'!A1`, [header, ...rows.map((r) => r.vals)]);
+  // Bold each Run's total row (not its mission sub-rows) so it reads the
+  // same way the in-app run breakdown does — a bold total with plain detail
+  // lines underneath.
+  await sheetsBatchUpdate(spreadsheetId, rows.map((r, i) => ({
+    repeatCell: {
+      range: { sheetId, startRowIndex: i + 1, endRowIndex: i + 2, startColumnIndex: 0, endColumnIndex: 2 + weekKeys.length },
+      cell: { userEnteredFormat: { textFormat: { bold: r.bold } } },
+      fields: "userEnteredFormat.textFormat",
     },
-  }));
-  if (merges.length) await sheetsBatchUpdate(spreadsheetId, merges);
+  })));
   // Auto-fit every column to its content so run names / long headers don't overflow.
   await sheetsBatchUpdate(spreadsheetId, [
-    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 2 + weekKeys.length * 2 } } },
+    { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 2 + weekKeys.length } } },
   ]);
 }
 
@@ -4443,19 +4535,43 @@ async function writeTimeDataSheet(spreadsheetId, sheetId) {
 // export already uses (one row per Yes/No task, per unit of a Number task,
 // per option of a Choice task), so this sheet's shape always matches
 // whatever's actually configured in Settings, not last season's structure.
-async function writeScoreDataSheet(spreadsheetId, sheetId) {
-  const rowDefs = buildScoreRowDefs();
-  const completedRuns = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+//
+// Paginated the same way the local XLSX export already is: a fixed 10 run
+// columns per tab (RUNS_PER_SHEET), a new tab once a tab already has 10
+// scored runs in it, each tab named "Score Data <date range of the runs in
+// it>". A tab's sheetId is remembered in IndexedDB (meta.scoreDataSheetIds)
+// so re-exporting updates the same tabs (renaming them if their date range
+// shifted) instead of creating new ones every time; a pre-pagination single
+// "Score Data" tab, if one still exists, is adopted as tab #1 automatically
+// the first time this runs.
+function scoreDataTitleForChunk(chunk) {
+  if (!chunk.length) return "Score Data";
+  const fmt = (ts) => { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()}/${String(d.getFullYear()).slice(2)}`; };
+  const times = chunk.map((r) => r.startedAt || 0);
+  const lo = fmt(Math.min(...times)), hi = fmt(Math.max(...times));
+  return `Score Data ${lo === hi ? lo : `${lo} - ${hi}`}`;
+}
+async function loadScoreDataSheetIds(existingSheets) {
+  const rec = await dbGet("meta", "scoreDataSheetIds");
+  if (rec?.value?.length) return rec.value.slice();
+  const legacy = existingSheets.find((s) => s.properties.title === "Score Data");
+  return legacy ? [legacy.properties.sheetId] : [];
+}
+// Writes one chunk's worth of runs (up to RUNS_PER_SHEET) into its own tab —
+// same layout/formulas the single-tab version always had, just with a fixed
+// 10-run-wide column range (padded blank past the actual run count, same as
+// the XLSX export) and the two bonus rows the Sheets version was missing.
+async function writeOneScoreDataSheet(spreadsheetId, sheetId, title, rowDefs, runsChunk) {
   const firstFlagCol = 7; // 1-indexed, column G — matches the XLSX export's own layout
-  const lastFlagCol = firstFlagCol + Math.max(completedRuns.length, 1) - 1;
+  const lastFlagCol = firstFlagCol + RUNS_PER_SHEET - 1; // fixed at 10 columns (G:P), same as the XLSX export
   const successCol = lastFlagCol + 1;
+  const lastTaskRow = rowDefs.length + 1; // last row with a Success Rate formula (+1 for header)
+  const bonusRowCount = 2; // Precision Token Points, Equipment Inspection
+  const lastDataRow = lastTaskRow + bonusRowCount;
 
-  // Everything from the run columns onward shifts left/right depending on
-  // how many runs are completed, and the number of data rows shifts with
-  // however many missions/tasks are configured — so a *previous* export
-  // with more of either leaves stale content sitting out past where this
-  // export's data now ends, never cleared. Wipe a generous area first so
-  // nothing lingers from an earlier export.
+  // Everything shifts with however many missions/tasks are configured, so a
+  // *previous* export with more of either leaves stale content sitting out
+  // past where this export's data now ends, never cleared. Wipe first.
   await sheetsBatchUpdate(spreadsheetId, [
     { repeatCell: {
         range: { sheetId, startRowIndex: 0, endRowIndex: 500, startColumnIndex: 0, endColumnIndex: 60 },
@@ -4477,32 +4593,42 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
     })));
   }
 
-  const header = ["Run #", "Name", "M#", "Official Name", "Task", "Pts", ...completedRuns.map(() => ""), "Success Rate"];
+  const header = ["Run #", "Name", "M#", "Official Name", "Task", "Pts", ...Array.from({ length: RUNS_PER_SHEET }, () => ""), "Success Rate"];
   const dataRows = rowDefs.map((row, i) => {
     const rowNum = i + 2;
-    const flags = completedRuns.map((r) => (row.flagged(r) ? 1 : ""));
-    const successFormula = completedRuns.length
-      ? `=SUM(${colLetter(firstFlagCol)}${rowNum}:${colLetter(lastFlagCol)}${rowNum})/${completedRuns.length}`
+    const flags = Array.from({ length: RUNS_PER_SHEET }, (_, ci) => (runsChunk[ci] && row.flagged(runsChunk[ci]) ? 1 : ""));
+    const successFormula = runsChunk.length
+      ? `=SUM(${colLetter(firstFlagCol)}${rowNum}:${colLetter(lastFlagCol)}${rowNum})/${runsChunk.length}`
       : "";
     return [row.runNum, row.runName, row.mission.number ?? "", row.mission.name, row.notes, row.pts, ...flags, successFormula];
   });
-  await sheetsValuesUpdate(spreadsheetId, `'Score Data'!A1`, [header, ...dataRows]);
-  const lastTaskRow = rowDefs.length + 1;
+  // Precision Token Points / Equipment Inspection — same trick the CSV/XLSX
+  // export uses: Pts is fixed at 1 and each run's actual bonus amount goes
+  // straight into that run's flag cell, so the header SUMPRODUCT below adds
+  // it in unscaled, without needing its own separate formula.
+  const bonusDefs = [
+    ["Precision Token Points", (r) => precisionTokenBonus(r.precisionTokensRemaining ?? 0)],
+    ["Equipment Inspection", (r) => (r.equipmentInspectionPassed ? EQUIPMENT_INSPECTION_BONUS : 0)],
+  ];
+  const bonusRows = bonusDefs.map(([label, valueFn]) => {
+    const vals = Array.from({ length: RUNS_PER_SHEET }, (_, ci) => (runsChunk[ci] ? valueFn(runsChunk[ci]) : ""));
+    return ["", "", "", "", label, 1, ...vals, ""];
+  });
+  await sheetsValuesUpdate(spreadsheetId, `'${title}'!A1`, [header, ...dataRows, ...bonusRows]);
   const ptsCol = 6; // 1-indexed column F — matches the reordered header above
-  // Header formula per run — same SUMPRODUCT the XLSX export uses.
-  if (completedRuns.length) {
-    const headerFormulas = completedRuns.map((r, i) => {
-      const col = firstFlagCol + i;
-      return [{ userEnteredValue: { formulaValue: `=SUMPRODUCT($${colLetter(ptsCol)}2:$${colLetter(ptsCol)}${lastTaskRow},${colLetter(col)}2:${colLetter(col)}${lastTaskRow})` } }];
-    });
-    await sheetsBatchUpdate(spreadsheetId, headerFormulas.map((cellData, i) => ({
-      updateCells: {
-        rows: [{ values: cellData }],
-        fields: "userEnteredValue",
-        start: { sheetId, rowIndex: 0, columnIndex: firstFlagCol - 1 + i },
-      },
-    })));
-  }
+  // Header formula per run column — same SUMPRODUCT the XLSX export uses,
+  // extended through the bonus rows so their points count toward the total.
+  const headerFormulas = Array.from({ length: RUNS_PER_SHEET }, (_, i) => {
+    const col = firstFlagCol + i;
+    return [{ userEnteredValue: { formulaValue: `=SUMPRODUCT($${colLetter(ptsCol)}2:$${colLetter(ptsCol)}${lastDataRow},${colLetter(col)}2:${colLetter(col)}${lastDataRow})` } }];
+  });
+  await sheetsBatchUpdate(spreadsheetId, headerFormulas.map((cellData, i) => ({
+    updateCells: {
+      rows: [{ values: cellData }],
+      fields: "userEnteredValue",
+      start: { sheetId, rowIndex: 0, columnIndex: firstFlagCol - 1 + i },
+    },
+  })));
   // Colors confirmed from the reference template: red bold run-total cells,
   // light-blue ISODD category banding, and a fixed 0/50%/100% red-yellow-green
   // scale on Success Rate (not percentile-based — it's a metric that's
@@ -4585,6 +4711,32 @@ async function writeScoreDataSheet(spreadsheetId, sheetId) {
     { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: 5 } } },
   ]);
 }
+async function writeScoreDataSheet(spreadsheetId) {
+  const rowDefs = buildScoreRowDefs();
+  const sortedRuns = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  const chunks = [];
+  for (let i = 0; i < sortedRuns.length; i += RUNS_PER_SHEET) chunks.push(sortedRuns.slice(i, i + RUNS_PER_SHEET));
+  if (!chunks.length) chunks.push([]); // still produce one (blank) tab if there are zero runs
+
+  const meta = await sheetsFetch(spreadsheetId);
+  const existingSheetIds = new Set(meta.sheets.map((s) => s.properties.sheetId));
+  const sheetIds = await loadScoreDataSheetIds(meta.sheets);
+
+  for (let i = 0; i < chunks.length; i++) {
+    const title = scoreDataTitleForChunk(chunks[i]);
+    let sheetId = sheetIds[i];
+    if (sheetId != null && existingSheetIds.has(sheetId)) {
+      await sheetsBatchUpdate(spreadsheetId, [{ updateSheetProperties: { properties: { sheetId, title }, fields: "title" } }]);
+    } else {
+      const resp = await sheetsBatchUpdate(spreadsheetId, [{ addSheet: { properties: { title } } }]);
+      sheetId = resp.replies[0].addSheet.properties.sheetId;
+      sheetIds[i] = sheetId;
+    }
+    await writeOneScoreDataSheet(spreadsheetId, sheetId, title, rowDefs, chunks[i]);
+  }
+  sheetIds.length = chunks.length; // drop any leftover mapping past the current chunk count
+  await dbPut("meta", { key: "scoreDataSheetIds", value: sheetIds });
+}
 
 // ---- Sheet 3: Analysis ----
 // Reuses the exact same computations already driving the in-app Analysis
@@ -4601,7 +4753,7 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
     const flagged = rowDefs.filter((row) => row.flagged(r)).length;
     return [r.label, total ? flagged / total : ""];
   });
-  const missionData = computeMissionAnalytics().sort((a, b) => a.order - b.order);
+  const missionData = computeMissionAnalytics(completed).sort((a, b) => a.order - b.order);
   const missionRows = missionData.map((d) => [
     d.mission.name,
     d.pointsPerSec != null ? Number(d.pointsPerSec.toFixed(2)) : "",
@@ -4617,10 +4769,13 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
   }
   // Same reasoning again: if a previous export had more runs/missions than
   // this one, its data tables were taller, and the extra trailing rows
-  // would otherwise never get cleared.
+  // would otherwise never get cleared. Wipes the whole sheet (including the
+  // charts-reserved rows 0-18) rather than starting at row 19 — charts are
+  // separate embedded objects (deleted above) so clearing cell content under
+  // them is harmless, and this is what actually got rid of old leftover data.
   await sheetsBatchUpdate(spreadsheetId, [
     { repeatCell: {
-        range: { sheetId, startRowIndex: 19, endRowIndex: 500, startColumnIndex: 0, endColumnIndex: 60 },
+        range: { sheetId, startRowIndex: 0, endRowIndex: 500, startColumnIndex: 0, endColumnIndex: 60 },
         cell: {},
         fields: "userEnteredValue,userEnteredFormat",
     } },
@@ -4680,6 +4835,51 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
     } } } },
   }));
   await sheetsBatchUpdate(spreadsheetId, chartRequests);
+}
+
+// ---- Sheet: Backup ----
+// A full JSON backup of the entire app — the exact same data the Settings →
+// "Export full backup (.json)" button produces — stored as text inside the
+// spreadsheet itself. A single Sheets cell caps out at 50,000 characters, so
+// the JSON is split across one row per chunk in column A; row 1 explains how
+// to reconstruct it (concatenate column A, in row order, from row 2 down).
+async function writeBackupSheet(spreadsheetId, sheetId) {
+  const data = {
+    version: 2,
+    exportedAt: Date.now(),
+    attachments: await dbGetAll("attachments"),
+    entries: await dbGetAll("entries"),
+    missions: await dbGetAll("missions"),
+    runs: await dbGetAll("runs"),
+    meta: await dbGetAll("meta"),
+    runGroups: await dbGetAll("runGroups"),
+  };
+  const json = JSON.stringify(data);
+  const CHUNK_LEN = 45000; // stays safely under Sheets' 50,000-char cell limit
+  const chunks = [];
+  for (let i = 0; i < json.length; i += CHUNK_LEN) chunks.push(json.slice(i, i + CHUNK_LEN));
+  if (!chunks.length) chunks.push("");
+
+  // Wipe whatever was there before — a previous backup could have been
+  // longer (more rows) or shorter than this one.
+  await sheetsBatchUpdate(spreadsheetId, [
+    { repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: Math.max(chunks.length + 5, 500), startColumnIndex: 0, endColumnIndex: 2 },
+        cell: {},
+        fields: "userEnteredValue,userEnteredFormat",
+    } },
+  ]);
+  await sheetsValuesUpdate(spreadsheetId, `'Backup'!A1`, [[
+    `BARP full JSON backup — exported ${new Date().toLocaleString()}. To restore: concatenate column A, in row order starting at row 2, into one string, save it as a .json file, then use Settings → Restore from backup file.`,
+  ]]);
+  // Written in batches rather than one giant values.update — keeps each
+  // request well under the API's practical payload size, which a large
+  // photo library's worth of JSON could otherwise blow past.
+  const BATCH_ROWS = 200;
+  for (let i = 0; i < chunks.length; i += BATCH_ROWS) {
+    const slice = chunks.slice(i, i + BATCH_ROWS).map((c) => [c]);
+    await sheetsValuesUpdate(spreadsheetId, `'Backup'!A${2 + i}`, slice);
+  }
 }
 
 // ---- Sheet 4: Attachments (iteration log, with photos) ----
@@ -4885,7 +5085,9 @@ async function writeAttachmentsSheet(spreadsheetId, sheetId, onProgress) {
 // ---- Orchestration ----
 async function ensureSheetsExist(spreadsheetId) {
   const meta = await sheetsFetch(spreadsheetId);
-  const wanted = ["Time Data", "Score Data", "Analysis", "Attachments"];
+  // "Score Data" isn't in this list — writeScoreDataSheet creates/manages its
+  // own tab(s) directly (one per 10 scored runs, named by date range).
+  const wanted = ["Time Data", "Analysis", "Attachments", "Backup"];
   const existing = {};
   meta.sheets.forEach((s) => { existing[s.properties.title] = s.properties.sheetId; });
   const toCreate = wanted.filter((name) => !(name in existing));
@@ -4928,13 +5130,15 @@ document.getElementById("btn-sheets-export").addEventListener("click", async () 
     statusEl.textContent = "Writing Time Data…";
     await writeTimeDataSheet(spreadsheetId, sheetIds["Time Data"]);
     statusEl.textContent = "Writing Score Data…";
-    await writeScoreDataSheet(spreadsheetId, sheetIds["Score Data"]);
+    await writeScoreDataSheet(spreadsheetId);
     statusEl.textContent = "Writing Analysis…";
     await writeAnalysisSheet(spreadsheetId, sheetIds["Analysis"]);
     statusEl.textContent = "Writing Attachments (uploading photos)…";
     await writeAttachmentsSheet(spreadsheetId, sheetIds["Attachments"], (done, total) => {
       statusEl.textContent = `Writing Attachments — photo ${done}/${total}…`;
     });
+    statusEl.textContent = "Writing Backup…";
+    await writeBackupSheet(spreadsheetId, sheetIds["Backup"]);
     statusEl.textContent = `Exported ${new Date().toLocaleTimeString()}.`;
   } catch (e) {
     statusEl.textContent = "Export failed.";
