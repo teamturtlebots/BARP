@@ -4492,10 +4492,18 @@ document.getElementById("btn-sheets-connect").addEventListener("click", async ()
     state.sheets.tokenExpiresAt = Date.now() + 55 * 60 * 1000; // Google access tokens run ~1hr; refresh a bit early
     await dbPut("meta", { key: "sheetsAccessToken", value: { accessToken: state.sheets.accessToken, tokenExpiresAt: state.sheets.tokenExpiresAt } });
     renderSheetsConnectStatus();
+    const fileStatusEl = document.getElementById("sheets-file-status");
     let spreadsheetId = await resolveSpreadsheetId();
-    if (!spreadsheetId) {
-      document.getElementById("sheets-file-status").hidden = false;
-      document.getElementById("sheets-file-status").textContent = "Creating your export sheet…";
+    if (spreadsheetId) {
+      // Don't just trust the cached/shared id — confirm the sheet is
+      // actually still there (not deleted from Drive) before using it,
+      // recreating it here too if it's gone, not only at export time.
+      fileStatusEl.hidden = false;
+      fileStatusEl.textContent = "Checking export sheet…";
+      spreadsheetId = await verifyOrRecreateSpreadsheet(spreadsheetId, fileStatusEl);
+    } else {
+      fileStatusEl.hidden = false;
+      fileStatusEl.textContent = "Creating your export sheet…";
       const created = await sheetsCreateSpreadsheet();
       spreadsheetId = created.spreadsheetId;
       await dbPut("meta", { key: "sheetsExportSpreadsheetId", value: spreadsheetId });
