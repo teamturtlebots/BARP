@@ -4420,6 +4420,67 @@ function renderSheetsFileStatus() {
   }
 }
 
+// ---- Team-shared Sheets export config ----
+// The spreadsheet/folder/tab IDs used to live only in each device's own
+// local meta store, so every device that connected Sheets for the first
+// time created its own separate spreadsheet (and Drive photos folder) —
+// that's why phone and computer ended up exporting to two different
+// documents. Fixed by keeping one shared Firestore doc every device reads
+// from (and writes back to) before falling back to creating something new,
+// so the whole team converges on the same spreadsheet/folder/tabs.
+const TEAM_SHEETS_CONFIG_DOC_ID = "sheetsExport";
+async function readTeamSheetsConfig() {
+  if (!state.firebaseUser || !window.firebaseDb) return null;
+  try {
+    const { doc, collection, getDoc } = window.firebaseFns;
+    const snap = await getDoc(doc(collection(window.firebaseDb, "teamConfig"), TEAM_SHEETS_CONFIG_DOC_ID));
+    return snap.exists() ? snap.data() : null;
+  } catch (e) { return null; }
+}
+async function writeTeamSheetsConfig(patch) {
+  if (!state.firebaseUser || !window.firebaseDb) return;
+  try {
+    const { doc, collection, setDoc } = window.firebaseFns;
+    await setDoc(doc(collection(window.firebaseDb, "teamConfig"), TEAM_SHEETS_CONFIG_DOC_ID), { ...patch, updatedAt: Date.now() }, { merge: true });
+  } catch (e) { /* best-effort — local write still happened, this device just won't have shared it yet */ }
+}
+// Checks the team's shared spreadsheet id before falling back to whatever
+// this device already has cached locally (e.g. from before this fix, or
+// while offline) — only returns null if nobody, anywhere, has one yet.
+async function resolveSpreadsheetId() {
+  const teamConfig = await readTeamSheetsConfig();
+  if (teamConfig?.spreadsheetId) {
+    await dbPut("meta", { key: "sheetsExportSpreadsheetId", value: teamConfig.spreadsheetId });
+    return teamConfig.spreadsheetId;
+  }
+  const local = await loadStoredSheetsFileId();
+  if (local) { await writeTeamSheetsConfig({ spreadsheetId: local }); return local; }
+  return null;
+}
+// If the export spreadsheet was deleted (Drive trash, permanently removed,
+// etc.) since it was last used, don't just fail the export — recreate it
+// fresh, the same way the very first connect would, and push the new id to
+// the shared team config so every other device picks it up too.
+async function verifyOrRecreateSpreadsheet(spreadsheetId, statusEl) {
+  try {
+    await sheetsFetch(spreadsheetId);
+    return spreadsheetId;
+  } catch (e) {
+    if (!/Sheets API 404/.test(e.message)) throw e; // some other failure (network, auth) — don't blow away a perfectly fine sheet over it
+  }
+  if (statusEl) statusEl.textContent = "Your export sheet is gone — creating a new one…";
+  const created = await sheetsCreateSpreadsheet();
+  const newId = created.spreadsheetId;
+  // A fresh spreadsheet means the old Score Data tab bookkeeping no longer
+  // applies to anything real — clear it so tabs get created fresh too.
+  await dbPut("meta", { key: "sheetsExportSpreadsheetId", value: newId });
+  await dbPut("meta", { key: "scoreDataSheetIds", value: [] });
+  await writeTeamSheetsConfig({ spreadsheetId: newId, scoreDataSheetIds: [] });
+  state.sheets.spreadsheetId = newId;
+  renderSheetsFileStatus();
+  return newId;
+}
+
 document.getElementById("btn-sheets-connect").addEventListener("click", async () => {
   if (!window.firebaseAuth) { showErrorBanner("Sign-in isn't ready yet."); return; }
   const provider = new window.firebaseFns.GoogleAuthProvider();
@@ -4431,13 +4492,14 @@ document.getElementById("btn-sheets-connect").addEventListener("click", async ()
     state.sheets.tokenExpiresAt = Date.now() + 55 * 60 * 1000; // Google access tokens run ~1hr; refresh a bit early
     await dbPut("meta", { key: "sheetsAccessToken", value: { accessToken: state.sheets.accessToken, tokenExpiresAt: state.sheets.tokenExpiresAt } });
     renderSheetsConnectStatus();
-    let spreadsheetId = await loadStoredSheetsFileId();
+    let spreadsheetId = await resolveSpreadsheetId();
     if (!spreadsheetId) {
       document.getElementById("sheets-file-status").hidden = false;
       document.getElementById("sheets-file-status").textContent = "Creating your export sheet…";
       const created = await sheetsCreateSpreadsheet();
       spreadsheetId = created.spreadsheetId;
       await dbPut("meta", { key: "sheetsExportSpreadsheetId", value: spreadsheetId });
+      await writeTeamSheetsConfig({ spreadsheetId });
     }
     state.sheets.spreadsheetId = spreadsheetId;
     renderSheetsFileStatus();
@@ -4550,6 +4612,11 @@ function scoreDataTitleForChunk(chunk) {
   return `Score Data ${lo === hi ? lo : `${lo} - ${hi}`}`;
 }
 async function loadScoreDataSheetIds(existingSheets) {
+  const teamConfig = await readTeamSheetsConfig();
+  if (teamConfig?.scoreDataSheetIds?.length) {
+    await dbPut("meta", { key: "scoreDataSheetIds", value: teamConfig.scoreDataSheetIds });
+    return teamConfig.scoreDataSheetIds.slice();
+  }
   const rec = await dbGet("meta", "scoreDataSheetIds");
   if (rec?.value?.length) return rec.value.slice();
   const legacy = existingSheets.find((s) => s.properties.title === "Score Data");
@@ -4734,6 +4801,7 @@ async function writeScoreDataSheet(spreadsheetId) {
   }
   sheetIds.length = chunks.length; // drop any leftover mapping past the current chunk count
   await dbPut("meta", { key: "scoreDataSheetIds", value: sheetIds });
+  await writeTeamSheetsConfig({ scoreDataSheetIds: sheetIds });
 }
 
 // ---- Sheet 3: Analysis ----
@@ -4905,19 +4973,26 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 // Photos go in a dedicated "BARP Photos" Drive folder rather than loose in
-// the root — created once and cached (same pattern as the spreadsheet id
-// below), so this only actually creates the folder the very first time.
+// the root. Checks the team's shared config first, then this device's local
+// cache, so every device uploads into the same folder instead of each one
+// creating its own — created only if nobody, anywhere, has one yet.
 async function ensureDrivePhotosFolder() {
-  const cached = await dbGet("meta", "drivePhotosFolderId");
-  if (cached?.value) {
+  const teamConfig = await readTeamSheetsConfig();
+  const localCached = await dbGet("meta", "drivePhotosFolderId");
+  const candidateId = teamConfig?.drivePhotosFolderId || localCached?.value;
+  if (candidateId) {
     // Confirm it still exists/is accessible before trusting the cache — it
     // could have been deleted or the token could no longer see it.
-    const check = await fetch(`https://www.googleapis.com/drive/v3/files/${cached.value}?fields=id,trashed`, {
+    const check = await fetch(`https://www.googleapis.com/drive/v3/files/${candidateId}?fields=id,trashed`, {
       headers: { Authorization: `Bearer ${state.sheets.accessToken}` },
     });
     if (check.ok) {
       const data = await check.json();
-      if (!data.trashed) return cached.value;
+      if (!data.trashed) {
+        await dbPut("meta", { key: "drivePhotosFolderId", value: candidateId });
+        await writeTeamSheetsConfig({ drivePhotosFolderId: candidateId });
+        return candidateId;
+      }
     }
   }
   const res = await fetch("https://www.googleapis.com/drive/v3/files?fields=id", {
@@ -4928,6 +5003,7 @@ async function ensureDrivePhotosFolder() {
   if (!res.ok) throw new Error(`Couldn't create the Drive folder (${res.status})`);
   const folderId = (await res.json()).id;
   await dbPut("meta", { key: "drivePhotosFolderId", value: folderId });
+  await writeTeamSheetsConfig({ drivePhotosFolderId: folderId });
   return folderId;
 }
 async function driveUploadPhoto(blob, filename, folderId) {
@@ -5115,7 +5191,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && sheetsExportInProgress && !sheetsExportWakeLock) acquireExportWakeLock();
 });
 document.getElementById("btn-sheets-export").addEventListener("click", async () => {
-  const spreadsheetId = state.sheets.spreadsheetId;
+  let spreadsheetId = state.sheets.spreadsheetId;
   if (!spreadsheetId) { showErrorBanner("Connect Google Sheets first."); return; }
   const statusEl = document.getElementById("sheets-export-status");
   const btn = document.getElementById("btn-sheets-export");
@@ -5123,6 +5199,8 @@ document.getElementById("btn-sheets-export").addEventListener("click", async () 
   sheetsExportInProgress = true;
   await acquireExportWakeLock();
   try {
+    statusEl.textContent = "Checking export sheet…";
+    spreadsheetId = await verifyOrRecreateSpreadsheet(spreadsheetId, statusEl);
     statusEl.textContent = "Setting up sheets…";
     const sheetIds = await ensureSheetsExist(spreadsheetId);
     statusEl.textContent = "Writing Time Data…";

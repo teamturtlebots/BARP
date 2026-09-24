@@ -197,7 +197,7 @@
     getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged
   } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
   import {
-    getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot
+    getFirestore, collection, doc, getDoc, setDoc, deleteDoc, onSnapshot
   } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
 
   const firebaseConfig = {
@@ -216,7 +216,7 @@
   // needs this way rather than restructuring the whole file into a module.
   window.firebaseAuth = auth;
   window.firebaseDb = db;
-  window.firebaseFns = { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, collection, doc, setDoc, deleteDoc, onSnapshot };
+  window.firebaseFns = { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, collection, doc, getDoc, setDoc, deleteDoc, onSnapshot };
   window.dispatchEvent(new Event("firebase-ready"));
 </script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.7/Sortable.min.js"></script>
