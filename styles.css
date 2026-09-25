@@ -218,6 +218,16 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 .mission-row .m-name { font-weight: 600; }
 .mission-row .m-sub { font-size: 0.75rem; color: var(--text-soft); font-family: var(--mono); }
 
+/* Attachments marked "combined into another attachment" — grayed out and,
+   outside edit mode, moved below a small section divider. Their iterations
+   still count toward the total; this is purely a visual/organizational flag. */
+.attachment-row-combined { opacity: 0.5; filter: grayscale(0.4); }
+.attachment-row-combined .mission-row { margin-bottom: 8px; }
+.attachment-section-divider {
+  font-size: 0.72rem; color: var(--text-soft); text-transform: uppercase; letter-spacing: 0.04em;
+  margin: 14px 0 8px; padding-top: 10px; border-top: 1px solid var(--line);
+}
+
 /* Scoring inputs inside run detail */
 .mission-score-row {
   display: flex;

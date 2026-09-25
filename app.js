@@ -447,6 +447,70 @@ function scoreDisplayHTML(run, missions) {
   return `<span class="gfs-timer-dual">${timed} <span class="gfs-timer-sub">timed</span> &middot; ${finalScore} <span class="gfs-timer-sub">final</span></span>`;
 }
 
+// ---- Order snapshots ----
+// Reordering Run groups/missions/tasks — or moving a mission to a different
+// Run group — in Settings is meant to apply going forward — it shouldn't
+// reshuffle how an already-scored run displays. A run remembers the order
+// everything was in, and which Run group each mission belonged to, at the
+// moment it was scored; these helpers apply that when rendering a saved
+// run, falling back to today's live order/grouping for runs saved before
+// this existed.
+function captureOrderSnapshot() {
+  return {
+    runGroupIds: state.runGroups.slice().sort((a, b) => a.order - b.order).map((g) => g.id),
+    missionIds: state.missions.slice().sort((a, b) => a.order - b.order).map((m) => m.id),
+    taskIdsByMission: Object.fromEntries(state.missions.map((m) => [m.id, visibleTasks(m).map((t) => t.id)])),
+    missionRunGroupId: Object.fromEntries(state.missions.map((m) => [m.id, m.runGroupId])),
+    // Names are captured only as a fallback label for a Run group that's
+    // since been deleted entirely (so a mission that belonged to it still
+    // has something to display under) — a Run group that still exists uses
+    // its current, live name, same as everywhere else in the app.
+    runGroupNames: Object.fromEntries(state.runGroups.map((g) => [g.id, runGroupDisplayName(g)])),
+  };
+}
+// Reorders `items` (run groups, missions, or one mission's tasks) to match
+// the id order recorded in a run's snapshot. Anything not in the snapshot —
+// added to the app after this run was scored — is appended at the end
+// rather than dropped, and a run with no snapshot at all (scored before this
+// feature existed) just keeps `items`' given order unchanged.
+function applyOrderSnapshot(items, snapshotIds) {
+  if (!snapshotIds) return items;
+  const byId = new Map(items.map((x) => [x.id, x]));
+  const ordered = snapshotIds.map((id) => byId.get(id)).filter(Boolean);
+  items.forEach((x) => { if (!ordered.includes(x)) ordered.push(x); });
+  return ordered;
+}
+function orderedRunGroupsForRun(run) {
+  return applyOrderSnapshot(state.runGroups.slice().sort((a, b) => a.order - b.order), run.orderSnapshot?.runGroupIds);
+}
+function orderedTasksForRun(mission, run) {
+  return applyOrderSnapshot(visibleTasks(mission), run.orderSnapshot?.taskIdsByMission?.[mission.id]);
+}
+// The Run-group sections for a saved run's Scores tab: which Run group each
+// mission is shown under (per the snapshot, not the mission's current
+// runGroupId), in the order groups and missions were in at scoring time. A
+// Run group that's since been deleted still gets its own section (using its
+// last-known name) rather than losing the missions that were scored under it.
+function runBreakdownSections(run) {
+  const snap = run.orderSnapshot;
+  if (!snap) return orderedRunGroupsForRun(run).map((leg) => ({ name: runGroupDisplayName(leg), missions: getLegMissions(leg) }));
+  const missionsById = new Map(state.missions.map((m) => [m.id, m]));
+  const missionOrder = applyOrderSnapshot(state.missions.slice().sort((a, b) => a.order - b.order), snap.missionIds).map((m) => m.id);
+  const groupOrder = applyOrderSnapshot(state.runGroups.slice().sort((a, b) => a.order - b.order).map((g) => g.id), snap.runGroupIds);
+  const byGroup = new Map(groupOrder.map((id) => [id, []]));
+  missionOrder.forEach((mid) => {
+    const m = missionsById.get(mid);
+    if (!m) return; // mission itself was deleted since — nothing to show
+    const gid = snap.missionRunGroupId?.[mid] ?? m.runGroupId;
+    if (!byGroup.has(gid)) byGroup.set(gid, []); // this run's group isn't in today's live list (deleted, or missing from an old snapshot) — still surface it
+    byGroup.get(gid).push(m);
+  });
+  return [...byGroup.entries()].map(([gid, missions]) => {
+    const liveGroup = state.runGroups.find((g) => g.id === gid);
+    return { name: liveGroup ? runGroupDisplayName(liveGroup) : (snap.runGroupNames?.[gid] || "Deleted Run"), missions };
+  });
+}
+
 // ==========================================================
 // ATTACHMENTS + LOG
 // ==========================================================
@@ -803,16 +867,20 @@ function renderAttachmentsSetup() {
       list.innerHTML = `<p class="empty-sub">No attachments yet.${editing ? "" : " Tap Edit to add one."}</p>`;
       return;
     }
-    for (const [idx, att] of realAttachments.entries()) {
-      const row = document.createElement("div");
-      row.dataset.idx = idx;
-      row.dataset.attId = String(att.id);
-      if (editing) {
-        row.className = "mission-row";
+    if (editing) {
+      // One sortable list, same as before — "Combined" just grays a row out
+      // and toggles immediately (no need to hit Save), same as Delete
+      // already does in this mode. Order still applies to both groups, so
+      // nothing needs to move between separate containers here.
+      for (const [idx, att] of realAttachments.entries()) {
+        const row = document.createElement("div");
+        row.dataset.idx = idx;
+        row.dataset.attId = String(att.id);
+        row.className = "mission-row" + (att.combined ? " attachment-row-combined" : "");
         row.innerHTML = `
           <span class="drag-handle">&#9776;</span>
           <span class="drag-num">#${idx + 1}</span>
-          <div class="m-info"><div class="m-name">${esc(att.name)}</div></div>
+          <div class="m-info"><div class="m-name">${esc(att.name)}${att.combined ? ` <span class="m-sub" style="display:inline;">(combined)</span>` : ""}</div></div>
           <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
           <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
         `;
@@ -833,26 +901,37 @@ function renderAttachmentsSetup() {
           });
         });
         list.appendChild(row);
-      } else {
-        const count = await iterationCount(att.id);
-        const runNames = (att.runGroupIds || []).map((gid) => state.runGroups.find((g) => g.id === gid)).filter(Boolean).map(runGroupDisplayName);
-        row.className = "mission-row";
-        row.innerHTML = `
-          ${att.photo ? `<img class="att-thumb" src="${att.photo}" alt="">` : ""}
-          <div class="m-info">
-            <div class="m-name">#${esc(att.number)} ${esc(att.name)}</div>
-            <div class="m-sub">${count} iteration${count === 1 ? "" : "s"} logged${runNames.length ? ` &middot; ${runNames.map(esc).join(", ")}` : ""}</div>
-          </div>
-        `;
-        list.appendChild(row);
       }
-    }
-    if (editing && realAttachments.length) {
       makeSortable(list, {
         onEnd: () => {
           [...list.querySelectorAll(".drag-num")].forEach((el, i) => { el.textContent = `#${i + 1}`; });
         },
       });
+    } else {
+      // Combined attachments get their own section, grayed out, below the
+      // active ones — but their logged iterations still count toward the
+      // total (renderIterationTotal counts every non-base-robot entry
+      // regardless of this flag, so nothing needs to change there).
+      const active = realAttachments.filter((a) => !a.combined);
+      const combined = realAttachments.filter((a) => a.combined);
+      const attRowHTML = async (att) => {
+        const count = await iterationCount(att.id);
+        const runNames = (att.runGroupIds || []).map((gid) => state.runGroups.find((g) => g.id === gid)).filter(Boolean).map(runGroupDisplayName);
+        return `<div class="mission-row" data-att-id="${att.id}">
+          ${att.photo ? `<img class="att-thumb" src="${att.photo}" alt="">` : ""}
+          <div class="m-info">
+            <div class="m-name">#${esc(att.number)} ${esc(att.name)}</div>
+            <div class="m-sub">${count} iteration${count === 1 ? "" : "s"} logged${runNames.length ? ` &middot; ${runNames.map(esc).join(", ")}` : ""}</div>
+          </div>
+        </div>`;
+      };
+      let html = "";
+      for (const att of active) html += await attRowHTML(att);
+      if (combined.length) {
+        html += `<div class="attachment-section-divider">Combined / no longer separate</div>`;
+        for (const att of combined) html += `<div class="attachment-row-combined">${await attRowHTML(att)}</div>`;
+      }
+      list.innerHTML = html || `<p class="empty-sub">No attachments yet. Tap Edit to add one.</p>`;
     }
   })();
 }
@@ -938,6 +1017,13 @@ function openAttachmentModal(att) {
       </div>
       <input type="file" accept="image/*" id="m-att-photo" hidden>
     </div>
+    ${!(att && att.isBaseRobot) ? `
+    <div class="field">
+      <label class="checkbox-row checkbox-row-standalone">
+        <input type="checkbox" id="m-att-combined" ${isEdit && att.combined ? "checked" : ""}> Combined into another attachment (no longer used on its own)
+      </label>
+      <p class="empty-sub" style="margin:6px 0 0;">Grays it out and moves it into its own section — iterations already logged under it still count toward the total.</p>
+    </div>` : ""}
     <div class="modal-actions">
       <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
       <button class="btn btn-primary" id="m-save" type="button">Save</button>
@@ -963,6 +1049,8 @@ function openAttachmentModal(att) {
     record.name = name;
     record.runGroupIds = Array.from(document.querySelectorAll("#modal-box [data-gid]:checked")).map((el) => el.dataset.gid);
     record.photo = pendingAttPhoto;
+    const combinedEl = document.getElementById("m-att-combined");
+    if (combinedEl) record.combined = combinedEl.checked;
     if (!isEdit) record.createdAt = Date.now();
     const id = await dbPut("attachments", record);
     if (!isEdit) { state.selectedAttachmentIds.add(id); await renumberAttachments(); }
@@ -2625,6 +2713,9 @@ async function actuallyStartRun() {
     missionTimings: [],
     transitionTimings: [],
     notes: "",
+    // Freezes today's Run group/mission/task order onto this run, so
+    // reordering any of them later doesn't reshuffle how this run displays.
+    orderSnapshot: captureOrderSnapshot(),
   };
   await dbPut("runs", run);
   // Skip to the first leg that actually has missions with tasks.
@@ -3445,20 +3536,19 @@ function renderBreakdownScoresTab() {
     </div>
     ${mission10BonusRowHTML(run)}
   </div>`;
-  const sectionsHTML = state.runGroups.map((leg) => {
-    const legMissions = getLegMissions(leg);
-    const missionsHTML = legMissions.map((m) => {
+  const sectionsHTML = runBreakdownSections(run).map(({ name, missions }) => {
+    const missionsHTML = missions.map((m) => {
       const score = missionScoreForRun(m, run);
       const max = missionMaxPoints(m);
       const timing = (run.missionTimings || []).find((t) => t.missionId === m.id);
-      const rows = visibleTasks(m).map((t) => taskRowHTML(t, run.rawScores || {})).join("") || `<p class="empty-sub">No tasks.</p>`;
+      const rows = orderedTasksForRun(m, run).map((t) => taskRowHTML(t, run.rawScores || {})).join("") || `<p class="empty-sub">No tasks.</p>`;
       return `<div class="gfs-subsection">
         <h4>${esc(m.name)} <span class="gfs-task-pts">${score} / ${max}${timing ? ` &middot; ${fmtDuration(timing.durationMs)}` : ""}</span></h4>
         <div class="gfs-task-list">${rows}</div>
       </div>`;
     }).join("");
     return `<div class="gfs-section">
-      <h3>${esc(runGroupDisplayName(leg))}</h3>
+      <h3>${esc(name)}</h3>
       ${missionsHTML || `<p class="empty-sub">No missions in this run.</p>`}
     </div>`;
   }).join("");
@@ -4157,6 +4247,9 @@ async function importScoresheetXLSX(file) {
         missionTimings: [],
         transitionTimings: [],
         notes: "Imported from scoresheet XLSX",
+        // No historical order info comes from the XLSX itself, so this just
+        // uses whatever order things are in right now, at import time.
+        orderSnapshot: captureOrderSnapshot(),
       });
     }
   }
