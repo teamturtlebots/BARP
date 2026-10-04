@@ -878,6 +878,7 @@ function renderAttachmentsSetup() {
       const combinedAtts = realAttachments.filter((a) => a.combined);
       const sortableEl = document.createElement("div");
       sortableEl.id = "att-sortable";
+      sortableEl.className = "mission-list"; // same flex column + gap the rows had when they sat directly in the list
       list.appendChild(sortableEl);
       const wireRow = (row, att) => {
         row.querySelector('[data-act="edit"]').addEventListener("click", () => openAttachmentModal(att));
