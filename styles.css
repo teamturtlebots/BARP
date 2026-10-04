@@ -786,7 +786,12 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 
 /* --- Added: run date-range filter --- */
 .run-filter-row { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
-.run-filter-row .text-input { flex: 1; font-size: 0.85rem; padding: 8px 10px; }
+.run-filter-row { min-width: 0; max-width: 100%; }
+/* datetime-local / date inputs have a wide intrinsic minimum width on mobile;
+   without min-width:0 + width:auto they refuse to shrink and push the page wider. */
+.run-filter-row .text-input { flex: 1 1 0; min-width: 0; width: auto; max-width: 100%; font-size: 0.8rem; padding: 8px 6px; }
+.run-filter-row .field { flex: 1 1 0; min-width: 0; }
+.run-filter-row input[type="datetime-local"], .run-filter-row input[type="date"] { -webkit-appearance: none; appearance: none; }
 .run-filter-to-label { color: var(--text-soft); font-size: 0.8rem; flex: none; }
 
 /* --- Added: unified top-positioned reorder toolbar for Runs/Missions/Tasks --- */

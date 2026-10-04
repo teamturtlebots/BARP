@@ -868,25 +868,22 @@ function renderAttachmentsSetup() {
       return;
     }
     if (editing) {
-      // One sortable list, same as before — "Combined" just grays a row out
-      // and toggles immediately (no need to hit Save), same as Delete
-      // already does in this mode. Order still applies to both groups, so
-      // nothing needs to move between separate containers here.
-      for (const [idx, att] of realAttachments.entries()) {
-        const row = document.createElement("div");
-        row.dataset.idx = idx;
-        row.dataset.attId = String(att.id);
-        row.className = "mission-row" + (att.combined ? " attachment-row-combined" : "");
-        row.innerHTML = `
-          <span class="drag-handle">&#9776;</span>
-          <span class="drag-num">#${idx + 1}</span>
-          <div class="m-info"><div class="m-name">${esc(att.name)}${att.combined ? ` <span class="m-sub" style="display:inline;">(combined)</span>` : ""}</div></div>
-          <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
-          <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
-        `;
+      // Older versions made `list` itself sortable; make sure no stale instance lingers on it.
+      const stale = sortableInstances.get(list);
+      if (stale) { stale.destroy(); sortableInstances.delete(list); }
+      // Only active attachments are in the reorderable list — combined ones
+      // are listed below it (edit/delete only) so they can still be
+      // un-combined, but they don't take up numbered/draggable slots.
+      const activeAtts = realAttachments.filter((a) => !a.combined);
+      const combinedAtts = realAttachments.filter((a) => a.combined);
+      const sortableEl = document.createElement("div");
+      sortableEl.id = "att-sortable";
+      list.appendChild(sortableEl);
+      const wireRow = (row, att) => {
         row.querySelector('[data-act="edit"]').addEventListener("click", () => openAttachmentModal(att));
         row.querySelector('[data-act="del"]').addEventListener("click", async () => {
           if (!confirm(`Delete "${att.name}" and everything logged under it?`)) return;
+          await persistPendingAttachmentOrder();
           const entries = await dbGetByIndex("entries", "byAttachment", att.id);
           const now = Date.now();
           for (const en of entries) { if (!en.deleted) { en.deleted = true; en.deletedAt = now; en.deletedWithAttachmentId = att.id; await dbPut("entries", en); } }
@@ -900,13 +897,47 @@ function renderAttachmentsSetup() {
             await restoreDeletedAttachment(att.id);
           });
         });
-        list.appendChild(row);
+      };
+      for (const [idx, att] of activeAtts.entries()) {
+        const row = document.createElement("div");
+        row.dataset.idx = idx;
+        row.dataset.attId = String(att.id);
+        row.className = "mission-row";
+        row.innerHTML = `
+          <span class="drag-handle">&#9776;</span>
+          <span class="drag-num">#${idx + 1}</span>
+          <div class="m-info"><div class="m-name">${esc(att.name)}</div></div>
+          <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
+          <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
+        `;
+        wireRow(row, att);
+        sortableEl.appendChild(row);
       }
-      makeSortable(list, {
-        onEnd: () => {
-          [...list.querySelectorAll(".drag-num")].forEach((el, i) => { el.textContent = `#${i + 1}`; });
-        },
-      });
+      if (combinedAtts.length) {
+        const divider = document.createElement("div");
+        divider.className = "attachment-section-divider";
+        divider.textContent = "Combined / no longer separate";
+        list.appendChild(divider);
+        for (const att of combinedAtts) {
+          const row = document.createElement("div");
+          row.className = "mission-row attachment-row-combined";
+          row.style.marginBottom = "8px";
+          row.innerHTML = `
+            <div class="m-info"><div class="m-name">${esc(att.name)}</div></div>
+            <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
+            <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
+          `;
+          wireRow(row, att);
+          list.appendChild(row);
+        }
+      }
+      if (activeAtts.length) {
+        makeSortable(sortableEl, {
+          onEnd: () => {
+            [...sortableEl.querySelectorAll(".drag-num")].forEach((el, i) => { el.textContent = `#${i + 1}`; });
+          },
+        });
+      }
     } else {
       // Combined attachments get their own section, grayed out, below the
       // active ones — but their logged iterations still count toward the
@@ -948,6 +979,28 @@ function renderAttachmentOrderToolbar() {
   wireAttachmentOrderToolbar();
 }
 
+// Writes whatever order the rows currently sit in (in the DOM) to the DB.
+// Called on Save, and also before a rename/edit modal saves — otherwise the
+// modal's reload-from-DB throws away a drag the user hasn't "Saved" yet.
+async function persistPendingAttachmentOrder() {
+  if (!state.editingAttachmentOrder) return;
+  const sortable = document.getElementById("att-sortable");
+  if (!sortable) return;
+  const activeIds = [...sortable.querySelectorAll("[data-att-id]")].map((row) => row.dataset.attId);
+  if (!activeIds.length && !state.attachments.some((a) => !a.isBaseRobot && a.combined)) return;
+  // Combined attachments aren't in the reorder list, so they keep their
+  // relative order and are numbered after the active ones.
+  const combinedIds = state.attachments
+    .filter((a) => !a.isBaseRobot && a.combined && !activeIds.includes(String(a.id)))
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .map((a) => String(a.id));
+  [...activeIds, ...combinedIds].forEach((id, idx) => {
+    const att = state.attachments.find((a) => String(a.id) === id);
+    if (att) { att.order = idx; att.number = idx + 1; }
+  });
+  for (const att of state.attachments) await dbPut("attachments", att);
+}
+
 function wireAttachmentOrderToolbar() {
   const addBtn = document.getElementById("btn-add-attachment");
   if (addBtn) addBtn.addEventListener("click", () => openAttachmentModal(null));
@@ -970,13 +1023,7 @@ function wireAttachmentOrderToolbar() {
   });
   const saveBtn = document.getElementById("btn-save-order-attachments");
   if (saveBtn) saveBtn.addEventListener("click", async () => {
-    const list = document.getElementById("attachment-setup-list");
-    const orderedIds = [...list.querySelectorAll("[data-att-id]")].map((row) => row.dataset.attId);
-    orderedIds.forEach((id, idx) => {
-      const att = state.attachments.find((a) => String(a.id) === id);
-      if (att) { att.order = idx; att.number = idx + 1; }
-    });
-    for (const att of state.attachments) await dbPut("attachments", att);
+    await persistPendingAttachmentOrder();
     attachmentEditSessionSnapshot = null;
     state.editingAttachmentOrder = false;
     await loadAttachments();
@@ -1045,6 +1092,7 @@ function openAttachmentModal(att) {
     stopCamera();
     const name = (att && att.isBaseRobot) ? "Base Robot" : document.getElementById("m-att-name").value.trim();
     if (!name) { alert("Give this attachment a name."); return; }
+    await persistPendingAttachmentOrder();
     const record = isEdit ? att : { id: crypto.randomUUID(), order: state.attachments.length, number: state.attachments.length + 1 };
     record.name = name;
     record.runGroupIds = Array.from(document.querySelectorAll("#modal-box [data-gid]:checked")).map((el) => el.dataset.gid);
@@ -1924,6 +1972,20 @@ function renderOrderToolbarTop() {
 // run assignment is read from whichever run's container its row currently
 // sits in, so cross-run drags are picked up correctly.
 async function saveAllOrder() {
+  await persistPendingRunsOrder();
+  await recomputeGlobalMissionOrder();
+  state.editingAllOrder = false;
+  runsEditSessionSnapshot = null;
+  await loadMissions();
+  await loadRunGroups();
+  syncToTeamDrive();
+}
+// Applies the DOM's current run/mission/task order to the DB without leaving
+// edit mode. Also called before rename/edit modals save, so an unsaved drag
+// isn't lost when they reload from the DB.
+async function persistPendingRunsOrder() {
+  if (!state.editingAllOrder) return;
+  if (!document.querySelector("#rungroup-list > [data-gid]") && !document.querySelector("#rungroup-list > [data-unassigned]")) return;
   const groupEls = [...document.querySelectorAll("#rungroup-list > [data-gid]")];
 
   groupEls.forEach((el, idx) => {
@@ -1969,13 +2031,6 @@ async function saveAllOrder() {
     }
   }
   for (const m of state.missions) await dbPut("missions", m);
-
-  await recomputeGlobalMissionOrder();
-  state.editingAllOrder = false;
-  runsEditSessionSnapshot = null;
-  await loadMissions();
-  await loadRunGroups();
-  syncToTeamDrive();
 }
 
 function renderRunGroups() {
@@ -2103,6 +2158,7 @@ function renderOrphanMissions(container, orphans) {
       row.querySelector('[data-act="edit"]').addEventListener("click", () => openMissionNameModal(m, null));
       row.querySelector('[data-act="del"]').addEventListener("click", async () => {
         if (!confirm(`Delete mission "${m.name}" and all its tasks?`)) return;
+        await persistPendingRunsOrder();
         m.deleted = true;
         m.deletedAt = Date.now();
         await dbPut("missions", m);
@@ -2134,6 +2190,7 @@ function openRunGroupModal(g) {
   document.getElementById("m-cancel").addEventListener("click", closeModal);
   document.getElementById("m-save").addEventListener("click", async () => {
     const name = document.getElementById("rg-name").value.trim();
+    await persistPendingRunsOrder();
     const record = isEdit ? g : { id: crypto.randomUUID(), order: state.runGroups.length };
     record.name = name;
     const id = await dbPut("runGroups", record);
@@ -2180,6 +2237,7 @@ function renderMissionsForGroup(container, group) {
       const delBtn = row.querySelector('[data-act="del"]');
       if (delBtn) delBtn.addEventListener("click", async () => {
         if (!confirm(`Delete mission "${m.name}" and all its tasks?`)) return;
+        await persistPendingRunsOrder();
         m.deleted = true;
         m.deletedAt = Date.now();
         await dbPut("missions", m);
@@ -2217,6 +2275,7 @@ function openMissionNameModal(m, group) {
     if (!name) { alert("Name this mission."); return; }
     const numberVal = document.getElementById("m-mission-number").value.trim();
     const newGroupId = currentGroupId;
+    await persistPendingRunsOrder();
     const record = isEdit ? m : { id: crypto.randomUUID(), order: 9999, tasks: [], taskSeq: 0 };
     record.name = name;
     record.number = numberVal === "" ? null : Number(numberVal);
@@ -2338,6 +2397,7 @@ function openTaskModal(mission, t, opts = {}) {
     const name = document.getElementById("t-name").value.trim();
     if (!name) { alert("Name this task."); return; }
     const ty = document.getElementById("t-type").value;
+    await persistPendingRunsOrder();
     const record = isEdit ? t : { id: crypto.randomUUID() };
     record.name = name; record.type = ty;
     if (ty === "bool") {
