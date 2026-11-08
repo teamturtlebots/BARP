@@ -185,7 +185,6 @@ async function resetLocalDatabase() {
 window.addEventListener("error", (e) => showErrorBanner(e.message || String(e.error)));
 window.addEventListener("unhandledrejection", (e) => showErrorBanner(e.reason?.message || String(e.reason)));
 
-// ---------- Drag-to-reorder (touch-friendly, works with mouse too) ----------
 // ---------- Drag-to-reorder (SortableJS-backed) ----------
 // Thin wrapper around the SortableJS library (loaded via CDN in index.html).
 // `group` lets several containers share a name so items can be dragged
@@ -206,11 +205,6 @@ function makeSortable(container, { group, onEnd } = {}) {
   });
   sortableInstances.set(container, instance);
   return instance;
-}
-function reorderToolbarHTML(editing, prefix) {
-  return editing
-    ? `<div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-save-order-${prefix}">Save order</button><button type="button" class="btn-small-link" id="btn-cancel-order-${prefix}">Cancel</button></div>`
-    : `<div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-edit-order-${prefix}">&#8645; Reorder</button></div>`;
 }
 
 // ---------- Modal helpers ----------
@@ -527,6 +521,11 @@ async function loadAttachments() {
   await renderIterationTotal();
   await renderEntryList();
 }
+// Attachments that can have new iterations logged against them — a
+// combined attachment has been merged into another one, so new changes
+// should be logged on whatever it was combined into instead.
+function loggableAttachments() { return state.attachments.filter((a) => !a.combined); }
+function attachmentLabel(a) { return a.isBaseRobot ? "Base Robot" : `#${a.number} ${a.name}`; }
 async function renumberAttachments() {
   // Tie-broken by createdAt then id (not just `order`) so that once every
   // device has synced the same data, they all independently compute the
@@ -706,7 +705,8 @@ function renderAttachmentChips() {
 
   state.attachments.forEach((att) => {
     const chip = document.createElement("button");
-    chip.className = "chip" + (state.selectedAttachmentIds.has(att.id) ? " active" : "");
+    chip.className = "chip" + (state.selectedAttachmentIds.has(att.id) ? " active" : "") + (att.combined ? " chip-combined" : "");
+    if (att.combined) chip.title = "Combined — history only, can't log new iterations";
     chip.innerHTML = att.isBaseRobot ? "Base Robot" : `<span class="chip-num">#${esc(att.number)}</span>${esc(att.name)}`;
     chip.addEventListener("click", async () => {
       if (state.selectedAttachmentIds.has(att.id)) state.selectedAttachmentIds.delete(att.id);
@@ -908,12 +908,30 @@ function renderAttachmentsSetup() {
           <span class="drag-handle">&#9776;</span>
           <span class="drag-num">#${idx + 1}</span>
           <div class="m-info"><div class="m-name">${esc(att.name)}</div></div>
+          ${orderArrowsHTML(false, false)}
           <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
           <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
         `;
         wireRow(row, att);
+        wireOrderArrows(row, (dir) => {
+          const sibling = dir < 0 ? row.previousElementSibling : row.nextElementSibling;
+          if (!sibling) return;
+          if (dir < 0) sortableEl.insertBefore(row, sibling); else sortableEl.insertBefore(sibling, row);
+          refreshAttachmentRowNumbers();
+        });
         sortableEl.appendChild(row);
       }
+      // Numbers + which arrows are disabled both depend on position, so
+      // recompute them after every move (arrow tap or drag).
+      const refreshAttachmentRowNumbers = () => {
+        const rows = [...sortableEl.querySelectorAll(":scope > [data-att-id]")];
+        rows.forEach((r, i) => {
+          r.querySelector(".drag-num").textContent = `#${i + 1}`;
+          r.querySelector('.order-arrows [data-act="up"]').disabled = i === 0;
+          r.querySelector('.order-arrows [data-act="down"]').disabled = i === rows.length - 1;
+        });
+      };
+      refreshAttachmentRowNumbers();
       if (combinedAtts.length) {
         const divider = document.createElement("div");
         divider.className = "attachment-section-divider";
@@ -934,9 +952,7 @@ function renderAttachmentsSetup() {
       }
       if (activeAtts.length) {
         makeSortable(sortableEl, {
-          onEnd: () => {
-            [...sortableEl.querySelectorAll(".drag-num")].forEach((el, i) => { el.textContent = `#${i + 1}`; });
-          },
+          onEnd: refreshAttachmentRowNumbers,
         });
       }
     } else {
@@ -974,9 +990,9 @@ function renderAttachmentOrderToolbar() {
   el.innerHTML = editing
     ? `<div class="edit-mode-toolbar">
          <button type="button" class="btn btn-amber btn-sm" id="btn-add-attachment">+ Attachment</button>
-         <div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-save-order-attachments">Save</button><button type="button" class="btn-small-link" id="btn-cancel-order-attachments">Cancel</button></div>
+         <div class="btn-group"><button type="button" class="btn btn-ghost btn-sm" id="btn-cancel-order-attachments">Cancel</button><button type="button" class="btn btn-primary btn-sm" id="btn-save-order-attachments">Save</button></div>
        </div>`
-    : `<div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-edit-order-attachments">Edit</button></div>`;
+    : `<button type="button" class="btn btn-ghost btn-sm" id="btn-edit-order-attachments">&#9998;&#65039; Edit</button>`;
   wireAttachmentOrderToolbar();
 }
 
@@ -1133,8 +1149,8 @@ function removeClassicPhoto(idx) {
 }
 
 function openRecordIterationModal() {
-  if (!state.attachments.length) {
-    openModal(`<h2>No attachments yet</h2><p class="empty-sub">Go to Settings to add a robot attachment first.</p>
+  if (!loggableAttachments().length) {
+    openModal(`<h2>No attachments to log</h2><p class="empty-sub">Go to Settings to add a robot attachment first. (Attachments marked as combined can't have new iterations logged.)</p>
       <div class="modal-actions"><button class="btn btn-primary" id="m-close" type="button">Got it</button></div>`);
     document.getElementById("m-close").addEventListener("click", closeModal);
     return;
@@ -1147,14 +1163,24 @@ function openRecordIterationModalClassic(existingEntry) {
   const isEdit = !!existingEntry;
   pendingPhotos = isEdit ? getEntryPhotos(existingEntry) : [];
   pendingSize = isEdit ? (existingEntry.size || "small") : "small";
+  // Combined attachments can't take new iterations. The one exception is
+  // editing an entry that's already logged on one — keep it as an option so
+  // the edit doesn't silently move the entry somewhere else.
+  const choices = loggableAttachments();
+  if (isEdit) {
+    const current = state.attachments.find((a) => a.id === existingEntry.attachmentId);
+    if (current && current.combined) choices.push(current);
+  }
+  if (!choices.length) { openRecordIterationModal(); return; }
+  const preselected = state.selectedAttachmentIds.size === 1 ? [...state.selectedAttachmentIds][0] : null;
   const defaultAttId = isEdit ? existingEntry.attachmentId
-    : (state.selectedAttachmentIds.size === 1 ? [...state.selectedAttachmentIds][0] : state.attachments[0].id);
+    : (choices.some((a) => a.id === preselected) ? preselected : choices[0].id);
   const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
   openModal(`
     <h2>${isEdit ? "Edit Iteration" : "Record Iteration"}</h2>
     <div class="field"><label>Attachment</label>
       <select class="text-input" id="ri-attachment">
-        ${state.attachments.map((a) => `<option value="${a.id}" ${a.id === defaultAttId ? "selected" : ""}>${a.isBaseRobot ? "Base Robot" : `#${esc(a.number)} ${esc(a.name)}`}</option>`).join("")}
+        ${choices.map((a) => `<option value="${a.id}" ${a.id === defaultAttId ? "selected" : ""}>${esc(attachmentLabel(a))}${a.combined ? " (combined)" : ""}</option>`).join("")}
       </select>
     </div>
     <div class="field"><label>Size of this iteration</label>
@@ -1238,6 +1264,11 @@ function openRecordIterationModalClassic(existingEntry) {
     const whatChanged = document.getElementById("ri-what").value.trim();
     const whyChanged = document.getElementById("ri-why").value.trim();
     if (!whatChanged && !whyChanged && !pendingPhotos.length) { alert("Add a photo or a note first."); return; }
+    const pickedAtt = state.attachments.find((a) => String(a.id) === String(attachmentId));
+    if (pickedAtt && pickedAtt.combined && !(isEdit && String(existingEntry.attachmentId) === String(attachmentId))) {
+      alert(`"${pickedAtt.name}" is combined into another attachment — log this iteration on that one instead.`);
+      return;
+    }
     if (isEdit) {
       existingEntry.attachmentId = attachmentId;
       existingEntry.whatChanged = whatChanged;
@@ -1312,7 +1343,7 @@ function renderIterAttachmentStep() {
     ${iterHeaderHTML("Which attachment?")}
     <div class="gfs-body gfs-center">
       <div class="iter-attachment-grid">
-        ${state.attachments.map((a) => `<button type="button" class="iter-attachment-btn${a.id === state.iterFlow.attachmentId ? " active" : ""}" data-id="${a.id}">${a.isBaseRobot ? "Base Robot" : `#${esc(a.number)} ${esc(a.name)}`}</button>`).join("")}
+        ${loggableAttachments().map((a) => `<button type="button" class="iter-attachment-btn${a.id === state.iterFlow.attachmentId ? " active" : ""}" data-id="${a.id}">${esc(attachmentLabel(a))}</button>`).join("")}
       </div>
     </div>
     <div class="gfs-footer"></div>
@@ -1467,6 +1498,12 @@ function renderIterWhyStep() {
     state.iterFlow.why = document.getElementById("iter-why").value.trim();
     const { attachmentId, size, photos, what, why } = state.iterFlow;
     if (!what && !why && !photos.length) { alert("Add a photo or a note first."); return; }
+    if (!loggableAttachments().some((a) => String(a.id) === String(attachmentId))) {
+      alert("That attachment is combined (or was removed) — pick a different one.");
+      state.iterFlow.step = 0;
+      renderIterStep();
+      return;
+    }
     await dbPut("entries", { id: crypto.randomUUID(), attachmentId, timestamp: Date.now(), photos, whatChanged: what, whyChanged: why, size });
     state.selectedAttachmentIds.add(attachmentId);
     state.iterFlow = null;
@@ -1890,12 +1927,16 @@ function openAddMissionFromBankModal(group) {
   });
 }
 
-function openPickMissionTasksModal(bankMission, group) {
+// `existingMission` set = adding more of this bank mission's unused tasks
+// onto a mission that's already in a Run, instead of creating a new one.
+function openPickMissionTasksModal(bankMission, group, existingMission = null) {
   const used = usedBankTaskIds();
   const remaining = visibleTasks(bankMission).filter((t) => !used.has(t.id));
+  if (!remaining.length) { showSimpleToast("Every task in this mission is already assigned to a Run."); return; }
+  const targetName = group ? runGroupDisplayName(group) : "this mission";
   openModal(`
     <h2>${esc(bankMission.name)}</h2>
-    <p class="empty-sub">Choose which tasks go to ${esc(runGroupDisplayName(group))}. Leave some unchecked if this mission is split across multiple Runs.</p>
+    <p class="empty-sub">Choose which tasks go to ${esc(targetName)}. Leave some unchecked if this mission is split across multiple Runs.</p>
     <div class="checkbox-list">
       ${remaining.map((t) => `
         <label class="checkbox-row checkbox-row-standalone">
@@ -1915,6 +1956,16 @@ function openPickMissionTasksModal(bankMission, group) {
     const selectedTasks = remaining
       .filter((t) => checkedIds.includes(t.id))
       .map((t) => ({ ...JSON.parse(JSON.stringify(t)), id: crypto.randomUUID(), bankTaskId: t.id }));
+    if (existingMission) {
+      existingMission.tasks = [...visibleTasks(existingMission), ...selectedTasks, ...existingMission.tasks.filter((t) => t.deleted)];
+      await dbPut("missions", existingMission);
+      closeModal();
+      state.expandedMissions.add(existingMission.id);
+      await loadMissions();
+      renderRunGroups();
+      syncToTeamDrive();
+      return;
+    }
     const record = {
       id: crypto.randomUUID(), order: 9999, runGroupId: group.id,
       number: bankMission.number, name: bankMission.name, bankMissionId: bankMission.id,
@@ -1942,9 +1993,9 @@ function renderOrderToolbarTop() {
            <button type="button" class="btn btn-ghost btn-sm" id="btn-import-missions">Import CSV</button>
            <button type="button" class="btn btn-amber btn-sm" id="btn-add-rungroup">+ Run</button>
          </div>
-         <div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-save-order-all">Save</button><button type="button" class="btn-small-link" id="btn-cancel-order-all">Cancel</button></div>
+         <div class="btn-group"><button type="button" class="btn btn-ghost btn-sm" id="btn-cancel-order-all">Cancel</button><button type="button" class="btn btn-primary btn-sm" id="btn-save-order-all">Save</button></div>
        </div>`
-    : `<div class="reorder-toolbar-small"><button type="button" class="btn-small-link" id="btn-edit-order-all">Edit</button></div>`;
+    : `<button type="button" class="btn btn-ghost btn-sm" id="btn-edit-order-all">&#9998;&#65039; Edit</button>`;
   if (editing) {
     document.getElementById("btn-add-rungroup").addEventListener("click", () => openRunGroupModal(null));
     document.getElementById("btn-import-missions").addEventListener("click", openImportMissionsModal);
@@ -1968,10 +2019,6 @@ function renderOrderToolbarTop() {
   }
 }
 
-// Reads whatever order rows currently sit in, in the DOM — robust regardless
-// of how many nested levels were actually dragged this session. A mission's
-// run assignment is read from whichever run's container its row currently
-// sits in, so cross-run drags are picked up correctly.
 async function saveAllOrder() {
   await persistPendingRunsOrder();
   await recomputeGlobalMissionOrder();
@@ -1981,100 +2028,147 @@ async function saveAllOrder() {
   await loadRunGroups();
   syncToTeamDrive();
 }
-// Applies the DOM's current run/mission/task order to the DB without leaving
-// edit mode. Also called before rename/edit modals save, so an unsaved drag
-// isn't lost when they reload from the DB.
-async function persistPendingRunsOrder() {
+// Copies the order rows currently sit in on screen (after any drags) into
+// `state`, without touching the DB. Only rows that are actually rendered are
+// read — a collapsed Run or Mission simply keeps the order it already had —
+// so this is safe to call before every re-render in edit mode (expanding,
+// collapsing, tapping an arrow) without losing a drag.
+function syncRunsOrderFromDOM() {
   if (!state.editingAllOrder) return;
-  if (!document.querySelector("#rungroup-list > [data-gid]") && !document.querySelector("#rungroup-list > [data-unassigned]")) return;
-  const groupEls = [...document.querySelectorAll("#rungroup-list > [data-gid]")];
-
+  const list = document.getElementById("rungroup-list");
+  if (!list) return;
+  const groupEls = [...list.querySelectorAll(":scope > [data-gid]")];
   groupEls.forEach((el, idx) => {
     const g = state.runGroups.find((x) => x.id === el.dataset.gid);
     if (g) g.order = idx;
   });
-  for (const g of state.runGroups) await dbPut("runGroups", g);
+  state.runGroups.sort((a, b) => a.order - b.order);
 
-  groupEls.forEach((groupEl) => {
-    const gid = groupEl.dataset.gid;
-    const missionListContainer = groupEl.querySelector(":scope > .task-list");
-    if (!missionListContainer) return;
-    const missionEls = [...missionListContainer.querySelectorAll(":scope > [data-mid]")];
-    missionEls.forEach((mEl, idx) => {
+  list.querySelectorAll(":scope > [data-gid] > .task-list, :scope > [data-unassigned] > .task-list").forEach((container) => {
+    [...container.querySelectorAll(":scope > [data-mid]")].forEach((mEl, idx) => {
       const m = state.missions.find((x) => x.id === mEl.dataset.mid);
-      if (m) { m.order = idx; m.runGroupId = gid; }
+      if (m) m.order = idx;
     });
   });
-  // Missions dragged into (or left in) the Unassigned bucket get their
-  // runGroupId cleared — otherwise they'd still silently point at whatever
-  // run they used to belong to, even though they visually moved out of it.
-  const unassignedEl = document.querySelector("#rungroup-list > [data-unassigned]");
-  if (unassignedEl) {
-    const missionListContainer = unassignedEl.querySelector(":scope > .task-list");
-    if (missionListContainer) {
-      const missionEls = [...missionListContainer.querySelectorAll(":scope > [data-mid]")];
-      missionEls.forEach((mEl, idx) => {
-        const m = state.missions.find((x) => x.id === mEl.dataset.mid);
-        if (m) { m.order = idx; m.runGroupId = null; }
-      });
-    }
-  }
 
-  const allMissionEls = [...document.querySelectorAll("[data-mid]")];
-  for (const mEl of allMissionEls) {
+  list.querySelectorAll("[data-mid]").forEach((mEl) => {
     const m = state.missions.find((x) => x.id === mEl.dataset.mid);
-    if (!m) continue;
+    if (!m) return;
     const taskEls = [...mEl.querySelectorAll(":scope > .task-list > [data-tid]")];
-    if (!taskEls.length) continue;
+    if (!taskEls.length) return;
     const reordered = taskEls.map((te) => m.tasks.find((t) => t.id === te.dataset.tid)).filter(Boolean);
     if (reordered.length === visibleTasks(m).length) {
       m.tasks = [...reordered, ...m.tasks.filter((t) => t.deleted)];
     }
-  }
+  });
+}
+// Writes the pending run/mission/task order to the DB without leaving edit
+// mode. Also called before edit modals save, so an unsaved move isn't lost
+// when they reload from the DB.
+async function persistPendingRunsOrder() {
+  if (!state.editingAllOrder) return;
+  syncRunsOrderFromDOM();
+  for (const g of state.runGroups) await dbPut("runGroups", g);
   for (const m of state.missions) await dbPut("missions", m);
+}
+// Swaps an item with its neighbour (dir = -1 up, +1 down) inside a list
+// sorted by `.order`, then renumbers that list 0..n-1.
+function swapByOrder(items, item, dir) {
+  const sorted = items.slice().sort((a, b) => a.order - b.order);
+  const i = sorted.indexOf(item);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= sorted.length) return false;
+  [sorted[i], sorted[j]] = [sorted[j], sorted[i]];
+  sorted.forEach((x, idx) => { x.order = idx; });
+  return true;
+}
+function missionSiblings(m) {
+  const inGroup = state.runGroups.some((g) => g.id === m.runGroupId);
+  return state.missions.filter((x) => (inGroup ? x.runGroupId === m.runGroupId : !state.runGroups.some((g) => g.id === x.runGroupId)));
+}
+function moveRunGroup(g, dir) {
+  syncRunsOrderFromDOM();
+  if (swapByOrder(state.runGroups, g, dir)) state.runGroups.sort((a, b) => a.order - b.order);
+  renderRunGroups();
+}
+function moveMission(m, dir) {
+  syncRunsOrderFromDOM();
+  swapByOrder(missionSiblings(m), m, dir);
+  renderRunGroups();
+}
+function moveTask(mission, t, dir) {
+  syncRunsOrderFromDOM();
+  const vis = visibleTasks(mission);
+  const i = vis.indexOf(t), j = i + dir;
+  if (i >= 0 && j >= 0 && j < vis.length) {
+    [vis[i], vis[j]] = [vis[j], vis[i]];
+    mission.tasks = [...vis, ...mission.tasks.filter((x) => x.deleted)];
+  }
+  renderRunGroups();
+}
+function orderArrowsHTML(isFirst, isLast) {
+  return `<span class="order-arrows">
+    <button type="button" class="btn-icon order-arrow" data-act="up" title="Move up" ${isFirst ? "disabled" : ""}>&#9650;</button>
+    <button type="button" class="btn-icon order-arrow" data-act="down" title="Move down" ${isLast ? "disabled" : ""}>&#9660;</button>
+  </span>`;
+}
+function wireOrderArrows(rowHead, onMove) {
+  rowHead.querySelector(':scope > .order-arrows [data-act="up"]')?.addEventListener("click", (e) => { e.stopPropagation(); onMove(-1); });
+  rowHead.querySelector(':scope > .order-arrows [data-act="down"]')?.addEventListener("click", (e) => { e.stopPropagation(); onMove(1); });
+}
+// Expand/collapse that works in both view and edit mode — in edit mode the
+// on-screen order is captured first so the re-render doesn't undo a drag.
+function toggleExpanded(set, key) {
+  syncRunsOrderFromDOM();
+  if (set.has(key)) set.delete(key); else set.add(key);
+  renderRunGroups();
 }
 
 function renderRunGroups() {
   renderOrderToolbarTop();
   const list = document.getElementById("rungroup-list");
   const editing = state.editingAllOrder;
+  const hint = document.getElementById("runs-edit-hint");
+  if (hint) hint.hidden = !editing;
+  // Reordering is done with the ▲/▼ buttons now, not dragging — clear out
+  // any Sortable instance an older render left on the list.
+  const staleList = sortableInstances.get(list);
+  if (staleList) { staleList.destroy(); sortableInstances.delete(list); }
   list.innerHTML = "";
   if (!state.runGroups.length) {
-    list.innerHTML = `<p class="empty-sub">No runs yet. Add one, then add the missions it covers.</p>`;
+    list.innerHTML = `<p class="empty-sub">No runs yet.${editing ? " Tap + Run to add one, then add the missions it covers." : " Tap Edit to add one."}</p>`;
   }
 
-  state.runGroups.forEach((g) => {
+  const groups = state.runGroups.slice().sort((a, b) => a.order - b.order);
+  groups.forEach((g, gi) => {
     const wrap = document.createElement("div");
     wrap.dataset.gid = g.id;
     wrap.className = "mission-group";
-    const expanded = editing ? true : state.expandedRunGroups.has(g.id);
-    const groupMissions = state.missions.filter((m) => m.runGroupId === g.id);
+    const expanded = state.expandedRunGroups.has(g.id);
+    const groupMissions = getLegMissions(g);
     wrap.innerHTML = `
-      <div class="mission-row mission-group-head${editing ? "" : " mission-expand-target"}" data-act="expand">
-        ${editing ? `<span class="drag-handle">&#9776;</span>` : ""}
+      <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
         <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
           <div class="m-name">${esc(runGroupDisplayName(g))}</div>
           <div class="m-sub">${groupMissions.length} mission${groupMissions.length === 1 ? "" : "s"}</div>
         </div>
-        ${editing ? `<button class="btn-icon btn-icon-add" data-act="add-mission" title="Add a mission">&#43;</button><button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>` : ""}
+        ${editing ? `${orderArrowsHTML(gi === 0, gi === groups.length - 1)}<button class="btn-icon" data-act="edit" title="Rename">&#9998;&#65039;</button><button class="btn-icon" data-act="del" title="Delete">&#128465;&#65039;</button>` : ""}
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
-    if (!editing) {
-      wrap.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
-        if (expanded) state.expandedRunGroups.delete(g.id); else state.expandedRunGroups.add(g.id);
-        renderRunGroups();
-      });
-    } else {
-      const addBtn = wrap.querySelector('[data-act="add-mission"]');
-      if (addBtn) addBtn.addEventListener("click", () => openAddMissionFromBankModal(g));
-      const editBtn = wrap.querySelector('[data-act="edit"]');
-      if (editBtn) editBtn.addEventListener("click", () => openRunGroupModal(g));
-      const delBtn = wrap.querySelector('[data-act="del"]');
-      if (delBtn) delBtn.addEventListener("click", async () => {
+    const head = wrap.querySelector(".mission-group-head");
+    head.addEventListener("click", (e) => {
+      if (e.target.closest("button")) return;
+      toggleExpanded(state.expandedRunGroups, g.id);
+    });
+    if (editing) {
+      wireOrderArrows(head, (dir) => moveRunGroup(g, dir));
+      head.querySelector('[data-act="edit"]').addEventListener("click", () => openRunGroupModal(g));
+      head.querySelector('[data-act="del"]').addEventListener("click", async () => {
         const displayName = runGroupDisplayName(g);
         if (!confirm(`Delete "${displayName}"? Its missions move to "Unassigned" rather than being deleted.`)) return;
+        await persistPendingRunsOrder();
         g.deleted = true;
         g.deletedAt = Date.now();
         await dbPut("runGroups", g);
@@ -2089,76 +2183,77 @@ function renderRunGroups() {
     }
     if (expanded) {
       const container = wrap.querySelector(".task-list");
-      renderMissionsForGroup(container, g);
-      makeSortable(container, { group: "missions" });
+      renderMissionRows(container, groupMissions, g);
+      if (editing) {
+        const addBtn = document.createElement("button");
+        addBtn.type = "button";
+        addBtn.className = "btn btn-ghost btn-sm btn-add-inline";
+        addBtn.innerHTML = "&#43; Add mission";
+        addBtn.addEventListener("click", async () => { await persistPendingRunsOrder(); openAddMissionFromBankModal(g); });
+        container.appendChild(addBtn);
+      } else if (!groupMissions.length) {
+        container.innerHTML = `<p class="empty-sub">No missions yet — tap Edit to add some.</p>`;
+      }
     }
     list.appendChild(wrap);
   });
-  if (editing && state.runGroups.length) makeSortable(list);
 
-  const orphans = state.missions.filter((m) => !state.runGroups.some((g) => g.id === m.runGroupId));
-  let orphanWrap = null;
+  const orphans = state.missions
+    .filter((m) => !state.runGroups.some((g) => g.id === m.runGroupId))
+    .sort((a, b) => a.order - b.order);
   if (orphans.length) {
-    orphanWrap = document.createElement("div");
+    const orphanWrap = document.createElement("div");
     orphanWrap.className = "mission-group unassigned-group";
     orphanWrap.dataset.unassigned = "1";
-    const orphanExpanded = editing ? true : state.expandedRunGroups.has("unassigned");
+    const orphanExpanded = state.expandedRunGroups.has("unassigned");
     orphanWrap.innerHTML = `
-      <div class="mission-row mission-group-head${editing ? "" : " mission-expand-target"}" data-act="expand">
+      <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
         <span class="mission-expand-chevron">${orphanExpanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
           <div class="m-name">Unassigned</div>
-          <div class="m-sub">${orphans.length} mission${orphans.length === 1 ? "" : "s"} without a run</div>
+          <div class="m-sub">${orphans.length} mission${orphans.length === 1 ? "" : "s"} without a run${editing ? " — tap &#9998;&#65039; on one to move it into a Run" : ""}</div>
         </div>
       </div>
       <div class="task-list" ${orphanExpanded ? "" : "hidden"}></div>
     `;
-    if (!editing) {
-      orphanWrap.querySelector('[data-act="expand"]').addEventListener("click", () => {
-        if (orphanExpanded) state.expandedRunGroups.delete("unassigned"); else state.expandedRunGroups.add("unassigned");
-        renderRunGroups();
-      });
-    }
-    if (orphanExpanded) {
-      const orphanContainer = orphanWrap.querySelector(".task-list");
-      renderOrphanMissions(orphanContainer, orphans);
-      makeSortable(orphanContainer, { group: "missions" });
-    }
+    orphanWrap.querySelector(".mission-group-head").addEventListener("click", () => toggleExpanded(state.expandedRunGroups, "unassigned"));
+    if (orphanExpanded) renderMissionRows(orphanWrap.querySelector(".task-list"), orphans, null);
+    list.appendChild(orphanWrap);
   }
-
-  if (orphanWrap) list.appendChild(orphanWrap);
 }
 
-function renderOrphanMissions(container, orphans) {
+// One row per mission inside a Run (or the Unassigned bucket). Collapsed by
+// default in both view and edit mode, so the list stays short on a phone.
+function renderMissionRows(container, missions, group) {
   const editing = state.editingAllOrder;
   container.innerHTML = "";
-  orphans.forEach((m) => {
-    const expanded = editing ? true : state.expandedMissions.has(m.id);
+  missions.forEach((m, mi) => {
+    const expanded = state.expandedMissions.has(m.id);
+    const tasks = visibleTasks(m);
     const row = document.createElement("div");
     row.className = "mission-group";
     row.dataset.mid = m.id;
     row.innerHTML = `
-      <div class="mission-row mission-group-head${editing ? "" : " mission-expand-target"}" data-act="expand">
-        ${editing ? `<span class="drag-handle">&#9776;</span>` : ""}
+      <div class="mission-row mission-group-head mission-expand-target" data-act="expand">
         <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
         <div class="m-info">
           <div class="m-name">${esc(m.name)}</div>
-          <div class="m-sub">${visibleTasks(m).length} task${visibleTasks(m).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts</div>
+          <div class="m-sub">${tasks.length} task${tasks.length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts</div>
         </div>
-        ${editing ? `<button class="btn-icon btn-icon-add" data-act="add-task" title="Add a task">&#43;</button><button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>` : ""}
+        ${editing ? `${orderArrowsHTML(mi === 0, mi === missions.length - 1)}<button class="btn-icon" data-act="edit" title="Edit / move to another Run">&#9998;&#65039;</button><button class="btn-icon" data-act="del" title="Remove from this Run">&#128465;&#65039;</button>` : ""}
       </div>
       <div class="task-list" ${expanded ? "" : "hidden"}></div>
     `;
-    if (!editing) {
-      row.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
-        if (expanded) state.expandedMissions.delete(m.id); else state.expandedMissions.add(m.id);
-        renderRunGroups();
-      });
-    } else {
-      row.querySelector('[data-act="add-task"]').addEventListener("click", () => openTaskModal(m, null));
-      row.querySelector('[data-act="edit"]').addEventListener("click", () => openMissionNameModal(m, null));
-      row.querySelector('[data-act="del"]').addEventListener("click", async () => {
-        if (!confirm(`Delete mission "${m.name}" and all its tasks?`)) return;
+    const head = row.querySelector(".mission-group-head");
+    head.addEventListener("click", (e) => {
+      if (e.target.closest("button")) return;
+      toggleExpanded(state.expandedMissions, m.id);
+    });
+    if (editing) {
+      wireOrderArrows(head, (dir) => moveMission(m, dir));
+      head.querySelector('[data-act="edit"]').addEventListener("click", () => openMissionNameModal(m, group));
+      head.querySelector('[data-act="del"]').addEventListener("click", async () => {
+        if (!confirm(`Remove mission "${m.name}" and all its tasks from this Run?`)) return;
         await persistPendingRunsOrder();
         m.deleted = true;
         m.deletedAt = Date.now();
@@ -2166,12 +2261,32 @@ function renderOrphanMissions(container, orphans) {
         await loadMissions();
         renderRunGroups();
         syncToTeamDrive();
-        showUndoToast(`Deleted mission "${m.name}".`, async () => {
+        showUndoToast(`Removed mission "${m.name}".`, async () => {
           await restoreDeletedMission(m.id);
         });
       });
     }
-    if (expanded) renderTaskList(row.querySelector(".task-list"), m);
+    if (expanded) {
+      const taskListEl = row.querySelector(".task-list");
+      renderTaskList(taskListEl, m);
+      if (editing) {
+        const bm = SEASON_MISSIONS.find((x) => x.id === m.bankMissionId);
+        const used = usedBankTaskIds();
+        const canAdd = bm ? visibleTasks(bm).some((t) => !used.has(t.id)) : true;
+        if (canAdd) {
+          const addBtn = document.createElement("button");
+          addBtn.type = "button";
+          addBtn.className = "btn btn-ghost btn-sm btn-add-inline";
+          addBtn.innerHTML = "&#43; Add task";
+          addBtn.addEventListener("click", async () => {
+            await persistPendingRunsOrder();
+            if (bm) openPickMissionTasksModal(bm, group, m);
+            else openTaskModal(m, null);
+          });
+          taskListEl.appendChild(addBtn);
+        }
+      }
+    }
     container.appendChild(row);
   });
 }
@@ -2202,69 +2317,23 @@ function openRunGroupModal(g) {
   });
 }
 
-// ---- Missions nested within a run ----
-function renderMissionsForGroup(container, group) {
-  const editing = state.editingAllOrder;
-  container.innerHTML = "";
-  const groupMissions = state.missions.filter((m) => m.runGroupId === group.id).sort((a, b) => a.order - b.order);
-
-  groupMissions.forEach((m) => {
-    const expanded = editing ? true : state.expandedMissions.has(m.id);
-    const row = document.createElement("div");
-    row.className = "mission-group";
-    row.dataset.mid = m.id;
-    row.innerHTML = `
-      <div class="mission-row mission-group-head${editing ? "" : " mission-expand-target"}" data-act="expand">
-        ${editing ? `<span class="drag-handle">&#9776;</span>` : ""}
-        <span class="mission-expand-chevron">${expanded ? "&#9660;" : "&#9654;"}</span>
-        <div class="m-info">
-          <div class="m-name">${esc(m.name)}</div>
-          <div class="m-sub">${visibleTasks(m).length} task${visibleTasks(m).length === 1 ? "" : "s"} · max ${missionMaxPoints(m)} pts</div>
-        </div>
-        ${editing ? `<button class="btn-icon btn-icon-add" data-act="add-task" title="Add a task">&#43;</button><button class="btn-icon" data-act="edit">&#9998;&#65039;</button><button class="btn-icon" data-act="del">&#128465;&#65039;</button>` : ""}
-      </div>
-      <div class="task-list" ${expanded ? "" : "hidden"}></div>
-    `;
-    if (!editing) {
-      row.querySelector('[data-act="expand"]').addEventListener("click", (e) => {
-        if (expanded) state.expandedMissions.delete(m.id); else state.expandedMissions.add(m.id);
-        renderRunGroups();
-      });
-    } else {
-      const addBtn = row.querySelector('[data-act="add-task"]');
-      if (addBtn) addBtn.addEventListener("click", () => openTaskModal(m, null));
-      const editBtn = row.querySelector('[data-act="edit"]');
-      if (editBtn) editBtn.addEventListener("click", () => openMissionNameModal(m, group));
-      const delBtn = row.querySelector('[data-act="del"]');
-      if (delBtn) delBtn.addEventListener("click", async () => {
-        if (!confirm(`Delete mission "${m.name}" and all its tasks?`)) return;
-        await persistPendingRunsOrder();
-        m.deleted = true;
-        m.deletedAt = Date.now();
-        await dbPut("missions", m);
-        await loadMissions();
-        renderRunGroups();
-        syncToTeamDrive();
-        showUndoToast(`Deleted mission "${m.name}".`, async () => {
-          await restoreDeletedMission(m.id);
-        });
-      });
-    }
-    if (expanded) {
-      const taskListEl = row.querySelector(".task-list");
-      renderTaskList(taskListEl, m);
-    }
-    container.appendChild(row);
-  });
-}
-
 function openMissionNameModal(m, group) {
   const isEdit = !!m;
-  const currentGroupId = isEdit ? m.runGroupId : group?.id;
+  // Missions pulled from the season list get their name/number/points from
+  // SEASON_MISSIONS on every load (syncMissionFromBank), so editing those
+  // here would just get overwritten — only the Run it belongs to is editable.
+  const fromBank = isEdit && SEASON_MISSIONS.some((x) => x.id === m.bankMissionId);
+  const liveGroupIds = new Set(state.runGroups.map((g) => g.id));
+  const currentGroupId = isEdit ? (liveGroupIds.has(m.runGroupId) ? m.runGroupId : "") : (group?.id || "");
+  const runOptions = state.runGroups.slice().sort((a, b) => a.order - b.order)
+    .map((g) => `<option value="${g.id}" ${g.id === currentGroupId ? "selected" : ""}>${esc(runGroupDisplayName(g))}</option>`).join("")
+    + `<option value="" ${!currentGroupId ? "selected" : ""}>Unassigned</option>`;
   openModal(`
-    <h2>${isEdit ? "Edit mission" : "New mission"}</h2>
+    <h2>${fromBank ? esc(m.name) : (isEdit ? "Edit mission" : "New mission")}</h2>
+    ${fromBank ? `<p class="empty-sub">Name and points come from the season's official mission list.</p>` : `
     <div class="field"><label>Official mission number</label><input class="text-input" id="m-mission-number" type="number" value="${isEdit && m.number != null ? m.number : ""}" placeholder="e.g. 7"></div>
-    <div class="field"><label>Mission name</label><input class="text-input" id="m-mission-name" value="${isEdit ? esc(m.name) : ""}" placeholder="e.g. Coral nursery"></div>
+    <div class="field"><label>Mission name</label><input class="text-input" id="m-mission-name" value="${isEdit ? esc(m.name) : ""}" placeholder="e.g. Coral nursery"></div>`}
+    <div class="field"><label>Which Run is this mission in?</label><select class="text-input" id="m-mission-run">${runOptions}</select></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="m-cancel" type="button">Cancel</button>
       <button class="btn btn-primary" id="m-save" type="button">Save</button>
@@ -2272,19 +2341,27 @@ function openMissionNameModal(m, group) {
   `);
   document.getElementById("m-cancel").addEventListener("click", closeModal);
   document.getElementById("m-save").addEventListener("click", async () => {
-    const name = document.getElementById("m-mission-name").value.trim();
-    if (!name) { alert("Name this mission."); return; }
-    const numberVal = document.getElementById("m-mission-number").value.trim();
-    const newGroupId = currentGroupId;
+    let name = null, numberVal = null;
+    if (!fromBank) {
+      name = document.getElementById("m-mission-name").value.trim();
+      if (!name) { alert("Name this mission."); return; }
+      numberVal = document.getElementById("m-mission-number").value.trim();
+    }
+    const newGroupId = document.getElementById("m-mission-run").value || null;
     await persistPendingRunsOrder();
     const record = isEdit ? m : { id: crypto.randomUUID(), order: 9999, tasks: [], taskSeq: 0 };
-    record.name = name;
-    record.number = numberVal === "" ? null : Number(numberVal);
-    record.runGroupId = newGroupId;
+    if (!fromBank) {
+      record.name = name;
+      record.number = numberVal === "" ? null : Number(numberVal);
+    }
+    if ((record.runGroupId || null) !== newGroupId) {
+      record.runGroupId = newGroupId;
+      record.order = 9999; // lands at the end of its new Run
+    }
     const id = await dbPut("missions", record);
     closeModal();
-    if (!isEdit) { state.expandedMissions.add(id); }
-    state.expandedRunGroups.add(newGroupId);
+    if (!isEdit) state.expandedMissions.add(id);
+    state.expandedRunGroups.add(newGroupId || "unassigned");
     await recomputeGlobalMissionOrder();
     await loadMissions();
     renderRunGroups();
@@ -2301,46 +2378,41 @@ function optionRowHtml(label = "", points = 0) {
 }
 
 function renderTaskList(container, mission, opts = {}) {
-  const storeName = opts.storeName || "missions";
-  const onChange = opts.onChange || (async () => { await loadMissions(); renderRunGroups(); });
   const editing = opts.readOnly ? false : state.editingAllOrder;
   container.innerHTML = "";
-  visibleTasks(mission).forEach((t) => {
+  const tasks = visibleTasks(mission);
+  tasks.forEach((t, ti) => {
     const row = document.createElement("div");
     row.dataset.tid = t.id;
-    if (editing) {
-      row.className = "task-row";
-      row.innerHTML = `
-        <span class="drag-handle">&#9776;</span>
-        <div class="m-info"><div class="m-name">${esc(t.name)}</div></div>
-        <button class="btn-icon" data-act="edit">&#9998;&#65039;</button>
-        <button class="btn-icon" data-act="del">&#128465;&#65039;</button>
-      `;
-      row.querySelector('[data-act="edit"]').addEventListener("click", () => openTaskModal(mission, t, opts));
-      row.querySelector('[data-act="del"]').addEventListener("click", async () => {
-        if (!confirm(`Delete task "${t.name}"?`)) return;
-        t.deleted = true;
-        t.deletedAt = Date.now();
-        await dbPut(storeName, mission);
-        await onChange();
-        syncToTeamDrive();
-        showUndoToast(`Deleted task "${t.name}".`, async () => {
-          await restoreDeletedTask(mission.id, t.id, storeName);
-        });
-      });
-      container.appendChild(row);
-      return;
-    }
     row.className = "task-row";
+    // Tasks copied from the season list get their name/points re-synced from
+    // it on every load, so they're reorder/remove only — no edit button.
     row.innerHTML = `
       <div class="m-info">
         <div class="m-name">${esc(t.name)}</div>
         <div class="m-sub">${taskSubLabel(t)}</div>
       </div>
+      ${editing ? `${orderArrowsHTML(ti === 0, ti === tasks.length - 1)}${t.bankTaskId ? "" : `<button class="btn-icon" data-act="edit" title="Edit">&#9998;&#65039;</button>`}<button class="btn-icon" data-act="del" title="Remove">&#128465;&#65039;</button>` : ""}
     `;
+    if (editing) {
+      wireOrderArrows(row, (dir) => moveTask(mission, t, dir));
+      row.querySelector('[data-act="edit"]')?.addEventListener("click", () => openTaskModal(mission, t));
+      row.querySelector('[data-act="del"]').addEventListener("click", async () => {
+        if (!confirm(`Remove task "${t.name}"?`)) return;
+        await persistPendingRunsOrder();
+        t.deleted = true;
+        t.deletedAt = Date.now();
+        await dbPut("missions", mission);
+        await loadMissions();
+        renderRunGroups();
+        syncToTeamDrive();
+        showUndoToast(`Removed task "${t.name}".`, async () => {
+          await restoreDeletedTask(mission.id, t.id);
+        });
+      });
+    }
     container.appendChild(row);
   });
-  if (editing && visibleTasks(mission).length) makeSortable(container);
 }
 
 function openTaskModal(mission, t, opts = {}) {
@@ -2606,10 +2678,14 @@ function precisionTokenWidgetHTML() {
   const snailDown = !!run?.mission10SnailDown;
   return `
     <div class="side-widget" id="grn-side-widget">
-      <button type="button" class="side-widget-btn side-widget-coin" id="grn-token-btn" title="Precision Tokens">
-        <span class="side-widget-icon">&#129689;</span>
-        <span class="side-widget-count" id="grn-token-count">${remaining}</span>
-      </button>
+      <div class="side-widget-tokens" title="Precision Tokens left">
+        <button type="button" class="side-widget-step" id="grn-token-plus" title="Give a token back" ${remaining >= PRECISION_TOKENS_START ? "disabled" : ""}>&#43;</button>
+        <div class="side-widget-coin">
+          <span class="side-widget-icon">&#129689;</span>
+          <span class="side-widget-count" id="grn-token-count">${remaining}</span>
+        </div>
+        <button type="button" class="side-widget-step" id="grn-token-minus" title="Use a token" ${remaining <= 0 ? "disabled" : ""}>&minus;</button>
+      </div>
       <button type="button" class="side-widget-btn side-widget-critter${spiderDown ? " is-down" : ""}" id="grn-m10-spider" title="Mission 10: spider knocked down">
         <span class="side-widget-icon">&#128375;&#65039;</span>
       </button>
@@ -2620,11 +2696,15 @@ function precisionTokenWidgetHTML() {
   `;
 }
 function wirePrecisionTokenButton() {
-  const tokenBtn = document.getElementById("grn-token-btn");
-  if (tokenBtn) tokenBtn.addEventListener("click", usePrecisionToken);
+  document.getElementById("grn-token-minus")?.addEventListener("click", () => adjustPrecisionTokens(-1));
+  document.getElementById("grn-token-plus")?.addEventListener("click", () => adjustPrecisionTokens(1));
   document.querySelectorAll(".side-widget-critter").forEach((btn) => {
     btn.addEventListener("click", () => toggleMission10Object(btn.id === "grn-m10-spider" ? "Spider" : "Snail"));
   });
+}
+function refreshLiveScore() {
+  const pointsEl = document.getElementById("grn-points");
+  if (pointsEl) pointsEl.textContent = `${liveScoreHTML()} pts`;
 }
 async function toggleMission10Object(which) {
   const run = state.guidedRun?.run;
@@ -2634,22 +2714,26 @@ async function toggleMission10Object(which) {
   await dbPut("runs", run);
   const btn = document.getElementById(`grn-m10-${which.toLowerCase()}`);
   if (btn) btn.classList.toggle("is-down", !!run[key]);
-  const pointsEl = document.getElementById("grn-points");
-  if (pointsEl) pointsEl.textContent = `${liveScoreHTML()} pts`;
+  refreshLiveScore();
 }
-async function usePrecisionToken() {
+// Tokens can go back up as well as down (e.g. a mis-tap, or a referee
+// call that gets reversed) but always stay between 0 and the starting 6.
+async function adjustPrecisionTokens(delta) {
   const run = state.guidedRun?.run;
-  if (!run || (run.precisionTokensRemaining || 0) <= 0) return;
-  run.precisionTokensRemaining -= 1;
-  await dbPut("runs", run);
+  if (!run) return;
+  const current = run.precisionTokensRemaining ?? 0;
+  const next = Math.max(0, Math.min(PRECISION_TOKENS_START, current + delta));
+  if (next === current) return;
+  run.precisionTokensRemaining = next;
+  // Update the screen first so taps feel instant, then save.
   const el = document.getElementById("grn-token-count");
-  if (el) el.textContent = run.precisionTokensRemaining;
-  const pointsEl = document.getElementById("grn-points");
-  if (pointsEl) pointsEl.textContent = `${liveScoreHTML()} pts`;
-  const overviewLabel = document.querySelector(".gfs-timer-label");
-  if (overviewLabel && overviewLabel.textContent.includes("tokens left")) {
-    overviewLabel.textContent = `${fmtDuration(run.totalTimeMs)} total time · ${run.precisionTokensRemaining} tokens left · inspection ${run.equipmentInspectionPassed ? `passed (+${EQUIPMENT_INSPECTION_BONUS})` : "not passed"} · review below or save now`;
-  }
+  if (el) el.textContent = next;
+  const minus = document.getElementById("grn-token-minus");
+  const plus = document.getElementById("grn-token-plus");
+  if (minus) minus.disabled = next <= 0;
+  if (plus) plus.disabled = next >= PRECISION_TOKENS_START;
+  refreshLiveScore();
+  await dbPut("runs", run);
 }
 
 // ---- Helpers for navigating Run groups (legs) and their missions ----
@@ -2935,21 +3019,55 @@ function cancelGuidedRunLink() {
   return `<button type="button" class="gfs-cancel-x" id="grn-cancel" title="Cancel this game run">&#10005;</button>`;
 }
 function gfsHeaderTopHTML(badgeText, showBack, backEnabled) {
+  // "End" only makes sense while the clock is still running.
+  const showEnd = state.guidedRun && !state.guidedRun.run.finishedAt;
   return `<div class="gfs-header-top">
     ${cancelGuidedRunLink()}
     ${showBack ? `<button type="button" class="gfs-back-btn" id="grn-back" ${backEnabled ? "" : "disabled"}>&#8592;</button>` : ""}
     <div class="guided-phase-badge">${badgeText}</div>
+    ${showEnd ? `<button type="button" class="gfs-end-btn" id="grn-end" title="End this game run now">&#127937; End</button>` : ""}
   </div>`;
 }
+// Wires the header's ✕ (discard) and End buttons — every guided-run screen calls this.
 function wireCancelLink() {
   document.getElementById("grn-cancel").addEventListener("click", async () => {
-    if (!confirm("Cancel and discard this practice game run?")) return;
+    const gr = state.guidedRun;
+    if (!gr) { closeGuidedFullscreen(); return; }
+    if (!confirm("Cancel and discard this practice game run? Nothing from it will be saved.")) return;
     stopGuidedTimer();
-    await dbDelete("runs", state.guidedRun.run.id);
+    await dbDelete("runs", gr.run.id);
     state.guidedRun = null;
     closeGuidedFullscreen();
     await loadRuns();
   });
+  document.getElementById("grn-end")?.addEventListener("click", endGuidedRunEarly);
+}
+// Stops the clock right now and jumps to the Final Overview, where scores
+// can still be fixed before Save & Finish. Asks first, since it can't be
+// undone (the clock doesn't restart).
+async function endGuidedRunEarly() {
+  const gr = state.guidedRun;
+  if (!gr || gr.run.finishedAt) return;
+  // Out of time and waiting on the buzzer — that flow already ends the run.
+  if (gr.timeExpired && !state.keepGoingAfterBuzzer) return;
+  if (!confirm("End this game run now? The clock stops and you'll go to the final overview to review and save.")) return;
+  if (state.guidedRun !== gr || gr.run.finishedAt) return;
+  stopGuidedTimer();
+  const now = Date.now();
+  const { run } = gr;
+  // If we were partway through a mission, keep how long it had taken so far.
+  if (gr.screen === "task") {
+    const leg = state.runGroups[gr.legIdx];
+    const mission = leg ? getLegMissions(leg)[gr.missionIdxInLeg] : null;
+    if (mission && !run.missionTimings.some((t) => t.missionId === mission.id)) {
+      run.missionTimings.push({ missionId: mission.id, missionName: mission.name, runGroupId: leg.id, runGroupName: leg.name, startTs: gr.missionStartTs, endTs: now, durationMs: now - gr.missionStartTs, endedEarly: true });
+    }
+  }
+  run.endedEarly = true;
+  run.finishedAt = now;
+  run.totalTimeMs = now - gr.matchStartTs;
+  await dbPut("runs", run);
+  renderGuidedOverview();
 }
 
 // A task counts as "complete" once it has any score entered — not
@@ -3009,6 +3127,7 @@ function renderCurrentTaskScreen() {
   }
   const task = tasks[taskIdx];
   const raw = run.rawScores;
+  state.guidedRun.screen = "task";
   let controlHTML;
   if (task.type === "bool") {
     controlHTML = `
@@ -3078,6 +3197,7 @@ function renderCurrentTaskScreen() {
   }
 }
 function advanceTask() {
+  dbPut("runs", state.guidedRun.run); // save every tap, so a reload/crash mid-run doesn't lose it
   state.guidedRun.taskIdx++;
   renderCurrentTaskScreen();
 }
@@ -3101,6 +3221,7 @@ async function finishCurrentMission(leg, legMissions) {
 
 function renderRobotReturnedScreen() {
   const { legIdx } = state.guidedRun;
+  state.guidedRun.screen = "returned";
   const leg = state.runGroups[legIdx];
   openGuidedFullscreen(`
     <div class="gfs-header">
@@ -3150,6 +3271,7 @@ function renderRobotReturnedScreen() {
 
 function renderGuidedTransitionPhase() {
   const { legIdx } = state.guidedRun;
+  state.guidedRun.screen = "transition";
   const nextLeg = state.runGroups[legIdx];
   openGuidedFullscreen(`
     <div class="gfs-header">
@@ -3173,6 +3295,7 @@ function renderGuidedTransitionPhase() {
     const now = Date.now();
     const durationMs = now - state.guidedRun.transitionStartTs;
     state.guidedRun.run.transitionTimings.push({ beforeRunGroupId: nextLeg.id, durationMs });
+    dbPut("runs", state.guidedRun.run);
     state.guidedRun.missionStartTs = now;
     renderCurrentTaskScreen();
   });
@@ -3180,6 +3303,7 @@ function renderGuidedTransitionPhase() {
 
 function renderGuidedOverview() {
   const { run } = state.guidedRun;
+  state.guidedRun.screen = "overview";
   const isLive = !run.finishedAt; // non-interactive mode reaches this screen while the clock is still running
   openGuidedFullscreen(`
     <div class="gfs-header">
@@ -3193,7 +3317,7 @@ function renderGuidedOverview() {
         <div class="gfs-timer-label">time left &middot; score &middot; fill in scores below as you go</div>
       ` : `
         <div class="gfs-timer" id="gfs-overview-total">${scoreDisplayHTML(run, state.missions)}</div>
-        <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs)} total time &middot; review below or save now</div>
+        <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs)} total time${run.endedEarly ? " (ended early)" : ""} &middot; review below or save now</div>
       `}
       <button class="btn btn-primary btn-full" id="grn-save-top" type="button" style="margin-top:12px;">&#10003; Save &amp; Finish</button>
     </div>
@@ -3249,6 +3373,7 @@ function renderOverviewBody() {
   }).join("");
   bindOverviewEvents();
   updateOverviewTotal();
+  dbPut("runs", run); // every overview tap re-renders through here — save it as it happens
 }
 
 function bindOverviewEvents() {

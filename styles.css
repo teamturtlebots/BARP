@@ -802,3 +802,47 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 
 /* --- Added: unassigned missions bucket (shown after deleting a run) --- */
 .unassigned-group .mission-group-head { border-color: var(--coral); border-style: dashed; }
+
+/* --- Combined attachments: still filterable in the Log, but grayed out --- */
+.chip.chip-combined { opacity: 0.6; border-style: dashed; }
+
+/* --- Up/down reorder arrows (Settings edit mode) — easier than dragging on a phone --- */
+.order-arrows { display: flex; gap: 2px; flex: none; }
+.order-arrow {
+  width: 36px; height: 36px; padding: 0; border-radius: 8px;
+  border: 1.5px solid var(--line); background: var(--paper);
+  font-size: 0.85rem; color: var(--ink-deep);
+  display: flex; align-items: center; justify-content: center;
+}
+.order-arrow:disabled { opacity: 0.25; cursor: default; }
+.order-arrow:not(:disabled):active { background: var(--paper-3); }
+.mission-group-head .m-info, .task-row .m-info { min-width: 0; flex: 1; }
+.btn-add-inline { align-self: flex-start; margin: 4px 0 2px; }
+.edit-hint { margin: 4px 0 10px; }
+
+/* --- Precision token +/- stepper in the side widget --- */
+.side-widget-tokens {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  background: var(--amber); border-radius: 11px; padding: 2px;
+}
+.side-widget-tokens .side-widget-coin {
+  width: 48px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  font-size: 1.2rem; line-height: 1; color: var(--ink-deep); background: none; padding: 2px 0;
+}
+.side-widget-step {
+  width: 44px; height: 34px; border: none; border-radius: 9px;
+  background: rgba(0,0,0,0.12); color: var(--ink-deep);
+  font-family: var(--mono); font-size: 1.25rem; font-weight: 700; line-height: 1; cursor: pointer;
+}
+.side-widget-step:active { transform: scale(0.92); }
+.side-widget-step:disabled { opacity: 0.3; cursor: default; transform: none; }
+.guided-fullscreen.gfs-frozen .gfs-end-btn { pointer-events: none; opacity: 0.5; }
+
+/* --- End game run button (guided-run header, right side) --- */
+.gfs-end-btn {
+  margin-left: auto; flex: none; height: 38px; padding: 0 12px; border-radius: 19px;
+  background: rgba(255,255,255,0.14); border: 1.5px solid rgba(255,255,255,0.35);
+  color: var(--paper); font-family: var(--body); font-weight: 700; font-size: 0.85rem; cursor: pointer;
+}
+.gfs-end-btn:active { transform: scale(0.95); }
+.gfs-header-top .guided-phase-badge { max-width: calc(100% - 190px); }
