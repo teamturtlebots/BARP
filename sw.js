@@ -1,5 +1,5 @@
 // Bump this when you change any cached file so phones pick up the update.
-const CACHE_NAME = "barp-v56";
+const CACHE_NAME = "barp-v57";
 const ASSETS = [
   "./",
   "./index.html",
@@ -49,8 +49,12 @@ self.addEventListener("fetch", (event) => {
     // reload (which was only ever "fixing" it for that one page load, since
     // the fetch handler kept intercepting every request afterward and
     // serving the same stale cached copy again).
+    // cache: "no-cache" makes the browser check with the server every time
+    // (a quick "has it changed?" request) instead of reusing its own HTTP
+    // cache — GitHub Pages lets browsers reuse files for 10 minutes, which
+    // otherwise keeps serving the old app for a while after every push.
     event.respondWith(
-      fetch(event.request).then((response) => {
+      fetch(event.request, { cache: "no-cache" }).then((response) => {
         const copy = response.clone();
         caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
         return response;

@@ -147,8 +147,7 @@ const state = {
   expandedRunGroups: new Set(),
   editingAttachmentOrder: false,
   editingAllOrder: false,
-  skipEquipmentInspectionAsk: true,
-  keepGoingAfterBuzzer: false,
+  countEquipmentInspection: true, // whether new game runs get the +20 Equipment Inspection bonus
   interactiveScoringEnabled: true,
   interactiveIterationsEnabled: false,
   guidedRun: null, // { run, legIdx, missionIdxInLeg, taskIdx, matchStartTs, ... }
@@ -423,16 +422,15 @@ function runTotal(run, missions) {
     + mission10Bonus(run);
 }
 // The score exactly as it stood the instant time ran out — captured once in
-// handleTimeExpired() and never touched again, even if "keep going after
-// buzzer" lets scoring continue past it. Returns null when there's nothing
-// to show separately: either time never ran out, or keep-going was off, in
-// which case the final score already *is* the timed score.
+// handleTimeExpired() and never touched again, even though scoring keeps
+// going past the buzzer until End is tapped. Returns null when time never
+// ran out (the run was ended early), so the final score *is* the timed one.
 function runTimedTotal(run, missions) {
   if (!run.timedSnapshot) return null;
   return runTotal(run.timedSnapshot, missions);
 }
-// Renders "<timed> timed · <final> final" when the two diverge (only
-// possible with keep-going-after-buzzer), otherwise just the plain total —
+// Renders "<timed> timed · <final> final" when time ran out mid-run,
+// otherwise just the plain total —
 // used everywhere a run's score is shown as a single big number.
 function scoreDisplayHTML(run, missions) {
   const timed = runTimedTotal(run, missions);
@@ -1802,9 +1800,14 @@ const SEASON_MISSIONS = [
     { id: "sm-15-t0", name: "Nesting canopy raised", type: "bool", points: 10 },
     { id: "sm-15-t1", name: "Garden skylight completely in", type: "bool", points: 10 },
     { id: "sm-15-t2", name: "Compost hatch completely opened, touching the mat", type: "bool", points: 10 },
-    { id: "sm-15-t3", name: "Environmental bonus (matches the dock's ecological need)", type: "bool", points: 10 },
+    { id: "sm-15-t3", name: "Environmental bonus (compost hatch)", type: "bool", points: 10 },
   ] },
 ];
+// Previous names of season tasks that have since been renamed (by bank task
+// id) — only used so importing an older exported scoresheet still matches.
+const RENAMED_TASK_OLD_NAMES = {
+  "sm-15-t3": ["Environmental bonus (matches the dock's ecological need)"],
+};
 // A bank task is "used" once it's been copied onto some Run's mission list
 // (tracked via bankTaskId on the copy) — this is what makes "only use each
 // mission once" and "assign part of a mission" work: each task in the bank
@@ -2118,9 +2121,21 @@ function wireOrderArrows(rowHead, onMove) {
 }
 // Expand/collapse that works in both view and edit mode — in edit mode the
 // on-screen order is captured first so the re-render doesn't undo a drag.
+// Collapsing a Run (or Unassigned) also collapses every mission inside it,
+// so reopening it later shows a tidy list instead of whatever was left open.
 function toggleExpanded(set, key) {
   syncRunsOrderFromDOM();
-  if (set.has(key)) set.delete(key); else set.add(key);
+  if (set.has(key)) {
+    set.delete(key);
+    if (set === state.expandedRunGroups) {
+      const isUnassigned = key === "unassigned";
+      state.missions
+        .filter((m) => (isUnassigned ? !state.runGroups.some((g) => g.id === m.runGroupId) : m.runGroupId === key))
+        .forEach((m) => state.expandedMissions.delete(m.id));
+    }
+  } else {
+    set.add(key);
+  }
   renderRunGroups();
 }
 
@@ -2680,11 +2695,11 @@ function precisionTokenWidgetHTML() {
     <div class="side-widget" id="grn-side-widget">
       <div class="side-widget-tokens" title="Precision Tokens left">
         <button type="button" class="side-widget-step" id="grn-token-plus" title="Give a token back" ${remaining >= PRECISION_TOKENS_START ? "disabled" : ""}>&#43;</button>
-        <div class="side-widget-coin">
+        <button type="button" class="side-widget-use" id="grn-token-minus" title="Use a precision token" ${remaining <= 0 ? "disabled" : ""}>
+          <span class="side-widget-use-sign">&minus;</span>
           <span class="side-widget-icon">&#129689;</span>
           <span class="side-widget-count" id="grn-token-count">${remaining}</span>
-        </div>
-        <button type="button" class="side-widget-step" id="grn-token-minus" title="Use a token" ${remaining <= 0 ? "disabled" : ""}>&minus;</button>
+        </button>
       </div>
       <button type="button" class="side-widget-btn side-widget-critter${spiderDown ? " is-down" : ""}" id="grn-m10-spider" title="Mission 10: spider knocked down">
         <span class="side-widget-icon">&#128375;&#65039;</span>
@@ -2760,9 +2775,7 @@ function nextGameRunLabel() {
   return `Game Run ${todayCount + 1}`;
 }
 
-// ---- Start flow: equipment inspection (optional), then countdown, then horn ----
-let pendingEquipmentInspection = false;
-
+// ---- Start flow: countdown, then horn ----
 async function startGuidedRun() {
   const legsWithMissions = state.runGroups.filter((g) => getLegMissions(g).some((m) => visibleTasks(m).length));
   if (!legsWithMissions.length) {
@@ -2771,40 +2784,7 @@ async function startGuidedRun() {
     document.getElementById("m-close").addEventListener("click", closeModal);
     return;
   }
-  pendingEquipmentInspection = false;
-  if (state.skipEquipmentInspectionAsk) {
-    pendingEquipmentInspection = true; // not asking means it always counts as passed
-    renderPreRunScreen();
-  } else {
-    renderEquipmentInspectionScreen();
-  }
-}
-
-function renderEquipmentInspectionScreen() {
-  openGuidedFullscreen(`
-    <div class="gfs-header">
-      <div class="guided-phase-badge">Equipment Inspection</div>
-      <h2 class="gfs-mission-name">Does everything fit within the inspection area?</h2>
-    </div>
-    <div class="gfs-body gfs-center">
-      <button type="button" class="btn btn-primary btn-full gfs-big-action gfs-huge-action" id="grn-inspection-yes">Yes</button>
-      <button type="button" class="btn btn-ghost btn-full gfs-big-action" id="grn-inspection-no" style="margin-top:12px;">No</button>
-    </div>
-    <div class="gfs-footer">
-      <button type="button" class="btn-link-cancel" id="grn-cancel-pre">Cancel</button>
-    </div>
-  `);
-  document.getElementById("grn-cancel-pre").addEventListener("click", closeGuidedFullscreen);
-  document.getElementById("grn-inspection-yes").addEventListener("click", () => {
-    pendingEquipmentInspection = true;
-    unlockAllSounds(); // must happen synchronously, right here, to count as a user gesture
-    runCountdown();
-  });
-  document.getElementById("grn-inspection-no").addEventListener("click", () => {
-    pendingEquipmentInspection = false;
-    unlockAllSounds();
-    runCountdown();
-  });
+  renderPreRunScreen();
 }
 
 function renderPreRunScreen() {
@@ -2851,7 +2831,7 @@ async function actuallyStartRun() {
     startedAt: now,
     inProgress: true,
     precisionTokensRemaining: PRECISION_TOKENS_START,
-    equipmentInspectionPassed: pendingEquipmentInspection,
+    equipmentInspectionPassed: state.countEquipmentInspection,
     mission10SpiderDown: false,
     mission10SnailDown: false,
     rawScores: {},
@@ -2908,8 +2888,7 @@ function currentTimerDisplay() {
   const elapsed = Date.now() - state.guidedRun.matchStartTs;
   const remaining = MATCH_LENGTH_MS - elapsed;
   if (remaining >= 0) return fmtDuration(remaining);
-  if (state.keepGoingAfterBuzzer) return `+${fmtDuration(-remaining)}`;
-  return fmtDuration(0);
+  return `+${fmtDuration(-remaining)}`; // overtime — scoring continues until End is tapped
 }
 function tickGuidedTimer() {
   if (!state.guidedRun) return;
@@ -2942,44 +2921,22 @@ function handleTimeExpired() {
     gr.run.timeExpiredMissionElapsedMs = Date.now() - gr.missionStartTs;
   }
 
-  if (state.keepGoingAfterBuzzer) {
-    // Freeze the score exactly as it stood when time ran out as the
-    // "Timed" score — scoring can keep going after this (it becomes the
-    // "Final"/untimed score), but the timed one never changes again.
-    gr.run.timedSnapshot = {
-      rawScores: JSON.parse(JSON.stringify(gr.run.rawScores || {})),
-      precisionTokensRemaining: gr.run.precisionTokensRemaining,
-      equipmentInspectionPassed: gr.run.equipmentInspectionPassed,
-      mission10SpiderDown: gr.run.mission10SpiderDown,
-      mission10SnailDown: gr.run.mission10SnailDown,
-    };
-    dbPut("runs", gr.run);
-    // Let the user keep scoring — the timer keeps running (now counting up
-    // past zero as overtime) instead of freezing the screen and forcing the
-    // final overview the moment the clock hits zero.
-    playSound("buzzer");
-    const el = document.getElementById("grn-timer");
-    if (el) el.textContent = currentTimerDisplay();
-    return;
-  }
-
+  // Freeze the score exactly as it stood when time ran out as the "Timed"
+  // score. Scoring keeps going after this (that becomes the "Final" score)
+  // until the user taps End, but the timed one never changes again.
+  gr.run.timedSnapshot = {
+    rawScores: JSON.parse(JSON.stringify(gr.run.rawScores || {})),
+    precisionTokensRemaining: gr.run.precisionTokensRemaining,
+    equipmentInspectionPassed: gr.run.equipmentInspectionPassed,
+    mission10SpiderDown: gr.run.mission10SpiderDown,
+    mission10SnailDown: gr.run.mission10SnailDown,
+  };
   dbPut("runs", gr.run);
+  playSound("buzzer");
   const el = document.getElementById("grn-timer");
-  if (el) el.textContent = fmtDuration(0);
-  // Freeze the screen — no score changes, no precision token spending —
-  // until the buzzer sound actually finishes, then move on to the overview.
-  const fullscreenEl = document.getElementById("guided-fullscreen");
-  if (fullscreenEl) fullscreenEl.classList.add("gfs-frozen");
-  playSoundAndWait("buzzer", 2000).then(async () => {
-    if (state.guidedRun !== gr) return; // run was cancelled/replaced meanwhile
-    stopGuidedTimer();
-    const { run } = gr;
-    const now = Date.now();
-    run.finishedAt = now;
-    run.totalTimeMs = now - gr.matchStartTs;
-    await dbPut("runs", run);
-    renderGuidedOverview();
-  });
+  if (el) el.textContent = currentTimerDisplay();
+  refreshLiveScore(); // switch the points line to "timed / final" right away
+  updateOverviewTotal(); // same for the plain-scoring overview, if that's what's showing
 }
 function stopGuidedTimer() {
   if (state.guidedRun?.timerHandle) clearInterval(state.guidedRun.timerHandle);
@@ -3048,8 +3005,6 @@ function wireCancelLink() {
 async function endGuidedRunEarly() {
   const gr = state.guidedRun;
   if (!gr || gr.run.finishedAt) return;
-  // Out of time and waiting on the buzzer — that flow already ends the run.
-  if (gr.timeExpired && !state.keepGoingAfterBuzzer) return;
   if (!confirm("End this game run now? The clock stops and you'll go to the final overview to review and save.")) return;
   if (state.guidedRun !== gr || gr.run.finishedAt) return;
   stopGuidedTimer();
@@ -3780,8 +3735,8 @@ function renderBreakdownTimingTab() {
   const transitions = run.transitionTimings || [];
   // "Time ran out" marker: drawn right before whichever mission was in
   // progress the instant the buzzer sounded (see handleTimeExpired). If
-  // that mission was never actually finished (keep-going-after-buzzer was
-  // off), it has no row of its own here at all, so the marker just lands at
+  // that mission was never actually finished (e.g. the run was ended right
+  // after the buzzer), it has no row of its own here at all, so the marker just lands at
   // the very end of what *was* completed instead — still "before" it, since
   // there's nothing to be before.
   let timeMarkerInserted = !run.timeExpiredAt;
@@ -4348,7 +4303,13 @@ async function importScoresheetXLSX(file) {
   const taskLookup = new Map();
   state.missions.forEach((m) => {
     visibleTasks(m).forEach((t) => {
-      taskLookup.set(`${(m.name || "").trim().toLowerCase()}|||${(t.name || "").trim().toLowerCase()}`, t);
+      const mKey = (m.name || "").trim().toLowerCase();
+      taskLookup.set(`${mKey}|||${(t.name || "").trim().toLowerCase()}`, t);
+      // Older names for renamed tasks, so scoresheets exported before the
+      // rename still import into the right row.
+      for (const oldName of RENAMED_TASK_OLD_NAMES[t.bankTaskId] || []) {
+        taskLookup.set(`${mKey}|||${oldName.toLowerCase()}`, t);
+      }
     });
   });
   const unitPattern = /^(.*) \(unit (\d+) of \d+\)$/;
@@ -5070,25 +5031,79 @@ async function writeScoreDataSheet(spreadsheetId) {
   for (let i = 0; i < sortedRuns.length; i += RUNS_PER_SHEET) chunks.push(sortedRuns.slice(i, i + RUNS_PER_SHEET));
   if (!chunks.length) chunks.push([]); // still produce one (blank) tab if there are zero runs
 
-  const meta = await sheetsFetch(spreadsheetId);
-  const existingSheetIds = new Set(meta.sheets.map((s) => s.properties.sheetId));
-  const sheetIds = await loadScoreDataSheetIds(meta.sheets);
-
-  for (let i = 0; i < chunks.length; i++) {
-    const title = scoreDataTitleForChunk(chunks[i]);
-    let sheetId = sheetIds[i];
-    if (sheetId != null && existingSheetIds.has(sheetId)) {
-      await sheetsBatchUpdate(spreadsheetId, [{ updateSheetProperties: { properties: { sheetId, title }, fields: "title" } }]);
-    } else {
-      const resp = await sheetsBatchUpdate(spreadsheetId, [{ addSheet: { properties: { title } } }]);
-      sheetId = resp.replies[0].addSheet.properties.sheetId;
-      sheetIds[i] = sheetId;
-    }
-    await writeOneScoreDataSheet(spreadsheetId, sheetId, title, rowDefs, chunks[i]);
+  // Tab names must be unique in a spreadsheet — two chunks covering the same
+  // day(s) (e.g. 20+ runs in one day) would otherwise get identical names.
+  const titles = [];
+  for (const chunk of chunks) {
+    const base = scoreDataTitleForChunk(chunk);
+    let t = base, n = 2;
+    while (titles.includes(t)) t = `${base} (${n++})`;
+    titles.push(t);
   }
-  sheetIds.length = chunks.length; // drop any leftover mapping past the current chunk count
+
+  const meta = await sheetsFetch(spreadsheetId);
+  const titleById = new Map(meta.sheets.map((s) => [s.properties.sheetId, s.properties.title]));
+  const idByTitle = new Map(meta.sheets.map((s) => [s.properties.title, s.properties.sheetId]));
+  const stored = await loadScoreDataSheetIds(meta.sheets);
+
+  // Pick which existing tab each chunk writes into: the one remembered from
+  // the last export first, then any tab that already has the exact name
+  // (e.g. left behind by an export that failed before it could save its
+  // tab list — which used to make every later export fail with "a sheet
+  // with that name already exists").
+  const claimed = new Set();
+  const sheetIds = titles.map((_, i) => {
+    const id = stored[i];
+    if (id != null && titleById.has(id) && !claimed.has(id)) { claimed.add(id); return id; }
+    return null;
+  });
+  titles.forEach((title, i) => {
+    if (sheetIds[i] != null) return;
+    const holder = idByTitle.get(title);
+    if (holder != null && !claimed.has(holder)) { claimed.add(holder); sheetIds[i] = holder; }
+  });
+
+  // Create tabs for any chunk still without one, under throwaway names —
+  // the rename pass below gives them their real names.
+  const toCreate = sheetIds.map((id, i) => (id == null ? i : null)).filter((i) => i != null);
+  if (toCreate.length) {
+    const stamp = Date.now();
+    const resp = await sheetsBatchUpdate(spreadsheetId, toCreate.map((i) => ({ addSheet: { properties: { title: `barp-new-${stamp}-${i}` } } })));
+    toCreate.forEach((chunkIdx, k) => {
+      const props = resp.replies[k].addSheet.properties;
+      sheetIds[chunkIdx] = props.sheetId;
+      titleById.set(props.sheetId, props.title);
+    });
+  }
+
+  // Rename everything in one batch (Google applies the steps in order):
+  // move any unrelated tab that's sitting on a name we need out of the way,
+  // park our tabs on temporary names, then give them their final names.
+  // Doing it this way means no step can ever collide with a name in use.
+  const usedTitles = new Set(titleById.values());
+  const renames = [];
+  titles.forEach((title, i) => {
+    const holder = idByTitle.get(title);
+    if (holder != null && !sheetIds.includes(holder)) {
+      let alt = `${title} (old)`, n = 2;
+      while (usedTitles.has(alt)) alt = `${title} (old ${n++})`;
+      usedTitles.add(alt);
+      renames.push({ updateSheetProperties: { properties: { sheetId: holder, title: alt }, fields: "title" } });
+    }
+  });
+  const needsRename = sheetIds.map((id, i) => (titleById.get(id) !== titles[i] ? i : null)).filter((i) => i != null);
+  needsRename.forEach((i) => renames.push({ updateSheetProperties: { properties: { sheetId: sheetIds[i], title: `barp-tmp-${sheetIds[i]}` }, fields: "title" } }));
+  needsRename.forEach((i) => renames.push({ updateSheetProperties: { properties: { sheetId: sheetIds[i], title: titles[i] }, fields: "title" } }));
+  if (renames.length) await sheetsBatchUpdate(spreadsheetId, renames);
+
+  // Remember the tab list now, before writing contents, so if anything
+  // below fails the next export reuses these tabs instead of tripping on them.
   await dbPut("meta", { key: "scoreDataSheetIds", value: sheetIds });
   await writeTeamSheetsConfig({ scoreDataSheetIds: sheetIds });
+
+  for (let i = 0; i < chunks.length; i++) {
+    await writeOneScoreDataSheet(spreadsheetId, sheetIds[i], titles[i], rowDefs, chunks[i]);
+  }
 }
 
 // ---- Sheet 3: Analysis ----
@@ -5625,25 +5640,27 @@ async function purgeOldTrash() {
     }
   }
 }
-const equipmentInspectionInput = document.getElementById("input-skip-equipment-inspection");
+// Whether new game runs get the Equipment Inspection bonus. Asks before
+// changing, since it changes how every new run is scored. Runs already
+// saved keep whatever they had (and can still be fixed one at a time in
+// their overview / breakdown).
+const equipmentInspectionInput = document.getElementById("input-count-equipment-inspection");
 equipmentInspectionInput.addEventListener("change", async () => {
-  state.skipEquipmentInspectionAsk = equipmentInspectionInput.checked;
-  await dbPut("meta", { key: "skipEquipmentInspectionAsk", value: state.skipEquipmentInspectionAsk });
+  const turningOn = equipmentInspectionInput.checked;
+  const msg = turningOn
+    ? `Count the Equipment Inspection bonus (+${EQUIPMENT_INSPECTION_BONUS} pts) in new game runs?`
+    : `Stop counting the Equipment Inspection bonus (+${EQUIPMENT_INSPECTION_BONUS} pts) in new game runs?`;
+  if (!confirm(msg + " Game runs you've already saved won't change.")) {
+    equipmentInspectionInput.checked = !turningOn; // put the switch back
+    return;
+  }
+  state.countEquipmentInspection = turningOn;
+  await dbPut("meta", { key: "countEquipmentInspection", value: turningOn });
 });
 async function loadEquipmentInspectionSetting() {
-  const rec = await dbGet("meta", "skipEquipmentInspectionAsk");
-  state.skipEquipmentInspectionAsk = rec?.value ?? true;
-  equipmentInspectionInput.checked = state.skipEquipmentInspectionAsk;
-}
-const keepGoingAfterBuzzerInput = document.getElementById("input-keep-going-after-buzzer");
-keepGoingAfterBuzzerInput.addEventListener("change", async () => {
-  state.keepGoingAfterBuzzer = keepGoingAfterBuzzerInput.checked;
-  await dbPut("meta", { key: "keepGoingAfterBuzzer", value: state.keepGoingAfterBuzzer });
-});
-async function loadKeepGoingAfterBuzzerSetting() {
-  const rec = await dbGet("meta", "keepGoingAfterBuzzer");
-  state.keepGoingAfterBuzzer = rec?.value ?? false;
-  keepGoingAfterBuzzerInput.checked = state.keepGoingAfterBuzzer;
+  const rec = await dbGet("meta", "countEquipmentInspection");
+  state.countEquipmentInspection = rec?.value ?? true;
+  equipmentInspectionInput.checked = state.countEquipmentInspection;
 }
 const interactiveScoringInput = document.getElementById("input-interactive-scoring");
 interactiveScoringInput.addEventListener("change", async () => {
@@ -5677,7 +5694,6 @@ async function initAll() {
   await loadRunGroups();
   await loadRuns();
   await loadEquipmentInspectionSetting();
-  await loadKeepGoingAfterBuzzerSetting();
   await loadInteractiveScoringSetting();
   await loadInteractiveIterationsSetting();
   state.sheets.spreadsheetId = await loadStoredSheetsFileId();
