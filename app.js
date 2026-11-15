@@ -149,7 +149,7 @@ const state = {
   editingAllOrder: false,
   countEquipmentInspection: true, // whether new game runs get the +20 Equipment Inspection bonus
   interactiveScoringEnabled: true,
-  trackRobotTrips: true, // Robot returned / Robot leaves buttons + per-mission timing in interactive scoring
+  trackRobotTrips: false, // Robot returned / Robot leaves buttons + per-mission timing in interactive scoring
   interactiveIterationsEnabled: false,
   guidedRun: null, // { run, legs, legIdx, phase, matchStartTs, ... }
 };
@@ -484,53 +484,107 @@ function runTimedTotal(run, missions) {
   const timedState = runTimedState(run);
   return timedState ? runTotal(timedState, missions) : null;
 }
-// Shared "Official time cutoff" control for the Final Overview and the
-// saved-run breakdown editor. Pair with bindTimedCutoffControl().
+// Shared "Official time cutoff" selector for the Final Overview and the
+// saved-run breakdown editor: instead of picking a time, you step with ◀ / ▶
+// through what was scored to choose which task was the last one done before
+// the real buzzer. Pair with bindTimedCutoffControl().
+function scoreEventLabel(e) {
+  if (e.k.startsWith("t:")) {
+    const id = e.k.slice(2);
+    for (const m of state.missions) {
+      const t = (m.tasks || []).find((x) => x.id === id);
+      if (!t) continue;
+      let val;
+      if (t.type === "bool") val = e.v ? "Complete" : "Incomplete";
+      else if (t.type === "number") val = String(e.v ?? 0);
+      else val = e.v === null || e.v === "" || e.v === undefined ? "Not achieved" : ((t.options || [])[e.v]?.label ?? String(e.v));
+      return `${m.name} — ${t.name}: ${val}`;
+    }
+    return "Deleted task";
+  }
+  if (e.k === "tokens") return `Precision tokens left: ${e.v}`;
+  if (e.k === "inspection") return `Equipment Inspection: ${e.v ? "yes" : "no"}`;
+  if (e.k === "spider") return `Spider ${e.v ? "knocked down" : "back up"}`;
+  if (e.k === "snail") return `Snail ${e.v ? "knocked down" : "back up"}`;
+  return e.k;
+}
+// Score log entries grouped by the moment they happened (one tap = one row).
+function scoreEventGroups(run) {
+  const groups = [];
+  (run.scoreLog || []).forEach((e) => {
+    const last = groups[groups.length - 1];
+    if (last && last.ms === e.ms) last.labels.push(scoreEventLabel(e));
+    else groups.push({ ms: e.ms, labels: [scoreEventLabel(e)] });
+  });
+  return groups;
+}
 function timedCutoffControlHTML(run) {
   if (!runHasAdjustableCutoff(run)) {
     return `<div class="gfs-section"><h3>Official time cutoff</h3>
-      <p class="empty-sub">Moving the 2:30 mark isn't available for game runs recorded before this feature was added.</p></div>`;
+      <p class="empty-sub">Choosing the 2:30 mark isn't available for game runs recorded before this feature was added.</p></div>`;
   }
   const cutoff = runTimedCutoffMs(run);
-  const max = Math.max(MATCH_LENGTH_MS, Math.ceil((run.totalTimeMs || 0) / 1000) * 1000);
+  const groups = scoreEventGroups(run);
+  if (!groups.length) {
+    return `<div class="gfs-section cutoff-section"><h3>Official time cutoff</h3>
+      <p class="empty-sub">Nothing was scored while the clock was running.</p></div>`;
+  }
+  let lastIdx = -1; // -1 = nothing counted (buzzer before the first task)
+  groups.forEach((g, i) => { if (g.ms <= cutoff) lastIdx = i; });
+  const cur = lastIdx >= 0 ? groups[lastIdx] : null;
+  const next = groups[lastIdx + 1];
+  const where = (ms) => (ms <= MATCH_LENGTH_MS ? "before" : "after");
   return `<div class="gfs-section cutoff-section">
     <h3>Official time cutoff</h3>
-    <div class="gfs-task-row gfs-task-row-wrap">
-      <span class="gfs-task-name">Score counts up to <span class="cutoff-val">${fmtDuration(cutoff)}</span> <span class="gfs-task-pts cutoff-summary">${cutoffSummaryText(run)}</span></span>
-      <p class="empty-sub cutoff-hint">If the clock here started late or early, move this to where the real 2:30 buzzer was. Anything scored after it only counts toward the final score.</p>
-      <div class="cutoff-controls">
-        <button type="button" class="gfs-num-btn cutoff-step" data-step="-5000">&minus;5s</button>
-        <button type="button" class="gfs-num-btn cutoff-step" data-step="-1000">&minus;1s</button>
-        <input type="range" class="cutoff-range" min="0" max="${max}" step="1000" value="${cutoff}" aria-label="Official time cutoff">
-        <button type="button" class="gfs-num-btn cutoff-step" data-step="1000">+1s</button>
-        <button type="button" class="gfs-num-btn cutoff-step" data-step="5000">+5s</button>
+    <p class="empty-sub cutoff-hint">Use the arrows to pick the last task done before the real 2:30 buzzer. Anything after it only counts toward the final score.</p>
+    <div class="cutoff-selector">
+      <button type="button" class="cutoff-arrow" data-dir="-1" title="Earlier task" ${lastIdx < 0 ? "disabled" : ""}>&#9664;</button>
+      <div class="cutoff-current">
+        <div class="cutoff-current-tag">Last task counted &middot; ${lastIdx + 1} of ${groups.length}</div>
+        ${cur
+          ? `<div class="cutoff-current-main"><span class="cutoff-row-time">${fmtDuration(cur.ms)}</span> ${cur.labels.map(esc).join("<br>")}</div>
+             <div class="cutoff-current-sub">${where(cur.ms)} ${fmtDuration(MATCH_LENGTH_MS)} on this app's clock</div>`
+          : `<div class="cutoff-current-main">Nothing &mdash; the buzzer went before any task</div>`}
+        ${next ? `<div class="cutoff-current-next">Next (not counted): ${fmtDuration(next.ms)} ${esc(next.labels[0])}${next.labels.length > 1 ? " …" : ""}</div>` : ""}
       </div>
-      <div class="gfs-choice-strip"><button type="button" class="gfs-choice-btn cutoff-reset"${cutoff === MATCH_LENGTH_MS ? " disabled" : ""}>Reset to ${fmtDuration(MATCH_LENGTH_MS)}</button></div>
+      <button type="button" class="cutoff-arrow" data-dir="1" title="Later task" ${lastIdx >= groups.length - 1 ? "disabled" : ""}>&#9654;</button>
+    </div>
+    <div class="cutoff-footer">
+      <strong class="cutoff-summary">${cutoffSummaryText(run)}</strong>
+      <button type="button" class="gfs-choice-btn cutoff-reset"${run.timedCutoffMs == null ? " disabled" : ""}>Reset to ${fmtDuration(MATCH_LENGTH_MS)}</button>
     </div>
   </div>`;
 }
 function cutoffSummaryText(run) {
   const timed = runTimedTotal(run, state.missions);
-  return timed == null ? "· run ended before this, so the whole run counts" : `· ${timed} pts at the cutoff`;
+  return timed == null ? "Right now the whole run counts." : `Official score: ${timed} pts`;
 }
 function bindTimedCutoffControl(scopeSelector, run, onChange) {
   const scope = document.querySelector(`${scopeSelector} .cutoff-section`);
-  if (!scope) return;
-  const range = scope.querySelector(".cutoff-range");
-  const apply = (ms) => {
-    const v = Math.max(0, Math.min(Number(range.max), Math.round(ms / 1000) * 1000));
-    if (v === MATCH_LENGTH_MS) delete run.timedCutoffMs; else run.timedCutoffMs = v;
-    range.value = v;
-    scope.querySelector(".cutoff-val").textContent = fmtDuration(v);
-    scope.querySelector(".cutoff-summary").textContent = cutoffSummaryText(run);
-    scope.querySelector(".cutoff-reset").disabled = v === MATCH_LENGTH_MS;
-    onChange();
+  if (!scope || !scope.querySelector(".cutoff-selector")) return;
+  const rerender = () => {
+    const wrap = document.createElement("div");
+    wrap.innerHTML = timedCutoffControlHTML(run);
+    scope.replaceWith(wrap.firstElementChild);
+    bindTimedCutoffControl(scopeSelector, run, onChange);
   };
-  range.addEventListener("input", () => apply(Number(range.value)));
-  scope.querySelectorAll(".cutoff-step").forEach((btn) => {
-    btn.addEventListener("click", () => apply(runTimedCutoffMs(run) + Number(btn.dataset.step)));
+  scope.querySelectorAll(".cutoff-arrow").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const groups = scoreEventGroups(run);
+      const cutoff = runTimedCutoffMs(run);
+      let lastIdx = -1;
+      groups.forEach((g, i) => { if (g.ms <= cutoff) lastIdx = i; });
+      const idx = Math.max(-1, Math.min(groups.length - 1, lastIdx + Number(btn.dataset.dir)));
+      run.timedCutoffMs = idx < 0 ? 0 : groups[idx].ms;
+      rerender();
+      onChange();
+    });
   });
-  scope.querySelector(".cutoff-reset").addEventListener("click", () => apply(MATCH_LENGTH_MS));
+  scope.querySelector(".cutoff-reset").addEventListener("click", () => {
+    delete run.timedCutoffMs;
+    rerender();
+    onChange();
+  });
 }
 // Renders "<timed> timed · <final> final" when time ran out mid-run,
 // otherwise just the plain total —
@@ -755,6 +809,7 @@ async function restoreDeletedAttachment(id) {
   if (!att) return;
   delete att.deleted;
   delete att.deletedAt;
+  att.restoredAt = Date.now(); // lets this restore win over older "deleted" copies during team sync
   await dbPut("attachments", att);
   const entries = await dbGetByIndex("entries", "byAttachment", id);
   for (const en of entries) {
@@ -1770,6 +1825,7 @@ async function restoreDeletedRunGroup(id) {
   if (!g) return;
   delete g.deleted;
   delete g.deletedAt;
+  g.restoredAt = Date.now(); // lets this restore win over older "deleted" copies during team sync
   await dbPut("runGroups", g);
   await loadRunGroups();
   await loadMissions();
@@ -1935,6 +1991,7 @@ async function restoreDeletedMission(id) {
   if (!m) return;
   delete m.deleted;
   delete m.deletedAt;
+  m.restoredAt = Date.now(); // lets this restore win over older "deleted" copies during team sync
   await dbPut("missions", m);
   await recomputeGlobalMissionOrder();
   await loadMissions();
@@ -3593,6 +3650,7 @@ async function restoreDeletedRun(id) {
   if (!run) return;
   delete run.deleted;
   delete run.deletedAt;
+  run.restoredAt = Date.now(); // lets this restore win over older "deleted" copies during team sync
   await dbPut("runs", run);
   await loadRuns();
   syncToTeamDrive();
@@ -3600,6 +3658,7 @@ async function restoreDeletedRun(id) {
 async function restoreDeletedEntry(entry) {
   delete entry.deleted;
   delete entry.deletedAt;
+  entry.restoredAt = Date.now(); // lets this restore win over older "deleted" copies during team sync
   delete entry.deletedWithAttachmentId;
   await dbPut("entries", entry);
   renderAttachmentChips();
@@ -3823,7 +3882,7 @@ function renderRunBreakdown(run) {
       </div>
     </div>
     <div class="gfs-body" id="brk-body"></div>
-    <div class="gfs-footer">
+    <div class="gfs-footer" id="brk-footer">
       <button type="button" class="btn btn-primary btn-full" id="brk-close-btn">Close</button>
     </div>
   `);
@@ -3831,13 +3890,16 @@ function renderRunBreakdown(run) {
   document.getElementById("brk-close-btn").addEventListener("click", closeGuidedFullscreen);
   document.getElementById("brk-edit-btn").addEventListener("click", async () => {
     const b = state.breakdown;
-    if (b.editing) {
+    const wasEditing = b.editing;
+    // Flip the screen right away (so the tap feels instant and closing the
+    // screen mid-save can't break anything), then save in the background.
+    b.editing = !b.editing;
+    renderBreakdownTabs();
+    if (wasEditing) {
       await dbPut("runs", b.run);
       await loadRuns();
       syncToTeamDrive();
     }
-    b.editing = !b.editing;
-    renderBreakdownTabs();
   });
   renderBreakdownTabs();
 }
@@ -3851,8 +3913,13 @@ function renderBreakdownTabs() {
   const editBtn = document.getElementById("brk-edit-btn");
   if (editBtn) {
     editBtn.hidden = b.tab !== "scores";
-    editBtn.innerHTML = b.editing ? "&#10003; Save" : "&#9998;&#65039; Edit";
+    // Icon only: ✏️ to start editing, ✓ to save. Close is hidden while editing so it can't be mistaken for Save.
+    editBtn.innerHTML = b.editing ? "&#10003;" : "&#9998;&#65039;";
+    editBtn.title = b.editing ? "Save changes" : "Edit";
+    editBtn.classList.toggle("is-saving", b.editing);
   }
+  const footer = document.getElementById("brk-footer");
+  if (footer) footer.hidden = b.editing;
   if (b.tab === "scores") renderBreakdownScoresTab();
   else renderBreakdownTimingTab();
 }
@@ -4011,7 +4078,8 @@ function renderBreakdownTimingTab() {
 // ==========================================================
 // ANALYSIS TAB — across every completed run, not just one
 // ==========================================================
-state.analysis = { subTab: "trend", dateFrom: null, dateTo: null, showTimeCols: true, trendSpacing: null };
+state.analysis = { subTab: "trend", dateFrom: null, dateTo: null, showTimeCols: true, trendSpacing: null, trendScore: "timed" };
+try { if (localStorage.getItem("barp-analysis-trend-score") === "final") state.analysis.trendScore = "final"; } catch (e) {}
 try { state.analysis.showTimeCols = localStorage.getItem("barp-analysis-show-time") !== "0"; } catch (e) {}
 
 function renderAnalysisTab() {
@@ -4112,7 +4180,7 @@ function computeBonusAnalytics(completed) {
 // scrolls sideways, and can be zoomed by pinching (or ctrl/trackpad-pinch +
 // scroll wheel on a computer, or the − / + buttons).
 let scoreTrendOutsideClickWired = false;
-const TREND_H = 220, TREND_PAD_T = 14, TREND_PAD_B = 30, TREND_AXIS_W = 36, TREND_PAD_X = 14;
+const TREND_H = 220, TREND_PAD_T = 14, TREND_PAD_B = 12, TREND_AXIS_W = 36, TREND_PAD_X = 14;
 const TREND_SCROLL_THRESHOLD = 10, TREND_DEFAULT_SPACING = 36, TREND_MAX_SPACING = 160;
 function renderScoreTrendChart() {
   const container = document.getElementById("analysis-trend-body");
@@ -4122,12 +4190,19 @@ function renderScoreTrendChart() {
   if (completed.length < 2) {
     const ranged = state.analysis.dateFrom || state.analysis.dateTo;
     container.innerHTML = filterHTML + `<p class="empty-sub">Need at least 2 completed game runs${ranged ? " in this date range" : ""} to show a trend.</p>`;
-    bindAnalysisDateFilterEvents();
+    bindAnalysisDateFilterEvents(container);
     return;
   }
   const n = completed.length;
-  const scores = completed.map((r) => runOfficialTotal(r));
+  const showFinal = state.analysis.trendScore === "final";
+  const timeds = completed.map((r) => runOfficialTotal(r));
   const finals = completed.map((r) => runTotal(r, state.missions));
+  const scores = showFinal ? finals : timeds;
+  const otherScores = showFinal ? timeds : finals;
+  const scoreToggleHTML = `<div class="trend-score-toggle">
+    <button type="button" class="analysis-tab-btn${showFinal ? "" : " active"}" data-trend-score="timed">Timed score</button>
+    <button type="button" class="analysis-tab-btn${showFinal ? " active" : ""}" data-trend-score="final">Final score</button>
+  </div>`;
   const maxY = Math.max(100, Math.ceil(Math.max(...scores) / 100) * 100);
   const plotH = TREND_H - TREND_PAD_T - TREND_PAD_B;
   const yFor = (v) => TREND_PAD_T + plotH - (v / maxY) * plotH;
@@ -4135,7 +4210,7 @@ function renderScoreTrendChart() {
   for (let v = 0; v <= maxY; v += 100) ticks.push(v);
   const scrollable = n > TREND_SCROLL_THRESHOLD;
 
-  container.innerHTML = filterHTML + `
+  container.innerHTML = filterHTML + scoreToggleHTML + `
     <div class="trend-chart">
       <svg class="trend-yaxis" width="${TREND_AXIS_W}" height="${TREND_H}" viewBox="0 0 ${TREND_AXIS_W} ${TREND_H}">
         ${ticks.map((v) => `<text x="${TREND_AXIS_W - 4}" y="${(yFor(v) + 3).toFixed(1)}" font-size="10" text-anchor="end" fill="var(--text-soft)">${v}</text>`).join("")}
@@ -4147,9 +4222,16 @@ function renderScoreTrendChart() {
       <button type="button" class="btn btn-ghost btn-sm" id="trend-zoom-in" title="Zoom in">+</button>
       <span class="empty-sub">Pinch to zoom &middot; swipe to scroll</span>
     </div>` : ""}
-    <p class="empty-sub" style="text-align:center;">${n} completed runs &middot; official (timed) scores &middot; tap a point for details</p>
+    <p class="empty-sub" style="text-align:center;">${n} completed runs &middot; ${showFinal ? "final scores (everything scored)" : "timed scores (at the 2:30 cutoff)"} &middot; tap a point for details</p>
   `;
-  bindAnalysisDateFilterEvents();
+  bindAnalysisDateFilterEvents(container);
+  container.querySelectorAll("[data-trend-score]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.analysis.trendScore = btn.dataset.trendScore;
+      try { localStorage.setItem("barp-analysis-trend-score", state.analysis.trendScore); } catch (e) {}
+      renderScoreTrendChart();
+    });
+  });
 
   const scrollEl = document.getElementById("trend-scroll");
   const plotEl = document.getElementById("trend-plot");
@@ -4163,19 +4245,6 @@ function renderScoreTrendChart() {
     const plotW = Math.max(viewW, 2 * TREND_PAD_X + (n - 1) * spacing);
     const xFor = (i) => TREND_PAD_X + i * spacing;
     const grid = ticks.map((v) => `<line x1="0" y1="${yFor(v).toFixed(1)}" x2="${plotW}" y2="${yFor(v).toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`).join("");
-    // Date labels along the bottom, once per day (skipped when they'd overlap).
-    let lastDay = null, lastLabelX = -Infinity, dayMarks = "";
-    completed.forEach((r, i) => {
-      const day = new Date(r.startedAt || 0).toDateString();
-      if (day === lastDay) return;
-      lastDay = day;
-      const x = xFor(i);
-      dayMarks += `<line x1="${x.toFixed(1)}" y1="${TREND_PAD_T}" x2="${x.toFixed(1)}" y2="${TREND_PAD_T + plotH + 4}" stroke="var(--line)" stroke-width="1" stroke-dasharray="2 3"/>`;
-      if (x - lastLabelX >= 52) {
-        dayMarks += `<text x="${x.toFixed(1)}" y="${TREND_H - 10}" font-size="10" text-anchor="${i === 0 ? "start" : "middle"}" fill="var(--text-soft)">${esc(shortMonthDay(r.startedAt || 0))}</text>`;
-        lastLabelX = x;
-      }
-    });
     const pts = scores.map((s, i) => [xFor(i), yFor(s)]);
     const pathD = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
     const r = spacing < 20 ? 4.5 : 6.5;
@@ -4185,7 +4254,7 @@ function renderScoreTrendChart() {
     plotEl.style.width = `${plotW}px`;
     plotEl.innerHTML = `
       <svg width="${plotW}" height="${TREND_H}" viewBox="0 0 ${plotW} ${TREND_H}" style="display:block;">
-        ${grid}${dayMarks}
+        ${grid}
         <path d="${pathD}" fill="none" stroke="var(--moss)" stroke-width="2.5" stroke-linejoin="round"/>
         ${dots}
       </svg>
@@ -4202,15 +4271,22 @@ function renderScoreTrendChart() {
     const i = Number(circle.dataset.runIdx);
     const run = completed[i];
     const timeStr = run.totalTimeMs != null ? fmtDuration(run.totalTimeMs) : null;
-    const finalNote = finals[i] !== scores[i] ? ` <span style="opacity:0.7;">(${finals[i]} final)</span>` : "";
+    const finalNote = otherScores[i] !== scores[i] ? ` <span style="opacity:0.7;">(${otherScores[i]} ${showFinal ? "timed" : "final"})</span>` : "";
     const tooltip = document.getElementById("trend-tooltip");
     tooltip.innerHTML = `<strong>${esc(runDisplayLabel(run))}</strong><br>${scores[i]} pts${finalNote}${timeStr ? ` &middot; ${timeStr}` : ""}`;
     // Clamped so a dot near an edge can't push the tooltip outside the plot.
     const plotW = plotEl.offsetWidth;
     const cx = parseFloat(circle.getAttribute("cx"));
-    tooltip.style.left = `${Math.min(plotW - 70, Math.max(70, cx))}px`;
-    tooltip.style.top = `${Math.max(40, parseFloat(circle.getAttribute("cy")))}px`;
     tooltip.hidden = false;
+    // Keep it inside the visible part of the chart: measured width for the
+    // sides, and flipped below the point when the point is near the top.
+    const half = tooltip.offsetWidth / 2 + 4;
+    const viewL = scrollEl.scrollLeft, viewR = viewL + scrollEl.clientWidth;
+    tooltip.style.left = `${Math.min(Math.min(plotW, viewR) - half, Math.max(viewL + half, cx))}px`;
+    const cy = parseFloat(circle.getAttribute("cy"));
+    const below = cy < tooltip.offsetHeight + 16;
+    tooltip.style.top = `${cy}px`;
+    tooltip.style.transform = below ? "translate(-50%, 14px)" : "translate(-50%, calc(-100% - 12px))";
   });
   if (!scoreTrendOutsideClickWired) {
     scoreTrendOutsideClickWired = true;
@@ -4294,10 +4370,13 @@ function filterRunsByAnalysisDateRange(runs) {
     return true;
   });
 }
-function bindAnalysisDateFilterEvents() {
-  const fromEl = document.getElementById("analysis-date-from");
-  const toEl = document.getElementById("analysis-date-to");
-  const clearEl = document.getElementById("analysis-date-clear");
+// Scoped to one sub-tab's container: both Score Trend and Missions draw
+// their own copy of this filter, so looking it up by a page-wide id used to
+// grab the hidden tab's copy and leave the visible one doing nothing.
+function bindAnalysisDateFilterEvents(container) {
+  const fromEl = container.querySelector('[data-date="from"]');
+  const toEl = container.querySelector('[data-date="to"]');
+  const clearEl = container.querySelector('[data-date="clear"]');
   // One date range shared by both Analysis sub-tabs (Score Trend + Missions).
   if (fromEl) fromEl.addEventListener("change", () => { state.analysis.dateFrom = fromEl.value || null; renderAnalysisTab(); });
   if (toEl) toEl.addEventListener("change", () => { state.analysis.dateTo = toEl.value || null; renderAnalysisTab(); });
@@ -4307,9 +4386,9 @@ function analysisDateFilterHTML() {
   const { dateFrom, dateTo } = state.analysis;
   return `
     <div class="run-filter-row">
-      <label class="field" style="margin-bottom:0;"><span style="display:block; font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.03em;">From</span><input type="date" id="analysis-date-from" class="text-input" value="${dateFrom || ""}"></label>
-      <label class="field" style="margin-bottom:0;"><span style="display:block; font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.03em;">To</span><input type="date" id="analysis-date-to" class="text-input" value="${dateTo || ""}"></label>
-      <button type="button" class="btn btn-ghost btn-sm" id="analysis-date-clear">Clear</button>
+      <label class="field" style="margin-bottom:0;"><span style="display:block; font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.03em;">From</span><input type="date" data-date="from" class="text-input" value="${dateFrom || ""}"></label>
+      <label class="field" style="margin-bottom:0;"><span style="display:block; font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.03em;">To</span><input type="date" data-date="to" class="text-input" value="${dateTo || ""}"></label>
+      <button type="button" class="btn btn-ghost btn-sm" data-date="clear">Clear</button>
     </div>
   `;
 }
@@ -4319,7 +4398,7 @@ function renderMissionsAnalysisTable() {
   const filterHTML = analysisDateFilterHTML() + `
     <label class="checkbox-row checkbox-row-standalone"><input type="checkbox" id="analysis-show-time"${showTime ? " checked" : ""}> Show time columns (Pts/sec and Time)</label>`;
   const bindTop = () => {
-    bindAnalysisDateFilterEvents();
+    bindAnalysisDateFilterEvents(body);
     document.getElementById("analysis-show-time").addEventListener("change", (e) => {
       state.analysis.showTimeCols = e.target.checked;
       try { localStorage.setItem("barp-analysis-show-time", e.target.checked ? "1" : "0"); } catch (err) {}
@@ -5416,6 +5495,16 @@ async function writeScoreDataSheet(spreadsheetId) {
   needsRename.forEach((i) => renames.push({ updateSheetProperties: { properties: { sheetId: sheetIds[i], title: titles[i] }, fields: "title" } }));
   if (renames.length) await sheetsBatchUpdate(spreadsheetId, renames);
 
+  // Delete leftover Score Data tabs from earlier exports that this export
+  // doesn't use any more (e.g. an old "9/6 - 9/12" tab whose runs are now
+  // covered by "9/6 - 11/10"), so only the current set of tabs remains.
+  const keep = new Set(sheetIds);
+  const stale = meta.sheets
+    .map((s) => s.properties)
+    .filter((pr) => !keep.has(pr.sheetId) && (stored.includes(pr.sheetId) || /^Score Data\b/.test(pr.title)))
+    .map((pr) => pr.sheetId);
+  if (stale.length) await sheetsBatchUpdate(spreadsheetId, stale.map((sheetId) => ({ deleteSheet: { sheetId } })));
+
   // Remember the tab list now, before writing contents, so if anything
   // below fails the next export reuses these tabs instead of tripping on them.
   await dbPut("meta", { key: "scoreDataSheetIds", value: sheetIds });
@@ -5914,12 +6003,22 @@ function startFirestoreListeners() {
   FIRESTORE_COLLECTIONS.forEach((storeName) => {
     onSnapshot(collection(db, storeName), async (snapshot) => {
       let changed = false;
+      let repush = false;
       for (const change of snapshot.docChanges()) {
         if (change.type === "removed") continue; // deletes are soft-deletes stored as normal docs, not real Firestore removals
-        await dbPut(storeName, change.doc.data());
+        const remote = change.doc.data();
+        // Don't let an older cloud copy undo a delete (or a restore) made on
+        // this device — e.g. the app was closed before the delete finished
+        // uploading, or a teammate's device pushed its stale copy. Whichever
+        // happened last wins, and this device re-sends its copy to fix the cloud.
+        const local = remote && remote.id != null ? await dbGet(storeName, remote.id) : null;
+        if (local && local.deleted && !remote.deleted && (local.deletedAt || 0) > (remote.restoredAt || 0)) { repush = true; continue; }
+        if (local && !local.deleted && remote.deleted && (local.restoredAt || 0) > (remote.deletedAt || 0)) { repush = true; continue; }
+        await dbPut(storeName, remote);
         changed = true;
       }
       if (changed) await refreshAfterRemoteChange(storeName);
+      if (repush) syncToTeamDrive();
       setSyncStatus("Connected");
     }, (e) => { setSyncStatus("Sync failed — will retry on the next change."); showErrorBanner(`Team sync listener failed: ${e.message}`); });
   });
@@ -5989,12 +6088,28 @@ interactiveScoringInput.addEventListener("change", async () => {
   state.interactiveScoringEnabled = interactiveScoringInput.checked;
   await dbPut("meta", { key: "interactiveScoringEnabled", value: state.interactiveScoringEnabled });
 });
+// Robot leave/return tracking is switched off for now: the setting is
+// grayed out and every new game run is scored without the Robot returned /
+// Robot leaves buttons. All the code behind it is kept — set this to true to
+// bring the setting back (it then remembers its own on/off value again).
+const ROBOT_TRIP_TRACKING_AVAILABLE = false;
 const trackRobotTripsInput = document.getElementById("input-track-robot-trips");
 trackRobotTripsInput.addEventListener("change", async () => {
+  if (!ROBOT_TRIP_TRACKING_AVAILABLE) return;
   state.trackRobotTrips = trackRobotTripsInput.checked;
   await dbPut("meta", { key: "trackRobotTrips", value: state.trackRobotTrips });
 });
 async function loadTrackRobotTripsSetting() {
+  const row = trackRobotTripsInput.closest(".checkbox-row");
+  if (!ROBOT_TRIP_TRACKING_AVAILABLE) {
+    state.trackRobotTrips = false;
+    trackRobotTripsInput.checked = false;
+    trackRobotTripsInput.disabled = true;
+    row?.classList.add("is-disabled");
+    return;
+  }
+  trackRobotTripsInput.disabled = false;
+  row?.classList.remove("is-disabled");
   const rec = await dbGet("meta", "trackRobotTrips");
   state.trackRobotTrips = rec?.value ?? true;
   trackRobotTripsInput.checked = state.trackRobotTrips;
@@ -6014,6 +6129,57 @@ async function loadInteractiveIterationsSetting() {
   state.interactiveIterationsEnabled = rec?.value ?? false;
   interactiveIterationsInput.checked = state.interactiveIterationsEnabled;
 }
+
+// ---------- Pull to refresh ----------
+// Drag down from the very top of a main screen and let go to reload the app.
+// The browser's own pull-to-refresh is off (overscroll-behavior in the CSS)
+// and doesn't exist at all in an installed app, so this provides it. Ignored
+// during a game run, a saved-run breakdown, or any open popup.
+(function setUpPullToRefresh() {
+  const THRESHOLD = 80;
+  const el = document.createElement("div");
+  el.className = "ptr-indicator";
+  el.innerHTML = `<span class="ptr-icon">&#8595;</span><span class="ptr-text">Pull to refresh</span>`;
+  document.body.appendChild(el);
+  let startY = null, startX = 0, pull = 0;
+  const blocked = (target) => {
+    const gfs = document.getElementById("guided-fullscreen");
+    return (gfs && !gfs.hidden) || !modalBackdrop.hidden || target.closest(".trend-scroll");
+  };
+  const reset = () => {
+    startY = null; pull = 0;
+    el.classList.remove("is-visible", "is-ready");
+    el.style.transform = "";
+  };
+  window.addEventListener("touchstart", (e) => {
+    if (e.touches.length !== 1 || window.scrollY > 0 || blocked(e.target)) { startY = null; return; }
+    startY = e.touches[0].clientY;
+    startX = e.touches[0].clientX;
+  }, { passive: true });
+  window.addEventListener("touchmove", (e) => {
+    if (startY == null) return;
+    const dy = e.touches[0].clientY - startY;
+    const dx = Math.abs(e.touches[0].clientX - startX);
+    if (dy <= 0 || dx > dy || window.scrollY > 0) { if (pull) reset(); return; }
+    pull = Math.min(dy * 0.5, THRESHOLD * 1.4); // resistance, like a native pull
+    el.classList.add("is-visible");
+    el.classList.toggle("is-ready", pull >= THRESHOLD * 0.75);
+    el.querySelector(".ptr-text").textContent = pull >= THRESHOLD * 0.75 ? "Release to refresh" : "Pull to refresh";
+    el.style.transform = `translate(-50%, ${pull}px)`;
+  }, { passive: true });
+  window.addEventListener("touchend", () => {
+    if (startY == null) return;
+    if (pull >= THRESHOLD * 0.75) {
+      el.classList.add("is-refreshing");
+      el.querySelector(".ptr-icon").innerHTML = "&#8635;";
+      el.querySelector(".ptr-text").textContent = "Refreshing…";
+      setTimeout(() => location.reload(), 150);
+      return;
+    }
+    reset();
+  }, { passive: true });
+  window.addEventListener("touchcancel", reset, { passive: true });
+})();
 
 async function initAll() {
   preloadAllSounds(); // fire-and-forget, decoding well ahead of any run starting
