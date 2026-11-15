@@ -2875,10 +2875,33 @@ function runGroupDisplayName(g) {
   const label = num != null ? `Run ${num}` : "Run";
   return g.name ? `${label} - ${g.name}` : label;
 }
+// How a game run is named everywhere it's shown (and in the Sheets export):
+// short month + day + its number that day, e.g. "Nov. 13 #3". Worked out
+// from when it started rather than stored, so it stays unique and in order
+// even after runs are deleted or synced in from teammates.
+const SHORT_MONTHS = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "June", "July", "Aug.", "Sept.", "Oct.", "Nov.", "Dec."];
+function shortMonthDay(ts) {
+  const d = new Date(ts);
+  return `${SHORT_MONTHS[d.getMonth()]} ${d.getDate()}`;
+}
+function runDisplayLabel(run) {
+  if (!run || !run.startedAt) return run?.label || "Game Run";
+  const dayKey = new Date(run.startedAt).toDateString();
+  const sameDay = state.runs
+    .filter((r) => r.startedAt && new Date(r.startedAt).toDateString() === dayKey)
+    .sort((a, b) => a.startedAt - b.startedAt || String(a.id).localeCompare(String(b.id)));
+  const idx = sameDay.findIndex((r) => r.id === run.id);
+  // A run that isn't in state.runs (e.g. one just started, or deleted) goes after the rest.
+  const num = idx >= 0 ? idx + 1 : sameDay.filter((r) => r.startedAt <= run.startedAt).length + 1;
+  return `${shortMonthDay(run.startedAt)} #${num}`;
+}
+// The score that officially counts: the timed score when the clock ran past
+// the (adjustable) 2:30 cutoff, otherwise the whole run's score.
+function runOfficialTotal(run, missions = state.missions) {
+  return runTimedTotal(run, missions) ?? runTotal(run, missions);
+}
 function nextGameRunLabel() {
-  const todayStr = new Date().toLocaleDateString();
-  const todayCount = state.runs.filter((r) => new Date(r.startedAt || 0).toLocaleDateString() === todayStr).length;
-  return `Game Run ${todayCount + 1}`;
+  return runDisplayLabel({ startedAt: Date.now() });
 }
 
 // ---- Start flow: countdown, then horn ----
@@ -3433,7 +3456,7 @@ function renderGuidedOverview() {
   openGuidedFullscreen(`
     <div class="gfs-header">
       ${gfsHeaderTopHTML(isLive ? "Scoring" : "Final overview", false, false)}
-      <h2 class="gfs-mission-name">${esc(run.label)}</h2>
+      <h2 class="gfs-mission-name">${esc(runDisplayLabel(run))}</h2>
       ${isLive ? `
         <div class="gfs-timer-row" style="justify-content:center; gap:24px;">
           <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
@@ -3649,7 +3672,7 @@ async function openRecentlyDeletedModal() {
   addSection("Runs", deletedRunGroups, (g) => g.name, (g) => g.deletedAt, (g) => restoreDeletedRunGroup(g.id));
   addSection("Missions", deletedMissions, (m) => m.name, (m) => m.deletedAt, (m) => restoreDeletedMission(m.id));
   addSection("Tasks", deletedTasks, ({ mission, task }) => `${task.name} (in ${mission.name})`, ({ task }) => task.deletedAt, ({ mission, task }) => restoreDeletedTask(mission.id, task.id));
-  addSection("Game runs", deletedRuns, (r) => r.label, (r) => r.deletedAt, (r) => restoreDeletedRun(r.id));
+  addSection("Game runs", deletedRuns, (r) => runDisplayLabel(r), (r) => r.deletedAt, (r) => restoreDeletedRun(r.id));
 }
 
 function getRunDateFilterRange() {
@@ -3709,20 +3732,20 @@ function renderRuns() {
     card.innerHTML = `
       <div class="rc-row">
         <div class="rc-title-block">
-          <div class="run-title">${esc(run.label)}</div>
+          <div class="run-title">${esc(runDisplayLabel(run))}</div>
           <div class="run-date">incomplete run</div>
         </div>
         <button class="btn-icon rc-icon-btn" data-act="del" title="Delete">&#128465;&#65039;</button>
       </div>
     `;
     card.querySelector('[data-act="del"]').addEventListener("click", async () => {
-      if (!confirm(`Delete incomplete game run "${run.label}"?`)) return;
+      if (!confirm(`Delete incomplete game run "${runDisplayLabel(run)}"?`)) return;
       run.deleted = true;
       run.deletedAt = Date.now();
       await dbPut("runs", run);
       await loadRuns();
       syncToTeamDrive();
-      showUndoToast(`Deleted "${run.label}".`, async () => {
+      showUndoToast(`Deleted "${runDisplayLabel(run)}".`, async () => {
         await restoreDeletedRun(run.id);
       });
     });
@@ -3746,8 +3769,8 @@ function renderRuns() {
     card.innerHTML = `
       <div class="rc-row">
         <div class="rc-title-block">
-          <div class="run-title">${esc(run.label)}</div>
-          <div class="run-date">${esc(run.date || "")}</div>
+          <div class="run-title">${esc(runDisplayLabel(run))}</div>
+          <div class="run-date">${run.startedAt ? esc(new Date(run.startedAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })) : esc(run.date || "")}</div>
         </div>
         <div class="rc-stat"><span class="rc-stat-val">${total}</span><span class="rc-stat-label">pts</span></div>
         <div class="rc-stat"><span class="rc-stat-val">${fmtDuration(run.totalTimeMs || 0)}</span><span class="rc-stat-label">time</span></div>
@@ -3758,13 +3781,13 @@ function renderRuns() {
     card.addEventListener("click", () => renderRunBreakdown(run));
     card.querySelector('[data-act="del"]').addEventListener("click", async (ev) => {
       ev.stopPropagation();
-      if (!confirm(`Delete game run "${run.label}"?`)) return;
+      if (!confirm(`Delete game run "${runDisplayLabel(run)}"?`)) return;
       run.deleted = true;
       run.deletedAt = Date.now();
       await dbPut("runs", run);
       await loadRuns();
       syncToTeamDrive();
-      showUndoToast(`Deleted "${run.label}".`, async () => {
+      showUndoToast(`Deleted "${runDisplayLabel(run)}".`, async () => {
         await restoreDeletedRun(run.id);
       });
     });
@@ -3790,7 +3813,7 @@ function renderRunBreakdown(run) {
       <div class="gfs-header-top">
         <button type="button" class="gfs-back-btn" id="brk-back">&#8592;</button>
         <button type="button" class="brk-edit-icon-btn" id="brk-edit-btn" title="Edit">&#9998;&#65039;</button>
-        <div class="guided-phase-badge">${esc(run.label)}</div>
+        <div class="guided-phase-badge">${esc(runDisplayLabel(run))}</div>
       </div>
       <div class="gfs-timer" id="brk-total">${scoreDisplayHTML(run, state.missions)}</div>
       <div class="gfs-timer-label" id="brk-time-label">${breakdownTimeLabelHTML(run, avgOp)}</div>
@@ -3988,7 +4011,8 @@ function renderBreakdownTimingTab() {
 // ==========================================================
 // ANALYSIS TAB — across every completed run, not just one
 // ==========================================================
-state.analysis = { subTab: "trend", dateFrom: null, dateTo: null };
+state.analysis = { subTab: "trend", dateFrom: null, dateTo: null, showTimeCols: true, trendSpacing: null };
+try { state.analysis.showTimeCols = localStorage.getItem("barp-analysis-show-time") !== "0"; } catch (e) {}
 
 function renderAnalysisTab() {
   document.querySelectorAll(".analysis-tab-btn").forEach((btn) => {
@@ -4081,61 +4105,112 @@ function computeBonusAnalytics(completed) {
   ];
 }
 
+// ---- Score Trend chart ----
+// Plots each run's official score (the timed score at the 2:30 cutoff when
+// the clock ran past it), with a horizontal gridline every 100 points. Up to
+// 10 runs fit the width; past that the plot keeps a fixed spacing per run and
+// scrolls sideways, and can be zoomed by pinching (or ctrl/trackpad-pinch +
+// scroll wheel on a computer, or the − / + buttons).
 let scoreTrendOutsideClickWired = false;
+const TREND_H = 220, TREND_PAD_T = 14, TREND_PAD_B = 30, TREND_AXIS_W = 36, TREND_PAD_X = 14;
+const TREND_SCROLL_THRESHOLD = 10, TREND_DEFAULT_SPACING = 36, TREND_MAX_SPACING = 160;
 function renderScoreTrendChart() {
   const container = document.getElementById("analysis-trend-body");
-  const completed = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  const filterHTML = analysisDateFilterHTML();
+  const completed = filterRunsByAnalysisDateRange(state.runs.filter((r) => !r.inProgress))
+    .sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   if (completed.length < 2) {
-    container.innerHTML = `<p class="empty-sub">Need at least 2 completed game runs to show a trend.</p>`;
+    const ranged = state.analysis.dateFrom || state.analysis.dateTo;
+    container.innerHTML = filterHTML + `<p class="empty-sub">Need at least 2 completed game runs${ranged ? " in this date range" : ""} to show a trend.</p>`;
+    bindAnalysisDateFilterEvents();
     return;
   }
-  const scores = completed.map((r) => runTotal(r, state.missions));
-  const maxScore = Math.max(...scores, 1);
-  const W = 340, H = 200, padL = 34, padR = 12, padT = 14, padB = 26;
-  const plotW = W - padL - padR, plotH = H - padT - padB;
-  const stepX = scores.length > 1 ? plotW / (scores.length - 1) : 0;
-  const points = scores.map((s, i) => [padL + i * stepX, padT + plotH - (s / maxScore) * plotH]);
-  const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
-  const dots = points.map((p, i) =>
-    `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="7" fill="var(--moss)" stroke="var(--paper)" stroke-width="1.5" data-run-idx="${i}" style="cursor:pointer;"></circle>`
-  ).join("");
-  const gridFracs = [0, 0.5, 1];
-  const gridLines = gridFracs.map((f) => {
-    const y = padT + plotH - f * plotH;
-    return `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`;
-  }).join("");
-  const gridLabels = gridFracs.map((f) => {
-    const y = padT + plotH - f * plotH;
-    return `<text x="${padL - 6}" y="${(y + 3).toFixed(1)}" font-size="9" text-anchor="end" fill="var(--text-soft)">${Math.round(maxScore * f)}</text>`;
-  }).join("");
-  container.innerHTML = `
-    <div style="position:relative;">
-      <svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; display:block;">
-        ${gridLines}${gridLabels}
-        <path d="${pathD}" fill="none" stroke="var(--moss)" stroke-width="2.5"/>
+  const n = completed.length;
+  const scores = completed.map((r) => runOfficialTotal(r));
+  const finals = completed.map((r) => runTotal(r, state.missions));
+  const maxY = Math.max(100, Math.ceil(Math.max(...scores) / 100) * 100);
+  const plotH = TREND_H - TREND_PAD_T - TREND_PAD_B;
+  const yFor = (v) => TREND_PAD_T + plotH - (v / maxY) * plotH;
+  const ticks = [];
+  for (let v = 0; v <= maxY; v += 100) ticks.push(v);
+  const scrollable = n > TREND_SCROLL_THRESHOLD;
+
+  container.innerHTML = filterHTML + `
+    <div class="trend-chart">
+      <svg class="trend-yaxis" width="${TREND_AXIS_W}" height="${TREND_H}" viewBox="0 0 ${TREND_AXIS_W} ${TREND_H}">
+        ${ticks.map((v) => `<text x="${TREND_AXIS_W - 4}" y="${(yFor(v) + 3).toFixed(1)}" font-size="10" text-anchor="end" fill="var(--text-soft)">${v}</text>`).join("")}
+      </svg>
+      <div class="trend-scroll${scrollable ? " is-scrollable" : ""}" id="trend-scroll"><div class="trend-plot" id="trend-plot"></div></div>
+    </div>
+    ${scrollable ? `<div class="trend-zoom-row">
+      <button type="button" class="btn btn-ghost btn-sm" id="trend-zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="trend-zoom-in" title="Zoom in">+</button>
+      <span class="empty-sub">Pinch to zoom &middot; swipe to scroll</span>
+    </div>` : ""}
+    <p class="empty-sub" style="text-align:center;">${n} completed runs &middot; official (timed) scores &middot; tap a point for details</p>
+  `;
+  bindAnalysisDateFilterEvents();
+
+  const scrollEl = document.getElementById("trend-scroll");
+  const plotEl = document.getElementById("trend-plot");
+  let spacing = 0;
+  const draw = () => {
+    const viewW = scrollEl.clientWidth || 300;
+    const fitSpacing = (viewW - 2 * TREND_PAD_X) / (n - 1);
+    spacing = scrollable
+      ? Math.max(fitSpacing, Math.min(TREND_MAX_SPACING, state.analysis.trendSpacing ?? TREND_DEFAULT_SPACING))
+      : fitSpacing;
+    const plotW = Math.max(viewW, 2 * TREND_PAD_X + (n - 1) * spacing);
+    const xFor = (i) => TREND_PAD_X + i * spacing;
+    const grid = ticks.map((v) => `<line x1="0" y1="${yFor(v).toFixed(1)}" x2="${plotW}" y2="${yFor(v).toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`).join("");
+    // Date labels along the bottom, once per day (skipped when they'd overlap).
+    let lastDay = null, lastLabelX = -Infinity, dayMarks = "";
+    completed.forEach((r, i) => {
+      const day = new Date(r.startedAt || 0).toDateString();
+      if (day === lastDay) return;
+      lastDay = day;
+      const x = xFor(i);
+      dayMarks += `<line x1="${x.toFixed(1)}" y1="${TREND_PAD_T}" x2="${x.toFixed(1)}" y2="${TREND_PAD_T + plotH + 4}" stroke="var(--line)" stroke-width="1" stroke-dasharray="2 3"/>`;
+      if (x - lastLabelX >= 52) {
+        dayMarks += `<text x="${x.toFixed(1)}" y="${TREND_H - 10}" font-size="10" text-anchor="${i === 0 ? "start" : "middle"}" fill="var(--text-soft)">${esc(shortMonthDay(r.startedAt || 0))}</text>`;
+        lastLabelX = x;
+      }
+    });
+    const pts = scores.map((s, i) => [xFor(i), yFor(s)]);
+    const pathD = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+    const r = spacing < 20 ? 4.5 : 6.5;
+    const dots = pts.map((p, i) =>
+      `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="${r}" fill="var(--moss)" stroke="var(--paper)" stroke-width="1.5" data-run-idx="${i}" style="cursor:pointer;"></circle>`
+    ).join("");
+    plotEl.style.width = `${plotW}px`;
+    plotEl.innerHTML = `
+      <svg width="${plotW}" height="${TREND_H}" viewBox="0 0 ${plotW} ${TREND_H}" style="display:block;">
+        ${grid}${dayMarks}
+        <path d="${pathD}" fill="none" stroke="var(--moss)" stroke-width="2.5" stroke-linejoin="round"/>
         ${dots}
       </svg>
-      <div id="trend-tooltip" class="trend-tooltip" hidden></div>
-    </div>
-    <p class="empty-sub" style="text-align:center;">${completed.length} completed runs &middot; tap a point for details</p>
-  `;
-  const tooltip = document.getElementById("trend-tooltip");
-  container.querySelectorAll("circle[data-run-idx]").forEach((circle) => {
-    circle.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const i = Number(circle.dataset.runIdx);
-      const run = completed[i];
-      const timeStr = run.totalTimeMs != null ? fmtDuration(run.totalTimeMs) : null;
-      tooltip.innerHTML = `<strong>${esc(run.label)}</strong><br>${scores[i]} pts${timeStr ? ` &middot; ${timeStr}` : ""}`;
-      // Clamped so a dot near an edge (e.g. the last point) can't push the
-      // tooltip past the container bounds — that overflow was what made the
-      // page grow/scroll when the last dot was clicked.
-      const leftPct = Math.min(88, Math.max(12, (parseFloat(circle.getAttribute("cx")) / W) * 100));
-      const topPct = Math.min(90, Math.max(12, (parseFloat(circle.getAttribute("cy")) / H) * 100));
-      tooltip.style.left = `${leftPct}%`;
-      tooltip.style.top = `${topPct}%`;
-      tooltip.hidden = false;
-    });
+      <div id="trend-tooltip" class="trend-tooltip" hidden></div>`;
+  };
+  draw();
+  if (scrollable) scrollEl.scrollLeft = scrollEl.scrollWidth; // start on the most recent runs
+
+  // Tap a point → details (delegated, since zooming redraws the plot).
+  scrollEl.addEventListener("click", (e) => {
+    const circle = e.target.closest("circle[data-run-idx]");
+    if (!circle) return;
+    e.stopPropagation();
+    const i = Number(circle.dataset.runIdx);
+    const run = completed[i];
+    const timeStr = run.totalTimeMs != null ? fmtDuration(run.totalTimeMs) : null;
+    const finalNote = finals[i] !== scores[i] ? ` <span style="opacity:0.7;">(${finals[i]} final)</span>` : "";
+    const tooltip = document.getElementById("trend-tooltip");
+    tooltip.innerHTML = `<strong>${esc(runDisplayLabel(run))}</strong><br>${scores[i]} pts${finalNote}${timeStr ? ` &middot; ${timeStr}` : ""}`;
+    // Clamped so a dot near an edge can't push the tooltip outside the plot.
+    const plotW = plotEl.offsetWidth;
+    const cx = parseFloat(circle.getAttribute("cx"));
+    tooltip.style.left = `${Math.min(plotW - 70, Math.max(70, cx))}px`;
+    tooltip.style.top = `${Math.max(40, parseFloat(circle.getAttribute("cy")))}px`;
+    tooltip.hidden = false;
   });
   if (!scoreTrendOutsideClickWired) {
     scoreTrendOutsideClickWired = true;
@@ -4144,6 +4219,38 @@ function renderScoreTrendChart() {
       if (t) t.hidden = true;
     });
   }
+  if (!scrollable) return;
+
+  // Zoom keeps whatever run is under `clientX` (the pinch midpoint) in place.
+  const zoomTo = (newSpacing, clientX) => {
+    const rect = scrollEl.getBoundingClientRect();
+    const anchor = (clientX ?? rect.left + rect.width / 2) - rect.left;
+    const runPos = (scrollEl.scrollLeft + anchor - TREND_PAD_X) / spacing;
+    state.analysis.trendSpacing = Math.min(TREND_MAX_SPACING, Math.max(4, newSpacing));
+    draw();
+    state.analysis.trendSpacing = spacing; // store what was actually applied (after clamping to fit)
+    scrollEl.scrollLeft = TREND_PAD_X + runPos * spacing - anchor;
+  };
+  document.getElementById("trend-zoom-in").addEventListener("click", (e) => { e.stopPropagation(); zoomTo(spacing * 1.5); });
+  document.getElementById("trend-zoom-out").addEventListener("click", (e) => { e.stopPropagation(); zoomTo(spacing / 1.5); });
+  let pinch = null;
+  const touchDist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  scrollEl.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 2) pinch = { d0: touchDist(e.touches), s0: spacing };
+  }, { passive: true });
+  scrollEl.addEventListener("touchmove", (e) => {
+    if (!pinch || e.touches.length !== 2) return;
+    e.preventDefault();
+    const mid = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+    zoomTo(pinch.s0 * (touchDist(e.touches) / pinch.d0), mid);
+  }, { passive: false });
+  scrollEl.addEventListener("touchend", (e) => { if (e.touches.length < 2) pinch = null; });
+  // Trackpad pinch (and ctrl + scroll wheel) on a computer.
+  scrollEl.addEventListener("wheel", (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    zoomTo(spacing * Math.exp(-e.deltaY * 0.01), e.clientX);
+  }, { passive: false });
 }
 
 // Same red-yellow-green palette as the XLSX export's conditional formatting,
@@ -4191,9 +4298,10 @@ function bindAnalysisDateFilterEvents() {
   const fromEl = document.getElementById("analysis-date-from");
   const toEl = document.getElementById("analysis-date-to");
   const clearEl = document.getElementById("analysis-date-clear");
-  if (fromEl) fromEl.addEventListener("change", () => { state.analysis.dateFrom = fromEl.value || null; renderMissionsAnalysisTable(); });
-  if (toEl) toEl.addEventListener("change", () => { state.analysis.dateTo = toEl.value || null; renderMissionsAnalysisTable(); });
-  if (clearEl) clearEl.addEventListener("click", () => { state.analysis.dateFrom = null; state.analysis.dateTo = null; renderMissionsAnalysisTable(); });
+  // One date range shared by both Analysis sub-tabs (Score Trend + Missions).
+  if (fromEl) fromEl.addEventListener("change", () => { state.analysis.dateFrom = fromEl.value || null; renderAnalysisTab(); });
+  if (toEl) toEl.addEventListener("change", () => { state.analysis.dateTo = toEl.value || null; renderAnalysisTab(); });
+  if (clearEl) clearEl.addEventListener("click", () => { state.analysis.dateFrom = null; state.analysis.dateTo = null; renderAnalysisTab(); });
 }
 function analysisDateFilterHTML() {
   const { dateFrom, dateTo } = state.analysis;
@@ -4207,11 +4315,21 @@ function analysisDateFilterHTML() {
 }
 function renderMissionsAnalysisTable() {
   const body = document.getElementById("analysis-missions-body");
-  const filterHTML = analysisDateFilterHTML();
+  const showTime = state.analysis.showTimeCols;
+  const filterHTML = analysisDateFilterHTML() + `
+    <label class="checkbox-row checkbox-row-standalone"><input type="checkbox" id="analysis-show-time"${showTime ? " checked" : ""}> Show time columns (Pts/sec and Time)</label>`;
+  const bindTop = () => {
+    bindAnalysisDateFilterEvents();
+    document.getElementById("analysis-show-time").addEventListener("change", (e) => {
+      state.analysis.showTimeCols = e.target.checked;
+      try { localStorage.setItem("barp-analysis-show-time", e.target.checked ? "1" : "0"); } catch (err) {}
+      renderMissionsAnalysisTable();
+    });
+  };
   const completed = filterRunsByAnalysisDateRange(state.runs.filter((r) => !r.inProgress));
   if (!completed.length) {
     body.innerHTML = filterHTML + `<p class="empty-sub">No completed game runs in this range.</p>`;
-    bindAnalysisDateFilterEvents();
+    bindTop();
     return;
   }
   const data = computeMissionAnalytics(completed).sort((a, b) => a.order - b.order);
@@ -4222,8 +4340,8 @@ function renderMissionsAnalysisTable() {
   const missionRowHTML = (name, successRate, pointsPerSec, avgTimeMs, subRowsHTML) => `
     <tr class="analysis-mission-row">
       <td class="analysis-mission-name">${esc(name)}</td>
-      ${heatCellHTML(fmtPPS(pointsPerSec), heatFrac(pointsPerSec, ppsVals, false))}
-      ${heatCellHTML(avgTimeMs != null ? fmtDuration(avgTimeMs) : "—", heatFrac(avgTimeMs, timeVals, true))}
+      ${showTime ? heatCellHTML(fmtPPS(pointsPerSec), heatFrac(pointsPerSec, ppsVals, false)) : ""}
+      ${showTime ? heatCellHTML(avgTimeMs != null ? fmtDuration(avgTimeMs) : "—", heatFrac(avgTimeMs, timeVals, true)) : ""}
       ${heatCellHTML(fmtPct(successRate), successRate)}
     </tr>
     ${subRowsHTML}
@@ -4231,7 +4349,7 @@ function renderMissionsAnalysisTable() {
   const subRowHTML = (name, tsr) => `
     <tr class="analysis-task-row">
       <td class="analysis-subtable-name">${esc(name)}</td>
-      <td></td><td></td>
+      ${showTime ? "<td></td><td></td>" : ""}
       ${heatCellHTML(fmtPct(tsr), tsr)}
     </tr>
   `;
@@ -4240,7 +4358,7 @@ function renderMissionsAnalysisTable() {
     const taskData = computeTaskAnalytics(mission, completed).sort((a, b) => a.order - b.order);
     const taskRowsHTML = taskData.length
       ? taskData.map(({ task, successRate: tsr }) => subRowHTML(task.name, tsr)).join("")
-      : `<tr class="analysis-task-row"><td class="analysis-subtable-name" colspan="4"><p class="empty-sub" style="margin:4px 0;">No tasks in this mission.</p></td></tr>`;
+      : `<tr class="analysis-task-row"><td class="analysis-subtable-name" colspan="${showTime ? 4 : 2}"><p class="empty-sub" style="margin:4px 0;">No tasks in this mission.</p></td></tr>`;
     return missionRowHTML(mission.name, successRate, pointsPerSec, avgTimeMs, taskRowsHTML);
   }).join("") + bonusData.map(({ name, successRate, pointsPerSec, avgTimeMs, subRows }) => {
     const subRowsHTML = subRows.map((s) => subRowHTML(s.name, s.successRate)).join("");
@@ -4249,12 +4367,12 @@ function renderMissionsAnalysisTable() {
 
   body.innerHTML = filterHTML + `
     <table class="analysis-table">
-      <thead><tr><th>Mission</th><th>Pts/sec</th><th>Time</th><th>Success</th></tr></thead>
+      <thead><tr><th>Mission</th>${showTime ? "<th>Pts/sec</th><th>Time</th>" : ""}<th>Success</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <p class="empty-sub">Green = best, red = worst. Success is colored on a fixed 0–100% scale; Pts/sec and Time are relative to your other missions.</p>
+    <p class="empty-sub">Green = best, red = worst. Success is colored on a fixed 0–100% scale${showTime ? "; Pts/sec and Time are relative to your other missions" : ""}.</p>
   `;
-  bindAnalysisDateFilterEvents();
+  bindTop();
 }
 
 // ---- Scoresheet-style CSV export ----
@@ -5133,12 +5251,14 @@ async function writeOneScoreDataSheet(spreadsheetId, sheetId, title, rowDefs, ru
   // extended through the bonus rows so their points count toward the total.
   const headerFormulas = Array.from({ length: RUNS_PER_SHEET }, (_, i) => {
     const col = firstFlagCol + i;
-    return [{ userEnteredValue: { formulaValue: `=SUMPRODUCT($${colLetter(ptsCol)}2:$${colLetter(ptsCol)}${lastDataRow},${colLetter(col)}2:${colLetter(col)}${lastDataRow})` } }];
+    const run = runsChunk[i];
+    // The note names the run ("Nov. 13 #3") so each total cell says which run it is.
+    return [{ userEnteredValue: { formulaValue: `=SUMPRODUCT($${colLetter(ptsCol)}2:$${colLetter(ptsCol)}${lastDataRow},${colLetter(col)}2:${colLetter(col)}${lastDataRow})` }, note: run ? runDisplayLabel(run) : "" }];
   });
   await sheetsBatchUpdate(spreadsheetId, headerFormulas.map((cellData, i) => ({
     updateCells: {
       rows: [{ values: cellData }],
-      fields: "userEnteredValue",
+      fields: "userEnteredValue,note",
       start: { sheetId, rowIndex: 0, columnIndex: firstFlagCol - 1 + i },
     },
   })));
@@ -5315,11 +5435,12 @@ async function writeScoreDataSheet(spreadsheetId) {
 async function writeAnalysisSheet(spreadsheetId, sheetId) {
   const completed = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   const rowDefs = buildScoreRowDefs();
-  const trendRows = completed.map((r) => [r.label, runTotal(r, state.missions)]);
+  const trendRows = completed.map((r) => [runDisplayLabel(r), runOfficialTotal(r)]);
+  const trendMaxY = Math.max(100, Math.ceil(Math.max(0, ...trendRows.map((row) => row[1])) / 100) * 100);
   const successRows = completed.map((r) => {
     const total = rowDefs.length;
     const flagged = rowDefs.filter((row) => row.flagged(r)).length;
-    return [r.label, total ? flagged / total : ""];
+    return [runDisplayLabel(r), total ? flagged / total : ""];
   });
   const missionData = computeMissionAnalytics(completed).sort((a, b) => a.order - b.order);
   const missionRows = missionData.map((d) => [
@@ -5355,7 +5476,7 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
   const trendHeaderRow = CHARTS_ROWS_RESERVED;
   const trendDataStart = trendHeaderRow + 1;
   const trendDataEnd = trendDataStart + trendRows.length;
-  await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A${trendHeaderRow + 1}`, [["Run", "Score"], ...trendRows]);
+  await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A${trendHeaderRow + 1}`, [["Run", "Official Score"], ...trendRows]);
 
   const successHeaderRow = trendDataEnd + 2;
   const successDataStart = successHeaderRow + 1;
@@ -5383,7 +5504,7 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
   const CHART_WIDTH = 360, CHART_HEIGHT = 250, CHART_GAP_COLS = 5;
 
   const charts = [
-    { title: "Score Trend", axisTitle: "Score", dataStart: trendDataStart, dataEnd: trendDataEnd, col: 0, domainTitle: "Run" },
+    { title: "Score Trend", axisTitle: "Official Score", dataStart: trendDataStart, dataEnd: trendDataEnd, col: 0, domainTitle: "Run", yMax: trendMaxY },
     { title: "Success Rate", axisTitle: "Success Rate", dataStart: successDataStart, dataEnd: successDataEnd, col: CHART_GAP_COLS, domainTitle: "Run", chartType: "COLUMN" },
     { title: "Points/Sec by Mission", axisTitle: "Points/Sec", dataStart: missionDataStart, dataEnd: missionDataEnd, col: CHART_GAP_COLS * 2, domainTitle: "Mission", chartType: "COLUMN" },
   ];
@@ -5393,7 +5514,8 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
       basicChart: {
         chartType: c.chartType || "LINE",
         legendPosition: "NO_LEGEND",
-        axis: [{ position: "BOTTOM_AXIS", title: c.domainTitle }, { position: "LEFT_AXIS", title: c.axisTitle }],
+        // Score Trend's axis runs 0 to the next multiple of 100, matching the in-app chart's 100-point gridlines.
+        axis: [{ position: "BOTTOM_AXIS", title: c.domainTitle }, { position: "LEFT_AXIS", title: c.axisTitle, ...(c.yMax ? { viewWindowOptions: { viewWindowMode: "EXPLICIT", viewWindowMin: 0, viewWindowMax: c.yMax } } : {}) }],
         domains: [{ domain: { sourceRange: { sources: [{ sheetId, startRowIndex: c.dataStart, endRowIndex: c.dataEnd, startColumnIndex: 0, endColumnIndex: 1 }] } } }],
         series: [{ series: { sourceRange: { sources: [{ sheetId, startRowIndex: c.dataStart, endRowIndex: c.dataEnd, startColumnIndex: 1, endColumnIndex: 2 }] } } }],
       },

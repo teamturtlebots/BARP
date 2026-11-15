@@ -870,12 +870,12 @@ input[type="checkbox"].switch:checked { background: var(--moss); }
 input[type="checkbox"].switch:checked::after { transform: translateX(18px); }
 
 /* --- Interactive scoring: one long scrolling page of Runs → Missions → Tasks --- */
-.isc-body { padding: 0 92px 40vh 14px; scroll-behavior: auto; } /* right gutter clears the side widget; bottom space lets the last task scroll to center */
+.isc-body { padding: 0 96px 40vh 14px; scroll-behavior: auto; } /* right gutter clears the side widget (with a small gap); bottom space lets the last task scroll to center */
 .isc-run { margin-bottom: 10px; }
 .isc-run-head {
   position: sticky; top: 0; z-index: 2;
   display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
-  margin: 0 -92px 10px -14px; padding: 12px 92px 8px 14px;
+  margin: 0 -96px 10px -14px; padding: 12px 96px 8px 14px;
   background: var(--paper); border-bottom: 2px solid var(--amber);
   font-family: var(--display); font-size: 1.05rem; font-weight: 700; color: var(--ink-deep);
 }
@@ -934,3 +934,21 @@ input[type="checkbox"].switch:checked::after { transform: translateX(18px); }
 @media (max-width: 420px) {
   .cutoff-controls .gfs-num-btn { min-width: 40px; }
 }
+
+/* Floating side widget sits closer to the right edge, leaving a clear gap
+   between it and the scoring cards (which keep a 96px right gutter). */
+.side-widget { right: calc(6px + env(safe-area-inset-right)); }
+
+/* End button: red so it stands out (darker red once the header itself turns red at 0:00) */
+.gfs-end-btn { background: var(--coral); border-color: var(--coral); color: #fff; }
+.gfs-header.header-danger .gfs-end-btn { background: #8E2F22; border-color: rgba(255,255,255,0.5); }
+
+/* --- Score Trend chart: fixed y-axis + sideways-scrolling, pinch-zoomable plot --- */
+.trend-chart { display: flex; align-items: stretch; }
+.trend-yaxis { flex: none; display: block; }
+.trend-scroll { flex: 1; min-width: 0; overflow-x: hidden; overflow-y: hidden; position: relative; }
+.trend-scroll.is-scrollable { overflow-x: auto; touch-action: pan-x pan-y; -webkit-overflow-scrolling: touch; }
+.trend-plot { position: relative; }
+.trend-zoom-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.trend-zoom-row .btn { min-width: 40px; font-size: 1.1rem; font-weight: 700; }
+.trend-zoom-row .empty-sub { margin: 0; }
