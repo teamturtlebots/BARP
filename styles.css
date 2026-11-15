@@ -868,3 +868,69 @@ input[type="checkbox"].switch::after {
 }
 input[type="checkbox"].switch:checked { background: var(--moss); }
 input[type="checkbox"].switch:checked::after { transform: translateX(18px); }
+
+/* --- Interactive scoring: one long scrolling page of Runs → Missions → Tasks --- */
+.isc-body { padding: 0 92px 40vh 14px; scroll-behavior: auto; } /* right gutter clears the side widget; bottom space lets the last task scroll to center */
+.isc-run { margin-bottom: 10px; }
+.isc-run-head {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  margin: 0 -92px 10px -14px; padding: 12px 92px 8px 14px;
+  background: var(--paper); border-bottom: 2px solid var(--amber);
+  font-family: var(--display); font-size: 1.05rem; font-weight: 700; color: var(--ink-deep);
+}
+.isc-run:not(.is-current-run) .isc-run-head { color: var(--text-soft); }
+.isc-mission { margin: 0 0 18px; }
+.isc-mission-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  margin: 0 0 6px 2px;
+}
+.isc-mission-name { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: var(--ink-deep); }
+.isc-mission.is-done .isc-mission-name { color: var(--moss); }
+.isc-task-list { display: flex; flex-direction: column; gap: 8px; padding-left: 10px; border-left: 3px solid var(--line); }
+.isc-mission.is-done .isc-task-list { border-left-color: var(--moss-light); }
+.isc-task {
+  background: var(--paper-2); border: 1.5px solid var(--line); border-radius: 12px;
+  padding: 12px; scroll-margin: 70px 0;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.isc-task.is-answered { background: var(--paper); }
+.isc-task.is-latest, .isc-trip.is-latest { border-color: var(--amber); box-shadow: 0 0 0 3px rgba(217,164,65,0.35); }
+.isc-task-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.isc-task-name { font-weight: 600; font-size: 1rem; }
+.isc-bool { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.isc-strip { display: flex; flex-wrap: wrap; gap: 8px; }
+.isc-btn {
+  min-height: 52px; padding: 10px 14px; border-radius: 10px;
+  border: 1.5px solid var(--line); background: var(--paper);
+  font-family: var(--body); font-size: 0.98rem; font-weight: 600; color: var(--text); cursor: pointer;
+}
+.isc-btn:active { transform: scale(0.97); }
+.isc-btn-num { min-width: 52px; font-family: var(--mono); font-size: 1.15rem; }
+.isc-btn-yes { border-color: var(--moss); color: var(--moss); }
+.isc-btn-no { border-color: var(--coral); color: var(--coral); }
+.isc-btn.active { background: var(--moss); border-color: var(--moss); color: var(--paper); }
+.isc-btn-no.active { background: var(--coral); border-color: var(--coral); color: #fff; }
+.isc-btn.active-zero { background: var(--paper-3); border-color: var(--text-soft); color: var(--text); }
+.isc-trip {
+  margin: 4px 0 22px; border-radius: 12px; border: 1.5px solid transparent; padding: 2px;
+  scroll-margin: 70px 0;
+}
+.isc-trip .btn:disabled { opacity: 0.35; cursor: default; }
+.isc-trip.is-done {
+  padding: 10px 14px; border-color: var(--line); background: var(--paper-2);
+  font-weight: 600; color: var(--moss); font-size: 0.92rem;
+}
+.isc-trip-hint { margin: 8px 2px 0; }
+.side-widget-jump { width: 68px; font-size: 1.6rem; font-weight: 700; background: var(--amber); color: var(--ink-deep); }
+
+/* --- Official time cutoff control (Final Overview + saved-run editor) --- */
+.cutoff-controls { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+.cutoff-controls .gfs-num-btn { min-width: 46px; padding: 0 6px; font-size: 0.82rem; flex: none; }
+.cutoff-range { flex: 1; min-width: 0; accent-color: var(--moss); }
+.cutoff-val { font-family: var(--mono); color: var(--moss); }
+.cutoff-hint { margin: 6px 0 0; }
+.gfs-choice-btn:disabled { opacity: 0.4; cursor: default; }
+@media (max-width: 420px) {
+  .cutoff-controls .gfs-num-btn { min-width: 40px; }
+}

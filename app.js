@@ -149,8 +149,9 @@ const state = {
   editingAllOrder: false,
   countEquipmentInspection: true, // whether new game runs get the +20 Equipment Inspection bonus
   interactiveScoringEnabled: true,
+  trackRobotTrips: true, // Robot returned / Robot leaves buttons + per-mission timing in interactive scoring
   interactiveIterationsEnabled: false,
-  guidedRun: null, // { run, legIdx, missionIdxInLeg, taskIdx, matchStartTs, ... }
+  guidedRun: null, // { run, legs, legIdx, phase, matchStartTs, ... }
 };
 
 // ---------- Visible error reporting ----------
@@ -421,13 +422,115 @@ function runTotal(run, missions) {
     + (run.equipmentInspectionPassed ? EQUIPMENT_INSPECTION_BONUS : 0)
     + mission10Bonus(run);
 }
-// The score exactly as it stood the instant time ran out — captured once in
-// handleTimeExpired() and never touched again, even though scoring keeps
-// going past the buzzer until End is tapped. Returns null when time never
-// ran out (the run was ended early), so the final score *is* the timed one.
+// ---- Score log + adjustable "official" cutoff ----
+// Every score change made while the match clock is running is logged as
+// { ms (since the match started), k (which value), v (its new value) }, on
+// top of run.scoreLogBase (how everything started). Replaying that log up to
+// any point rebuilds the score exactly as it stood then — which is what lets
+// the 2:30 cutoff be moved after the fact (e.g. the app's clock was started a
+// few seconds late, so the real buzzer went off at 2:26 on it). Edits made
+// after the clock stopped (in the overview / breakdown) aren't logged: they
+// only change the final score, same as before.
+function flattenScoreState(s) {
+  const flat = {
+    tokens: s.precisionTokensRemaining ?? 0,
+    inspection: !!s.equipmentInspectionPassed,
+    spider: !!s.mission10SpiderDown,
+    snail: !!s.mission10SnailDown,
+  };
+  Object.entries(s.rawScores || {}).forEach(([id, v]) => { flat["t:" + id] = v ?? null; });
+  return flat;
+}
+function unflattenScoreState(flat) {
+  const rawScores = {};
+  Object.entries(flat).forEach(([k, v]) => { if (k.startsWith("t:")) rawScores[k.slice(2)] = v; });
+  return {
+    rawScores,
+    precisionTokensRemaining: flat.tokens,
+    equipmentInspectionPassed: flat.inspection,
+    mission10SpiderDown: flat.spider,
+    mission10SnailDown: flat.snail,
+  };
+}
+// Appends whatever changed since the last call to the live run's score log.
+// Called right before every save during a guided run.
+function recordScoreChanges() {
+  const gr = state.guidedRun;
+  if (!gr || !Array.isArray(gr.run.scoreLog) || gr.run.finishedAt) return;
+  const now = flattenScoreState(gr.run);
+  const prev = gr.loggedFlat || {};
+  const ms = Date.now() - gr.matchStartTs;
+  Object.keys(now).forEach((k) => { if (prev[k] !== now[k]) gr.run.scoreLog.push({ ms, k, v: now[k] }); });
+  gr.loggedFlat = now;
+}
+function runTimedCutoffMs(run) { return run.timedCutoffMs ?? MATCH_LENGTH_MS; }
+function runHasAdjustableCutoff(run) { return Array.isArray(run.scoreLog) && !!run.scoreLogBase; }
+// The score state at the official cutoff, or null when the clock never got
+// past it (the run ended before then, so the final score *is* the timed one).
+function runTimedState(run) {
+  if (runHasAdjustableCutoff(run)) {
+    const cutoff = runTimedCutoffMs(run);
+    const elapsed = run.finishedAt ? (run.totalTimeMs ?? 0) : (Date.now() - (run.startedAt || 0));
+    if (elapsed <= cutoff) return null;
+    const flat = { ...run.scoreLogBase };
+    run.scoreLog.forEach((e) => { if (e.ms <= cutoff) flat[e.k] = e.v; });
+    return unflattenScoreState(flat);
+  }
+  // Runs saved before the score log existed: the one snapshot taken the
+  // instant the buzzer went off (see handleTimeExpired).
+  return run.timedSnapshot || null;
+}
 function runTimedTotal(run, missions) {
-  if (!run.timedSnapshot) return null;
-  return runTotal(run.timedSnapshot, missions);
+  const timedState = runTimedState(run);
+  return timedState ? runTotal(timedState, missions) : null;
+}
+// Shared "Official time cutoff" control for the Final Overview and the
+// saved-run breakdown editor. Pair with bindTimedCutoffControl().
+function timedCutoffControlHTML(run) {
+  if (!runHasAdjustableCutoff(run)) {
+    return `<div class="gfs-section"><h3>Official time cutoff</h3>
+      <p class="empty-sub">Moving the 2:30 mark isn't available for game runs recorded before this feature was added.</p></div>`;
+  }
+  const cutoff = runTimedCutoffMs(run);
+  const max = Math.max(MATCH_LENGTH_MS, Math.ceil((run.totalTimeMs || 0) / 1000) * 1000);
+  return `<div class="gfs-section cutoff-section">
+    <h3>Official time cutoff</h3>
+    <div class="gfs-task-row gfs-task-row-wrap">
+      <span class="gfs-task-name">Score counts up to <span class="cutoff-val">${fmtDuration(cutoff)}</span> <span class="gfs-task-pts cutoff-summary">${cutoffSummaryText(run)}</span></span>
+      <p class="empty-sub cutoff-hint">If the clock here started late or early, move this to where the real 2:30 buzzer was. Anything scored after it only counts toward the final score.</p>
+      <div class="cutoff-controls">
+        <button type="button" class="gfs-num-btn cutoff-step" data-step="-5000">&minus;5s</button>
+        <button type="button" class="gfs-num-btn cutoff-step" data-step="-1000">&minus;1s</button>
+        <input type="range" class="cutoff-range" min="0" max="${max}" step="1000" value="${cutoff}" aria-label="Official time cutoff">
+        <button type="button" class="gfs-num-btn cutoff-step" data-step="1000">+1s</button>
+        <button type="button" class="gfs-num-btn cutoff-step" data-step="5000">+5s</button>
+      </div>
+      <div class="gfs-choice-strip"><button type="button" class="gfs-choice-btn cutoff-reset"${cutoff === MATCH_LENGTH_MS ? " disabled" : ""}>Reset to ${fmtDuration(MATCH_LENGTH_MS)}</button></div>
+    </div>
+  </div>`;
+}
+function cutoffSummaryText(run) {
+  const timed = runTimedTotal(run, state.missions);
+  return timed == null ? "· run ended before this, so the whole run counts" : `· ${timed} pts at the cutoff`;
+}
+function bindTimedCutoffControl(scopeSelector, run, onChange) {
+  const scope = document.querySelector(`${scopeSelector} .cutoff-section`);
+  if (!scope) return;
+  const range = scope.querySelector(".cutoff-range");
+  const apply = (ms) => {
+    const v = Math.max(0, Math.min(Number(range.max), Math.round(ms / 1000) * 1000));
+    if (v === MATCH_LENGTH_MS) delete run.timedCutoffMs; else run.timedCutoffMs = v;
+    range.value = v;
+    scope.querySelector(".cutoff-val").textContent = fmtDuration(v);
+    scope.querySelector(".cutoff-summary").textContent = cutoffSummaryText(run);
+    scope.querySelector(".cutoff-reset").disabled = v === MATCH_LENGTH_MS;
+    onChange();
+  };
+  range.addEventListener("input", () => apply(Number(range.value)));
+  scope.querySelectorAll(".cutoff-step").forEach((btn) => {
+    btn.addEventListener("click", () => apply(runTimedCutoffMs(run) + Number(btn.dataset.step)));
+  });
+  scope.querySelector(".cutoff-reset").addEventListener("click", () => apply(MATCH_LENGTH_MS));
 }
 // Renders "<timed> timed · <final> final" when time ran out mid-run,
 // otherwise just the plain total —
@@ -2686,7 +2789,7 @@ function playSoundAndWait(key, fallbackMs) {
 // gets knocked down mid-run to gray it out and drop the flat Mission 10
 // bonus. Mission 10 is never assigned to a Run's mission list, so this is
 // the only place its state lives.
-function precisionTokenWidgetHTML() {
+function precisionTokenWidgetHTML(withJump = false) {
   const run = state.guidedRun?.run;
   const remaining = run?.precisionTokensRemaining ?? 0;
   const spiderDown = !!run?.mission10SpiderDown;
@@ -2707,6 +2810,7 @@ function precisionTokenWidgetHTML() {
       <button type="button" class="side-widget-btn side-widget-critter${snailDown ? " is-down" : ""}" id="grn-m10-snail" title="Mission 10: snail knocked down">
         <span class="side-widget-icon">&#128012;</span>
       </button>
+      ${withJump ? `<button type="button" class="side-widget-btn side-widget-jump" id="grn-jump" title="Jump to the latest task">&#8595;</button>` : ""}
     </div>
   `;
 }
@@ -2726,6 +2830,7 @@ async function toggleMission10Object(which) {
   if (!run) return;
   const key = `mission10${which}Down`;
   run[key] = !run[key];
+  recordScoreChanges();
   await dbPut("runs", run);
   const btn = document.getElementById(`grn-m10-${which.toLowerCase()}`);
   if (btn) btn.classList.toggle("is-down", !!run[key]);
@@ -2748,6 +2853,7 @@ async function adjustPrecisionTokens(delta) {
   if (minus) minus.disabled = next <= 0;
   if (plus) plus.disabled = next >= PRECISION_TOKENS_START;
   refreshLiveScore();
+  recordScoreChanges();
   await dbPut("runs", run);
 }
 
@@ -2841,26 +2947,31 @@ async function actuallyStartRun() {
     // Freezes today's Run group/mission/task order onto this run, so
     // reordering any of them later doesn't reshuffle how this run displays.
     orderSnapshot: captureOrderSnapshot(),
+    // Whether Robot returned / Robot leaves were tracked for this run (only
+    // ever in interactive mode). Off means only total time + the 2:30 mark.
+    tripTracking: state.interactiveScoringEnabled && state.trackRobotTrips,
+    scoreLog: [],
   };
+  run.scoreLogBase = flattenScoreState(run);
   await dbPut("runs", run);
-  // Skip to the first leg that actually has missions with tasks.
-  let legIdx = 0;
-  while (legIdx < state.runGroups.length && !getLegMissions(state.runGroups[legIdx]).some((m) => visibleTasks(m).length)) legIdx++;
   state.guidedRun = {
     run,
-    legIdx,
-    missionIdxInLeg: 0,
-    taskIdx: 0,
+    // Only Runs that actually have missions with tasks are part of the flow.
+    legs: state.runGroups.filter((g) => getLegMissions(g).some((m) => visibleTasks(m).length)),
+    legIdx: 0, // the Run the robot is currently out on (or about to leave for)
+    phase: "out", // "out" = robot on the table; "transition" = back at base, waiting to leave
     matchStartTs: now,
     missionStartTs: now,
+    loggedFlat: { ...run.scoreLogBase },
     played30: false,
     playedBuzzer: false,
     timeExpired: false,
   };
-  // Interactive mode walks through missions one task at a time; non-interactive
-  // goes straight to the (fully editable) overview with a live timer running
-  // on it — basically a plain scoresheet with a clock, fill it in as you go.
-  if (state.interactiveScoringEnabled) renderCurrentTaskScreen();
+  // Interactive mode is one long scrolling page of every task that
+  // auto-scrolls as you go; non-interactive goes straight to the (fully
+  // editable) overview with a live timer running on it — basically a plain
+  // scoresheet with a clock, fill it in as you go.
+  if (state.interactiveScoringEnabled) renderInteractiveScoringPage();
   else renderGuidedOverview();
   state.guidedRun.timerHandle = setInterval(tickGuidedTimer, 100);
   // Scheduled precisely against the match clock (not the poll interval) so
@@ -2907,23 +3018,11 @@ function handleTimeExpired() {
   const header = document.querySelector(".gfs-header");
   if (header) header.classList.add("header-danger");
 
-  // Snapshot exactly where things stood the instant time ran out — used by
-  // the Timing tab to draw a marker at this point in the run. Only
-  // meaningful in interactive mode, where missionIdxInLeg/missionStartTs
-  // actually track a mission in progress; the free-form overview mode
-  // never advances them, and never records missionTimings at all.
-  if (state.interactiveScoringEnabled) {
-    const leg = state.runGroups[gr.legIdx];
-    const legMissions = leg ? getLegMissions(leg) : [];
-    const currentMission = legMissions[gr.missionIdxInLeg];
-    gr.run.timeExpiredAt = Date.now();
-    gr.run.timeExpiredMissionId = currentMission ? currentMission.id : null;
-    gr.run.timeExpiredMissionElapsedMs = Date.now() - gr.missionStartTs;
-  }
+  gr.run.timeExpiredAt = Date.now();
 
-  // Freeze the score exactly as it stood when time ran out as the "Timed"
-  // score. Scoring keeps going after this (that becomes the "Final" score)
-  // until the user taps End, but the timed one never changes again.
+  // Freeze the score exactly as it stood when time ran out. New runs work
+  // the timed score out from the score log instead (so the cutoff can be
+  // moved later), but this is kept as a fallback copy.
   gr.run.timedSnapshot = {
     rawScores: JSON.parse(JSON.stringify(gr.run.rawScores || {})),
     precisionTokensRemaining: gr.run.precisionTokensRemaining,
@@ -2981,7 +3080,7 @@ function gfsHeaderTopHTML(badgeText, showBack, backEnabled) {
   return `<div class="gfs-header-top">
     ${cancelGuidedRunLink()}
     ${showBack ? `<button type="button" class="gfs-back-btn" id="grn-back" ${backEnabled ? "" : "disabled"}>&#8592;</button>` : ""}
-    <div class="guided-phase-badge">${badgeText}</div>
+    <div class="guided-phase-badge" id="grn-badge">${badgeText}</div>
     ${showEnd ? `<button type="button" class="gfs-end-btn" id="grn-end" title="End this game run now">&#127937; End</button>` : ""}
   </div>`;
 }
@@ -3005,16 +3104,18 @@ function wireCancelLink() {
 async function endGuidedRunEarly() {
   const gr = state.guidedRun;
   if (!gr || gr.run.finishedAt) return;
+  // The clock stops the instant End is tapped — not when the prompt below is
+  // confirmed — so time spent reading it never gets counted.
+  const now = Date.now();
   if (!confirm("End this game run now? The clock stops and you'll go to the final overview to review and save.")) return;
   if (state.guidedRun !== gr || gr.run.finishedAt) return;
   stopGuidedTimer();
-  const now = Date.now();
   const { run } = gr;
   // If we were partway through a mission, keep how long it had taken so far.
-  if (gr.screen === "task") {
-    const leg = state.runGroups[gr.legIdx];
-    const mission = leg ? getLegMissions(leg)[gr.missionIdxInLeg] : null;
-    if (mission && !run.missionTimings.some((t) => t.missionId === mission.id)) {
+  if (gr.screen === "task" && run.tripTracking && gr.phase === "out") {
+    const leg = gr.legs[gr.legIdx];
+    const mission = leg ? scoreableLegMissions(leg).find((m) => !run.missionTimings.some((t) => t.missionId === m.id)) : null;
+    if (mission) {
       run.missionTimings.push({ missionId: mission.id, missionName: mission.name, runGroupId: leg.id, runGroupName: leg.name, startTs: gr.missionStartTs, endTs: now, durationMs: now - gr.missionStartTs, endedEarly: true });
     }
   }
@@ -3068,192 +3169,261 @@ function taskRowHTML(t, raw) {
   </div>`;
 }
 
-// ---- One task at a time, tap-to-advance, with a back arrow. Auto-advances
-// through every mission in the current run before asking for "Robot returned". ----
-function renderCurrentTaskScreen() {
-  const { run, legIdx, missionIdxInLeg, taskIdx } = state.guidedRun;
-  const leg = state.runGroups[legIdx];
-  const legMissions = getLegMissions(leg);
-  const mission = legMissions[missionIdxInLeg];
-  const tasks = visibleTasks(mission);
-  if (taskIdx >= tasks.length) {
-    finishCurrentMission(leg, legMissions);
-    return;
-  }
-  const task = tasks[taskIdx];
-  const raw = run.rawScores;
-  state.guidedRun.screen = "task";
-  let controlHTML;
-  if (task.type === "bool") {
-    controlHTML = `
-      <button type="button" class="gfs-big-choice gfs-big-complete" id="gfs-mark-complete">Complete</button>
-      <button type="button" class="gfs-big-choice gfs-big-incomplete" id="gfs-mark-incomplete">Incomplete</button>
-    `;
-  } else if (task.type === "number") {
-    const val = raw[task.id] ?? 0;
-    controlHTML = `<div class="gfs-num-strip gfs-num-strip-big">${Array.from({ length: (task.max || 0) + 1 }, (_, i) =>
-      `<button type="button" class="gfs-num-btn gfs-num-btn-big${val === i ? (i === 0 ? " active-zero" : " active") : ""}" data-val="${i}">${i}</button>`
+// ---- Interactive scoring: one long scrolling page ----
+// Every Run → Mission → Task is laid out on a single page. Scoring a task
+// auto-scrolls to the next one, so it flows just like a step-by-step prompt,
+// but you can scroll back up to fix something or down to skip ahead at any
+// point. The ↓ button on the side widget jumps back to the latest task.
+//
+// With robot-trip tracking on (Settings → App Settings), each Run ends in a
+// "Robot returned" button and the next one starts with "Robot leaves",
+// timing every mission and transition like before. With it off, those are
+// gone and only the total time (and the 2:30 mark) is tracked.
+function scoreableLegMissions(leg) { return getLegMissions(leg).filter((m) => visibleTasks(m).length); }
+// "Answered" = any value at all was tapped, even Incomplete / 0 / Not achieved.
+function isTaskAnswered(t, raw) { return Object.prototype.hasOwnProperty.call(raw, t.id); }
+function iscFlatTasks() {
+  const out = [];
+  state.guidedRun.legs.forEach((leg, legIdx) => scoreableLegMissions(leg).forEach((mission) =>
+    visibleTasks(mission).forEach((task) => out.push({ legIdx, mission, task }))));
+  return out;
+}
+// Whether Run `i`'s trip is over (robot back at base) under trip tracking.
+function iscLegIsOver(i) {
+  const gr = state.guidedRun;
+  return i < gr.legIdx || (i === gr.legIdx && gr.phase === "transition");
+}
+// Where "latest" is: the first unscored task after the furthest one scored
+// so far (within the Run the robot is out on, when trips are tracked). Once
+// everything there is scored, it's the Robot returned / Finish button.
+function iscLatestTargetId() {
+  const gr = state.guidedRun;
+  const raw = gr.run.rawScores;
+  const tracking = gr.run.tripTracking;
+  if (tracking && gr.phase === "transition") return `isc-leave-${gr.legIdx + 1}`;
+  const scope = iscFlatTasks().filter((x) => !tracking || x.legIdx === gr.legIdx);
+  let lastAnswered = -1;
+  scope.forEach((x, i) => { if (isTaskAnswered(x.task, raw)) lastAnswered = i; });
+  const next = scope.slice(lastAnswered + 1).find((x) => !isTaskAnswered(x.task, raw));
+  if (next) return `isc-task-${next.task.id}`;
+  return tracking ? `isc-return-${gr.legIdx}` : "isc-finish";
+}
+// Where to auto-scroll after scoring `taskId`: the next unscored task after
+// it (in the same Run, when trips are tracked). Fixing something in a Run
+// that's already over sends you back to wherever things are now.
+function iscNextTargetIdAfter(taskId) {
+  const gr = state.guidedRun;
+  const raw = gr.run.rawScores;
+  const tracking = gr.run.tripTracking;
+  const flat = iscFlatTasks();
+  const idx = flat.findIndex((x) => x.task.id === taskId);
+  const here = flat[idx];
+  if (!here) return iscLatestTargetId();
+  if (tracking && iscLegIsOver(here.legIdx)) return iscLatestTargetId();
+  const next = flat.slice(idx + 1).find((x) => (!tracking || x.legIdx === here.legIdx) && !isTaskAnswered(x.task, raw));
+  if (next) return `isc-task-${next.task.id}`;
+  if (!tracking) return "isc-finish";
+  return here.legIdx === gr.legIdx ? `isc-return-${gr.legIdx}` : iscLatestTargetId();
+}
+function iscScrollTo(id, smooth = true) {
+  const el = document.getElementById(id);
+  if (el) el.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "center" });
+}
+function iscBadgeText() {
+  const gr = state.guidedRun;
+  if (!gr.run.tripTracking) return "Scoring";
+  if (gr.phase === "transition") return `Transition → ${runGroupDisplayName(gr.legs[gr.legIdx + 1])}`;
+  return runGroupDisplayName(gr.legs[gr.legIdx]);
+}
+
+function iscTaskCardHTML(t, raw) {
+  const answered = isTaskAnswered(t, raw);
+  const max = taskMaxPoints(t);
+  const v = raw[t.id];
+  let controls;
+  if (t.type === "bool") {
+    controls = `<div class="isc-bool">
+      <button type="button" class="isc-btn isc-btn-yes${answered && v ? " active" : ""}" data-tid="${t.id}" data-val="yes">Complete</button>
+      <button type="button" class="isc-btn isc-btn-no${answered && !v ? " active" : ""}" data-tid="${t.id}" data-val="no">Incomplete</button>
+    </div>`;
+  } else if (t.type === "number") {
+    controls = `<div class="isc-strip">${Array.from({ length: (t.max || 0) + 1 }, (_, i) =>
+      `<button type="button" class="isc-btn isc-btn-num${answered && Number(v) === i ? (i === 0 ? " active-zero" : " active") : ""}" data-tid="${t.id}" data-val="${i}">${i}</button>`
     ).join("")}</div>`;
   } else {
-    const cur = raw[task.id] ?? "";
-    controlHTML = `<div class="gfs-choice-strip gfs-choice-strip-big">
-      <button type="button" class="gfs-choice-btn gfs-choice-btn-big${cur === "" ? " active-zero" : ""}" data-val="">Not achieved</button>
-      ${(task.options || []).map((o, i) => `<button type="button" class="gfs-choice-btn gfs-choice-btn-big${String(cur) === String(i) ? " active" : ""}" data-val="${i}">${esc(o.label)}</button>`).join("")}
+    const none = answered && (v === null || v === "");
+    controls = `<div class="isc-strip">
+      <button type="button" class="isc-btn${none ? " active-zero" : ""}" data-tid="${t.id}" data-val="">Not achieved</button>
+      ${(t.options || []).map((o, i) => `<button type="button" class="isc-btn${answered && !none && String(v) === String(i) ? " active" : ""}" data-tid="${t.id}" data-val="${i}">${esc(o.label)}</button>`).join("")}
     </div>`;
   }
-
-  const canGoBack = taskIdx > 0 || missionIdxInLeg > 0;
+  return `<div class="isc-task${answered ? " is-answered" : ""}" id="isc-task-${t.id}" data-type="${t.type}">
+    <div class="isc-task-head">
+      <span class="isc-task-name">${esc(t.name)}</span>
+      <span class="gfs-task-pts">${answered ? pointsFromRawTask(t, v) : "&ndash;"} / ${max}</span>
+    </div>
+    ${controls}
+  </div>`;
+}
+function iscReturnBlockHTML(i) {
+  const gr = state.guidedRun;
+  const leg = gr.legs[i];
+  const isLast = i === gr.legs.length - 1;
+  if (iscLegIsOver(i)) {
+    const at = gr.tripTimes[`return-${i}`];
+    return `<div class="isc-trip is-done" id="isc-return-${i}">&#10003; Robot returned${at != null ? ` <span class="gfs-task-pts">at ${fmtDuration(at)}</span>` : ""}</div>`;
+  }
+  const active = i === gr.legIdx && gr.phase === "out";
+  const unscored = scoreableLegMissions(leg).reduce((n, m) => n + visibleTasks(m).filter((t) => !isTaskAnswered(t, gr.run.rawScores)).length, 0);
+  const hint = active && unscored ? `<p class="empty-sub isc-trip-hint">${unscored} task${unscored === 1 ? "" : "s"} in this run not scored yet &mdash; you can still scroll back and fix them later.</p>` : "";
+  return `<div class="isc-trip" id="isc-return-${i}">
+    <button type="button" class="btn btn-primary btn-full gfs-big-action" data-act="return" ${active ? "" : "disabled"}>${isLast ? "Robot returned &mdash; finish game run" : "Robot returned"}</button>
+    ${hint}
+  </div>`;
+}
+function iscLeaveBlockHTML(i) {
+  const gr = state.guidedRun;
+  const leg = gr.legs[i];
+  if (i <= gr.legIdx) {
+    const t = (gr.run.transitionTimings || []).find((x) => x.beforeRunGroupId === leg.id);
+    return `<div class="isc-trip is-done" id="isc-leave-${i}">&#10003; Robot left${t ? ` <span class="gfs-task-pts">operation time ${fmtDuration(t.durationMs)}</span>` : ""}</div>`;
+  }
+  const active = i === gr.legIdx + 1 && gr.phase === "transition";
+  return `<div class="isc-trip" id="isc-leave-${i}">
+    <button type="button" class="btn btn-amber btn-full gfs-big-action" data-act="leave" ${active ? "" : "disabled"}>Robot leaves for ${esc(runGroupDisplayName(leg))}</button>
+  </div>`;
+}
+function renderIscBody() {
+  const gr = state.guidedRun;
+  const body = document.getElementById("isc-body");
+  if (!gr || !body) return;
+  const { run } = gr;
+  const raw = run.rawScores;
+  const tracking = run.tripTracking;
+  const html = gr.legs.map((leg, i) => {
+    const missions = scoreableLegMissions(leg);
+    const legScore = missions.reduce((s, m) => s + missionScoreForRun(m, run), 0);
+    const legMax = missions.reduce((s, m) => s + missionMaxPoints(m), 0);
+    const missionsHTML = missions.map((m) => {
+      const tasks = visibleTasks(m);
+      const allDone = tasks.every((t) => isTaskAnswered(t, raw));
+      const timing = (run.missionTimings || []).find((t) => t.missionId === m.id);
+      return `<div class="isc-mission${allDone ? " is-done" : ""}">
+        <div class="isc-mission-head">
+          <span class="isc-mission-name">${allDone ? "&#10003; " : ""}${esc(m.name)}</span>
+          <span class="gfs-task-pts">${missionScoreForRun(m, run)} / ${missionMaxPoints(m)}${timing ? ` &middot; ${fmtDuration(timing.durationMs)}` : ""}</span>
+        </div>
+        <div class="isc-task-list">${tasks.map((t) => iscTaskCardHTML(t, raw)).join("")}</div>
+      </div>`;
+    }).join("");
+    const isCurrent = tracking && i === gr.legIdx && gr.phase === "out";
+    return `<section class="isc-run${isCurrent ? " is-current-run" : ""}">
+      <h3 class="isc-run-head"><span>${esc(runGroupDisplayName(leg))}</span><span class="gfs-task-pts">${legScore} / ${legMax}</span></h3>
+      ${tracking && i > 0 ? iscLeaveBlockHTML(i) : ""}
+      ${missionsHTML}
+      ${tracking ? iscReturnBlockHTML(i) : ""}
+    </section>`;
+  }).join("") + (tracking ? "" : `<div class="isc-trip" id="isc-finish">
+      <button type="button" class="btn btn-primary btn-full gfs-big-action" data-act="finish">&#127937; Finish game run</button>
+      <p class="empty-sub isc-trip-hint">Stops the clock and goes to the final overview.</p>
+    </div>`);
+  const scrollTop = body.scrollTop;
+  body.innerHTML = html;
+  body.scrollTop = scrollTop;
+  document.getElementById(iscLatestTargetId())?.classList.add("is-latest");
+  const badge = document.getElementById("grn-badge");
+  if (badge) badge.textContent = iscBadgeText();
+}
+function renderInteractiveScoringPage() {
+  const gr = state.guidedRun;
+  gr.screen = "task";
+  gr.tripTimes = gr.tripTimes || {};
   openGuidedFullscreen(`
     <div class="gfs-header">
-      ${gfsHeaderTopHTML(esc(runGroupDisplayName(leg)), true, canGoBack)}
-      ${precisionTokenWidgetHTML()}
-      <h2 class="gfs-mission-name">${esc(mission.name)}</h2>
+      ${gfsHeaderTopHTML(esc(iscBadgeText()), false, false)}
       <div class="gfs-timer-row">
         <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
         <div class="gfs-points" id="grn-points">${liveScoreHTML()} pts</div>
       </div>
     </div>
-    <div class="gfs-body gfs-center">
-      <p class="gfs-task-prompt">${esc(task.name)} <span class="gfs-task-pts">/ ${taskMaxPoints(task)} pts</span></p>
-      ${controlHTML}
-    </div>
-    <div class="gfs-footer"></div>
+    ${precisionTokenWidgetHTML(true)}
+    <div class="gfs-body isc-body" id="isc-body"></div>
   `);
   wireCancelLink();
   wirePrecisionTokenButton();
-  document.getElementById("grn-back").addEventListener("click", () => {
-    if (state.guidedRun.taskIdx > 0) {
-      state.guidedRun.taskIdx--;
-    } else if (state.guidedRun.missionIdxInLeg > 0) {
-      state.guidedRun.missionIdxInLeg--;
-      const prevMission = legMissions[state.guidedRun.missionIdxInLeg];
-      state.guidedRun.taskIdx = Math.max(0, visibleTasks(prevMission).length - 1);
-    } else {
-      return;
-    }
-    renderCurrentTaskScreen();
-  });
-
-  if (task.type === "bool") {
-    document.getElementById("gfs-mark-complete").addEventListener("click", () => { raw[task.id] = true; advanceTask(); });
-    document.getElementById("gfs-mark-incomplete").addEventListener("click", () => { raw[task.id] = false; advanceTask(); });
-  } else if (task.type === "number") {
-    document.querySelectorAll(".gfs-num-btn-big").forEach((btn) => {
-      btn.addEventListener("click", () => { raw[task.id] = Number(btn.dataset.val); advanceTask(); });
-    });
-  } else {
-    document.querySelectorAll(".gfs-choice-btn-big").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const v = btn.dataset.val;
-        raw[task.id] = v === "" ? null : Number(v);
-        advanceTask();
-      });
-    });
-  }
+  document.getElementById("grn-jump").addEventListener("click", () => iscScrollTo(iscLatestTargetId()));
+  document.getElementById("isc-body").addEventListener("click", onIscBodyClick);
+  renderIscBody();
+  requestAnimationFrame(() => iscScrollTo(iscLatestTargetId(), false));
 }
-function advanceTask() {
-  dbPut("runs", state.guidedRun.run); // save every tap, so a reload/crash mid-run doesn't lose it
-  state.guidedRun.taskIdx++;
-  renderCurrentTaskScreen();
+function onIscBodyClick(e) {
+  const btn = e.target.closest("button");
+  const gr = state.guidedRun;
+  if (!btn || btn.disabled || !gr || gr.run.finishedAt) return;
+  if (btn.dataset.act === "return") { iscRobotReturned(); return; }
+  if (btn.dataset.act === "leave") { iscRobotLeaves(); return; }
+  if (btn.dataset.act === "finish") { iscFinishRun(); return; }
+  const card = btn.closest(".isc-task");
+  const tid = btn.dataset.tid;
+  if (!card || tid == null) return;
+  const raw = gr.run.rawScores;
+  const v = btn.dataset.val;
+  if (card.dataset.type === "bool") raw[tid] = v === "yes";
+  else if (card.dataset.type === "number") raw[tid] = Number(v);
+  else raw[tid] = v === "" ? null : Number(v);
+  iscMaybeRecordMissionTiming(tid);
+  recordScoreChanges();
+  dbPut("runs", gr.run); // save every tap, so a reload/crash mid-run doesn't lose it
+  refreshLiveScore();
+  renderIscBody();
+  iscScrollTo(iscNextTargetIdAfter(tid));
 }
-
-async function finishCurrentMission(leg, legMissions) {
-  const { run, missionIdxInLeg } = state.guidedRun;
-  const mission = legMissions[missionIdxInLeg];
+// Trip tracking only: a mission's time runs from when the previous one was
+// finished (or the robot left base) to when its last task first gets scored.
+function iscMaybeRecordMissionTiming(taskId) {
+  const gr = state.guidedRun;
+  const { run } = gr;
+  if (!run.tripTracking || gr.phase !== "out") return;
+  const leg = gr.legs[gr.legIdx];
+  const mission = scoreableLegMissions(leg).find((m) => visibleTasks(m).some((t) => t.id === taskId));
+  if (!mission || run.missionTimings.some((t) => t.missionId === mission.id)) return;
+  if (!visibleTasks(mission).every((t) => isTaskAnswered(t, run.rawScores))) return;
   const now = Date.now();
-  const durationMs = now - state.guidedRun.missionStartTs;
-  run.missionTimings.push({ missionId: mission.id, missionName: mission.name, runGroupId: leg.id, runGroupName: leg.name, startTs: state.guidedRun.missionStartTs, endTs: now, durationMs });
-  await dbPut("runs", run);
-  if (missionIdxInLeg < legMissions.length - 1) {
-    state.guidedRun.missionIdxInLeg++;
-    state.guidedRun.taskIdx = 0;
-    state.guidedRun.missionStartTs = now;
-    renderCurrentTaskScreen();
-  } else {
-    renderRobotReturnedScreen();
-  }
+  run.missionTimings.push({ missionId: mission.id, missionName: mission.name, runGroupId: leg.id, runGroupName: leg.name, startTs: gr.missionStartTs, endTs: now, durationMs: now - gr.missionStartTs });
+  gr.missionStartTs = now;
 }
-
-function renderRobotReturnedScreen() {
-  const { legIdx } = state.guidedRun;
-  state.guidedRun.screen = "returned";
-  const leg = state.runGroups[legIdx];
-  openGuidedFullscreen(`
-    <div class="gfs-header">
-      ${gfsHeaderTopHTML(esc(runGroupDisplayName(leg)), true, true)}
-      ${precisionTokenWidgetHTML()}
-      <h2 class="gfs-mission-name">All missions done for this run</h2>
-      <div class="gfs-timer-row">
-        <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
-        <div class="gfs-points" id="grn-points">${liveScoreHTML()} pts</div>
-      </div>
-    </div>
-    <div class="gfs-body gfs-center">
-      <p class="empty-sub">Every mission in "${esc(runGroupDisplayName(leg))}" is marked.</p>
-      <button type="button" class="btn btn-primary btn-full gfs-big-action gfs-huge-action" id="grn-done">Robot returned</button>
-    </div>
-    <div class="gfs-footer"></div>
-  `);
-  wireCancelLink();
-  wirePrecisionTokenButton();
-  document.getElementById("grn-back").addEventListener("click", () => {
-    const legMissions = getLegMissions(leg);
-    state.guidedRun.missionIdxInLeg = legMissions.length - 1;
-    state.guidedRun.taskIdx = Math.max(0, visibleTasks(legMissions[legMissions.length - 1]).length - 1);
-    renderCurrentTaskScreen();
-  });
-  document.getElementById("grn-done").addEventListener("click", async () => {
-    const { run, legIdx } = state.guidedRun;
-    const now = Date.now();
-    // Find the next leg (in run-group order) that actually has scoreable missions.
-    let nextLegIdx = legIdx + 1;
-    while (nextLegIdx < state.runGroups.length && !getLegMissions(state.runGroups[nextLegIdx]).some((m) => visibleTasks(m).length)) nextLegIdx++;
-    if (nextLegIdx >= state.runGroups.length) {
-      stopGuidedTimer();
-      run.finishedAt = now;
-      run.totalTimeMs = now - state.guidedRun.matchStartTs;
-      await dbPut("runs", run);
-      renderGuidedOverview();
-    } else {
-      state.guidedRun.legIdx = nextLegIdx;
-      state.guidedRun.missionIdxInLeg = 0;
-      state.guidedRun.taskIdx = 0;
-      state.guidedRun.transitionStartTs = now;
-      renderGuidedTransitionPhase();
-    }
-  });
+function iscRobotReturned() {
+  const gr = state.guidedRun;
+  if (gr.phase !== "out") return;
+  const now = Date.now();
+  gr.tripTimes[`return-${gr.legIdx}`] = now - gr.matchStartTs;
+  if (gr.legIdx >= gr.legs.length - 1) { iscFinishRun(now); return; }
+  gr.phase = "transition";
+  gr.transitionStartTs = now;
+  renderIscBody();
+  iscScrollTo(`isc-leave-${gr.legIdx + 1}`);
 }
-
-function renderGuidedTransitionPhase() {
-  const { legIdx } = state.guidedRun;
-  state.guidedRun.screen = "transition";
-  const nextLeg = state.runGroups[legIdx];
-  openGuidedFullscreen(`
-    <div class="gfs-header">
-      ${gfsHeaderTopHTML("Transition", false, false)}
-      ${precisionTokenWidgetHTML()}
-      <h2 class="gfs-mission-name">Heading to: ${esc(runGroupDisplayName(nextLeg))}</h2>
-      <div class="gfs-timer-row">
-        <div class="gfs-timer" id="grn-timer">${liveTimerHTML()}</div>
-        <div class="gfs-points" id="grn-points">${liveScoreHTML()} pts</div>
-      </div>
-    </div>
-    <div class="gfs-body gfs-center">
-      <p class="empty-sub">Tap when the robot leaves base for the next run.</p>
-      <button type="button" class="btn btn-amber btn-full gfs-big-action gfs-huge-action" id="grn-leave">Robot leaves for next run</button>
-    </div>
-    <div class="gfs-footer"></div>
-  `);
-  wireCancelLink();
-  wirePrecisionTokenButton();
-  document.getElementById("grn-leave").addEventListener("click", () => {
-    const now = Date.now();
-    const durationMs = now - state.guidedRun.transitionStartTs;
-    state.guidedRun.run.transitionTimings.push({ beforeRunGroupId: nextLeg.id, durationMs });
-    dbPut("runs", state.guidedRun.run);
-    state.guidedRun.missionStartTs = now;
-    renderCurrentTaskScreen();
-  });
+function iscRobotLeaves() {
+  const gr = state.guidedRun;
+  if (gr.phase !== "transition") return;
+  const now = Date.now();
+  const nextLeg = gr.legs[gr.legIdx + 1];
+  gr.run.transitionTimings.push({ beforeRunGroupId: nextLeg.id, durationMs: now - gr.transitionStartTs });
+  gr.legIdx++;
+  gr.phase = "out";
+  gr.missionStartTs = now;
+  dbPut("runs", gr.run);
+  renderIscBody();
+  iscScrollTo(iscLatestTargetId());
+}
+async function iscFinishRun(now = Date.now()) {
+  const gr = state.guidedRun;
+  if (!gr || gr.run.finishedAt) return;
+  stopGuidedTimer();
+  gr.run.finishedAt = now;
+  gr.run.totalTimeMs = now - gr.matchStartTs;
+  await dbPut("runs", gr.run);
+  renderGuidedOverview();
 }
 
 function renderGuidedOverview() {
@@ -3309,7 +3479,9 @@ function renderOverviewBody() {
     </div>
     ${mission10BonusRowHTML(run)}
   </div>`;
-  body.innerHTML = bonusHTML + state.runGroups.map((leg) => {
+  // Once the clock has stopped, the official 2:30 cutoff can be moved.
+  const cutoffHTML = run.finishedAt ? timedCutoffControlHTML(run) : "";
+  body.innerHTML = cutoffHTML + bonusHTML + state.runGroups.map((leg) => {
     const legMissions = getLegMissions(leg);
     const missionsHTML = legMissions.map((m) => {
       const score = missionScoreForRun(m, run);
@@ -3327,7 +3499,9 @@ function renderOverviewBody() {
     </div>`;
   }).join("");
   bindOverviewEvents();
+  bindTimedCutoffControl("#gfs-overview-body", run, () => { updateOverviewTotal(); dbPut("runs", run); });
   updateOverviewTotal();
+  recordScoreChanges(); // only logs while the clock is still running (plain scoring mode)
   dbPut("runs", run); // every overview tap re-renders through here — save it as it happens
 }
 
@@ -3603,6 +3777,11 @@ function breakdownAvgOpTime(run) {
   if (!transitions.length) return null;
   return transitions.reduce((s, t) => s + t.durationMs, 0) / transitions.length;
 }
+function breakdownTimeLabelHTML(run, avgOp) {
+  const cutoffNote = run.timedCutoffMs != null ? ` &middot; official cutoff ${fmtDuration(run.timedCutoffMs)}` : "";
+  const opNote = run.tripTracking === false ? "" : ` &middot; avg operation time ${avgOp !== null ? fmtDuration(avgOp) : "&mdash;"}`;
+  return `${fmtDuration(run.totalTimeMs || 0)} total time${opNote}${cutoffNote}`;
+}
 function renderRunBreakdown(run) {
   state.breakdown = { run, editing: false, tab: "scores" };
   const avgOp = breakdownAvgOpTime(run);
@@ -3614,7 +3793,7 @@ function renderRunBreakdown(run) {
         <div class="guided-phase-badge">${esc(run.label)}</div>
       </div>
       <div class="gfs-timer" id="brk-total">${scoreDisplayHTML(run, state.missions)}</div>
-      <div class="gfs-timer-label">${fmtDuration(run.totalTimeMs || 0)} total time &middot; avg operation time ${avgOp !== null ? fmtDuration(avgOp) : "&mdash;"}</div>
+      <div class="gfs-timer-label" id="brk-time-label">${breakdownTimeLabelHTML(run, avgOp)}</div>
       <div class="brk-tabs">
         <button type="button" class="brk-tab-btn" data-tab="scores">Scores</button>
         <button type="button" class="brk-tab-btn" data-tab="timing">Timing</button>
@@ -3694,7 +3873,7 @@ function renderBreakdownScoresTab() {
     </div>`;
   }).join("");
   body.className = "gfs-body" + (editing ? "" : " brk-readonly");
-  body.innerHTML = bonusHTML + sectionsHTML;
+  body.innerHTML = (editing ? timedCutoffControlHTML(run) : "") + bonusHTML + sectionsHTML;
   if (editing) bindBreakdownEditEvents();
 }
 
@@ -3707,6 +3886,7 @@ function bindBreakdownEditEvents() {
     btn.addEventListener("click", () => { run.precisionTokensRemaining = Number(btn.dataset.val); renderBreakdownScoresTab(); refreshBreakdownTotal(); });
   });
   bindMission10BonusRow("#brk-body", run, () => { renderBreakdownScoresTab(); refreshBreakdownTotal(); });
+  bindTimedCutoffControl("#brk-body", run, refreshBreakdownTotal);
   document.querySelectorAll('#brk-body [data-type="bool"] .gfs-choice-btn').forEach((btn) => {
     btn.addEventListener("click", () => { run.rawScores[btn.dataset.tid] = btn.dataset.val === "yes"; renderBreakdownScoresTab(); refreshBreakdownTotal(); });
   });
@@ -3726,6 +3906,8 @@ function refreshBreakdownTotal() {
   const { run } = state.breakdown;
   const el = document.getElementById("brk-total");
   if (el) el.innerHTML = scoreDisplayHTML(run, state.missions);
+  const label = document.getElementById("brk-time-label");
+  if (label) label.innerHTML = breakdownTimeLabelHTML(run, breakdownAvgOpTime(run));
 }
 
 function renderBreakdownTimingTab() {
@@ -3739,10 +3921,28 @@ function renderBreakdownTimingTab() {
   // after the buzzer), it has no row of its own here at all, so the marker just lands at
   // the very end of what *was* completed instead — still "before" it, since
   // there's nothing to be before.
-  let timeMarkerInserted = !run.timeExpiredAt;
+  if (run.tripTracking === false) {
+    body.className = "gfs-body";
+    body.innerHTML = `<p class="empty-sub">Robot trip tracking was off for this game run, so only the total time (${fmtDuration(run.totalTimeMs || 0)}) was recorded.</p>`;
+    return;
+  }
+  // Newer runs work out where the marker goes from the official cutoff
+  // (which can be moved), using each mission's recorded start/end times.
+  let showMarker = !!run.timeExpiredAt;
+  let markerMissionId = run.timeExpiredMissionId;
+  let markerElapsedMs = run.timeExpiredMissionElapsedMs;
+  if (runHasAdjustableCutoff(run)) {
+    const cutoffTs = (run.startedAt || 0) + runTimedCutoffMs(run);
+    showMarker = runTimedState(run) != null;
+    const mt = missionTimings.find((t) => t.endTs != null && t.endTs > cutoffTs);
+    markerMissionId = mt ? mt.missionId : null;
+    markerElapsedMs = mt && mt.startTs != null && cutoffTs > mt.startTs ? cutoffTs - mt.startTs : null;
+  }
+  let timeMarkerInserted = !showMarker;
   const timeMarkerHTML = () => {
-    const elapsed = run.timeExpiredMissionElapsedMs != null ? fmtDuration(run.timeExpiredMissionElapsedMs) : null;
-    return `<div class="brk-time-marker"><span class="brk-time-marker-line"></span><span class="brk-time-marker-label">&#9201;&#65039; Time ran out${elapsed ? ` &middot; ${elapsed} into this mission` : ""}</span></div>`;
+    const elapsed = markerElapsedMs != null ? fmtDuration(markerElapsedMs) : null;
+    const what = run.timedCutoffMs != null ? `Official cutoff (${fmtDuration(run.timedCutoffMs)})` : "Time ran out";
+    return `<div class="brk-time-marker"><span class="brk-time-marker-line"></span><span class="brk-time-marker-label">&#9201;&#65039; ${what}${elapsed ? ` &middot; ${elapsed} into this mission` : ""}</span></div>`;
   };
   let html = "";
   let transIdx = 0;
@@ -3767,7 +3967,7 @@ function renderBreakdownTimingTab() {
       groupRows = "";
       groupTotal = 0;
     }
-    if (!timeMarkerInserted && mt.missionId === run.timeExpiredMissionId) {
+    if (!timeMarkerInserted && mt.missionId === markerMissionId) {
       groupRows += timeMarkerHTML();
       timeMarkerInserted = true;
     }
@@ -5667,6 +5867,16 @@ interactiveScoringInput.addEventListener("change", async () => {
   state.interactiveScoringEnabled = interactiveScoringInput.checked;
   await dbPut("meta", { key: "interactiveScoringEnabled", value: state.interactiveScoringEnabled });
 });
+const trackRobotTripsInput = document.getElementById("input-track-robot-trips");
+trackRobotTripsInput.addEventListener("change", async () => {
+  state.trackRobotTrips = trackRobotTripsInput.checked;
+  await dbPut("meta", { key: "trackRobotTrips", value: state.trackRobotTrips });
+});
+async function loadTrackRobotTripsSetting() {
+  const rec = await dbGet("meta", "trackRobotTrips");
+  state.trackRobotTrips = rec?.value ?? true;
+  trackRobotTripsInput.checked = state.trackRobotTrips;
+}
 async function loadInteractiveScoringSetting() {
   const rec = await dbGet("meta", "interactiveScoringEnabled");
   state.interactiveScoringEnabled = rec?.value ?? true;
@@ -5696,6 +5906,7 @@ async function initAll() {
   await loadEquipmentInspectionSetting();
   await loadInteractiveScoringSetting();
   await loadInteractiveIterationsSetting();
+  await loadTrackRobotTripsSetting();
   state.sheets.spreadsheetId = await loadStoredSheetsFileId();
   const storedToken = await loadStoredSheetsToken();
   if (storedToken && storedToken.tokenExpiresAt > Date.now()) {
