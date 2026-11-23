@@ -90,7 +90,39 @@ function reqToPromise(req) {
 }
 async function dbGetAll(store) { const t = await tx([store], "readonly"); return reqToPromise(t.objectStore(store).getAll()); }
 async function dbGet(store, key) { const t = await tx([store], "readonly"); return reqToPromise(t.objectStore(store).get(key)); }
-async function dbPut(store, value) { const t = await tx([store], "readwrite"); return reqToPromise(t.objectStore(store).put(value)); }
+// Stores that sync to the team's Firestore database. Every local change to
+// one of their records is stamped with updatedAt, which is how team sync
+// decides which copy is newest (see startFirestoreListeners).
+const SYNCED_STORES = new Set(["attachments", "entries", "runGroups", "missions", "runs"]);
+function recordsMatch(a, b) {
+  const strip = (k, v) => (k === "updatedAt" ? undefined : v);
+  return JSON.stringify(a, strip) === JSON.stringify(b, strip);
+}
+async function dbPutRaw(store, value) { const t = await tx([store], "readwrite"); return reqToPromise(t.objectStore(store).put(value)); }
+// Saves a local change. For synced stores, a write that changes nothing is
+// skipped (so things like renumbering on every device don't look like new
+// edits), and a real change gets a fresh updatedAt.
+async function dbPut(store, value) {
+  if (SYNCED_STORES.has(store) && value && typeof value === "object") {
+    const existing = value.id != null ? await dbGet(store, value.id) : null;
+    if (existing && recordsMatch(existing, value)) { value.updatedAt = existing.updatedAt; return value.id; }
+    const now = Date.now();
+    value.updatedAt = existing && (existing.updatedAt || 0) >= now ? existing.updatedAt + 1 : now;
+    const result = await dbPutRaw(store, value);
+    scheduleTeamSync();
+    return result;
+  }
+  return dbPutRaw(store, value);
+}
+// Every real local change gets pushed to the team shortly after, even from
+// code paths that never called syncToTeamDrive() themselves (e.g. each tap
+// during a game run) — that's what lets a teammate see and pick up an
+// incomplete run. Debounced so a burst of taps is one sync, not dozens.
+let teamSyncTimer = null;
+function scheduleTeamSync() {
+  if (teamSyncTimer) clearTimeout(teamSyncTimer);
+  teamSyncTimer = setTimeout(() => { teamSyncTimer = null; if (typeof syncToTeamDrive === "function") syncToTeamDrive(); }, 1500);
+}
 async function dbDelete(store, key) { const t = await tx([store], "readwrite"); return reqToPromise(t.objectStore(store).delete(key)); }
 async function dbGetByIndex(store, indexName, value) { const t = await tx([store], "readonly"); return reqToPromise(t.objectStore(store).index(indexName).getAll(value)); }
 async function dbClear(store) { const t = await tx([store], "readwrite"); return reqToPromise(t.objectStore(store).clear()); }
@@ -115,6 +147,32 @@ async function restoreFullData(data) {
   for (const meta of data.meta || []) await dbPut("meta", meta);
   for (const g of data.runGroups || []) await dbPut("runGroups", g);
   await initAll();
+}
+// Snapshot of just some stores, for an edit session's Cancel button. Only
+// the stores being edited are captured, so cancelling never touches game
+// runs (or anything else) saved or synced in while the session was open.
+async function snapshotStores(stores) {
+  const snap = { stores };
+  for (const store of stores) snap[store] = await dbGetAllRaw(store);
+  return snap;
+}
+// Puts those stores back the way the snapshot had them. Changed records are
+// written back as a new change (so the revert syncs to the team too), and
+// records added during the session are soft-deleted rather than wiped
+// locally — wiping them would just let the cloud copy bring them back.
+async function restoreStores(snap) {
+  for (const store of snap.stores) {
+    const before = new Map(snap[store].map((r) => [String(r.id), r]));
+    for (const rec of snap[store]) await dbPut(store, rec);
+    for (const cur of await dbGetAll(store)) {
+      if (before.has(String(cur.id)) || cur.deleted) continue;
+      cur.deleted = true;
+      cur.deletedAt = Date.now();
+      await dbPut(store, cur);
+    }
+  }
+  await initAll();
+  syncToTeamDrive();
 }
 async function snapshotCurrentData() {
   return {
@@ -474,11 +532,45 @@ function runTimedState(run) {
     if (elapsed <= cutoff) return null;
     const flat = { ...run.scoreLogBase };
     run.scoreLog.forEach((e) => { if (e.ms <= cutoff) flat[e.k] = e.v; });
+    if (run.finishedAt) applyPostRunEditsBeforeCutoff(run, flat, cutoff);
     return unflattenScoreState(flat);
   }
   // Runs saved before the score log existed: the one snapshot taken the
   // instant the buzzer went off (see handleTimeExpired).
   return run.timedSnapshot || null;
+}
+// Edits made after the clock stopped (Final Overview / saved-run editor)
+// aren't in the score log, so replaying the log alone would leave them out
+// of the timed score. A task scored or fixed that way still counts toward
+// the timed score when it comes at or before the last task counted (the
+// official cutoff) in the game run's Run → Mission → Task order — those
+// tasks were done before the buzzer, they just got entered late.
+function runTaskOrderIndex(run) {
+  const idx = new Map();
+  runBreakdownSections(run).forEach((sec) => sec.missions.forEach((m) => {
+    orderedTasksForRun(m, run).forEach((t) => idx.set(t.id, idx.size));
+  }));
+  return idx;
+}
+function applyPostRunEditsBeforeCutoff(run, flat, cutoff) {
+  const order = runTaskOrderIndex(run);
+  // Position of the last task counted before the cutoff.
+  let cutoffPos = -1;
+  run.scoreLog.forEach((e) => {
+    if (e.ms > cutoff || !e.k.startsWith("t:")) return;
+    const pos = order.get(e.k.slice(2));
+    if (pos != null && pos > cutoffPos) cutoffPos = pos;
+  });
+  if (cutoffPos < 0) return;
+  // What the log says each value ended up as, vs. what it actually is now.
+  const logged = { ...run.scoreLogBase };
+  run.scoreLog.forEach((e) => { logged[e.k] = e.v; });
+  const now = flattenScoreState(run);
+  Object.keys(now).forEach((k) => {
+    if (!k.startsWith("t:") || (logged[k] ?? null) === (now[k] ?? null)) return;
+    const pos = order.get(k.slice(2));
+    if (pos != null && pos <= cutoffPos) flat[k] = now[k];
+  });
 }
 function runTimedTotal(run, missions) {
   const timedState = runTimedState(run);
@@ -1179,7 +1271,7 @@ function wireAttachmentOrderToolbar() {
   if (addBtn) addBtn.addEventListener("click", () => openAttachmentModal(null));
   const editBtn = document.getElementById("btn-edit-order-attachments");
   if (editBtn) editBtn.addEventListener("click", async () => {
-    attachmentEditSessionSnapshot = await snapshotCurrentData();
+    attachmentEditSessionSnapshot = await snapshotStores(["attachments", "entries"]);
     state.editingAttachmentOrder = true;
     renderAttachmentsSetup();
   });
@@ -1187,7 +1279,7 @@ function wireAttachmentOrderToolbar() {
   if (cancelBtn) cancelBtn.addEventListener("click", async () => {
     state.editingAttachmentOrder = false;
     if (attachmentEditSessionSnapshot) {
-      await restoreFullData(attachmentEditSessionSnapshot);
+      await restoreStores(attachmentEditSessionSnapshot);
       attachmentEditSessionSnapshot = null;
     } else {
       state.attachments = (await dbGetAll("attachments")).sort((a, b) => (a.order ?? a.number ?? 0) - (b.order ?? b.number ?? 0));
@@ -1962,6 +2054,75 @@ const SEASON_MISSIONS = [
     { id: "sm-15-t3", name: "Environmental bonus (compost hatch)", type: "bool", points: 10 },
   ] },
 ];
+// Bonus tasks that only count once their mission's main task is done (by
+// bank task id: bonus -> the task it depends on). E.g. the Lucky Leaves
+// "second leaf" bonus isn't possible if the first leaf never came out. A
+// counted bonus on a counted main task (Seeds of Renewal) also can't go
+// higher than the main task's count.
+const BONUS_REQUIRES = {
+  "sm-1-t1": "sm-1-t0",
+  "sm-3-t1": "sm-3-t0",
+  "sm-4-t1": "sm-4-t0",
+  "sm-7-t1": "sm-7-t0",
+  "sm-14-t1": "sm-14-t0",
+  "sm-15-t3": "sm-15-t2",
+};
+function taskBankId(t) { return t.bankTaskId || t.id; }
+function taskAchieved(t, v) {
+  if (t.type === "bool") return !!v;
+  if (t.type === "number") return (Number(v) || 0) > 0;
+  return !(v === null || v === undefined || v === "");
+}
+// For a bonus task: its main task in the current mission list, whether the
+// bonus is locked, and (for counted bonuses) the highest count allowed.
+// Returns null for tasks that aren't a bonus, or whose main task isn't
+// assigned to any Run (then there's nothing to check against).
+function bonusLockInfo(t, raw) {
+  const reqId = BONUS_REQUIRES[taskBankId(t)];
+  if (!reqId) return null;
+  let base = null;
+  for (const m of state.missions) {
+    base = visibleTasks(m).find((x) => taskBankId(x) === reqId);
+    if (base) break;
+  }
+  if (!base) return null;
+  const scores = raw || {};
+  const answered = Object.prototype.hasOwnProperty.call(scores, base.id);
+  const v = scores[base.id];
+  const locked = !taskAchieved(base, v);
+  const maxAllowed = t.type === "number" && base.type === "number" ? Math.min(t.max || 0, Number(v) || 0) : null;
+  return { base, answered, locked, maxAllowed };
+}
+// Keeps bonus values consistent with their main tasks after a score change:
+// a main task scored as not done zeroes its bonus (which also marks the
+// bonus as answered, so interactive scoring skips past it), and a counted
+// bonus is clamped to the main task's count.
+function enforceBonusRules(raw) {
+  if (!raw) return;
+  for (const m of state.missions) {
+    for (const t of visibleTasks(m)) {
+      const info = bonusLockInfo(t, raw);
+      if (!info || !info.answered) continue;
+      if (info.locked) {
+        const zero = t.type === "bool" ? false : t.type === "number" ? 0 : null;
+        if (raw[t.id] !== zero) raw[t.id] = zero;
+      } else if (info.maxAllowed != null && (Number(raw[t.id]) || 0) > info.maxAllowed) {
+        raw[t.id] = info.maxAllowed;
+      }
+    }
+  }
+}
+// Whether a given button value is unavailable for a bonus task right now.
+function bonusValueDisabled(info, t, val) {
+  if (!info) return false;
+  const zero = t.type === "bool" ? val === "no" : t.type === "number" ? Number(val) === 0 : val === "";
+  if (info.locked) return !zero;
+  if (info.maxAllowed != null) return Number(val) > info.maxAllowed;
+  return false;
+}
+function bonusLockNote(info) {
+  return info && info.locked ? `<span class="bonus-lock-note">Needs &ldquo;${esc(info.base.name)}&rdquo; first</span>` : "";
+}
 // Previous names of season tasks that have since been renamed (by bank task
 // id) — only used so importing an older exported scoresheet still matches.
 const RENAMED_TASK_OLD_NAMES = {
@@ -2166,7 +2327,7 @@ function renderOrderToolbarTop() {
     document.getElementById("btn-cancel-order-all").addEventListener("click", async () => {
       state.editingAllOrder = false;
       if (runsEditSessionSnapshot) {
-        await restoreFullData(runsEditSessionSnapshot);
+        await restoreStores(runsEditSessionSnapshot);
         runsEditSessionSnapshot = null;
       } else {
         await loadMissions();
@@ -2175,7 +2336,7 @@ function renderOrderToolbarTop() {
     });
   } else {
     document.getElementById("btn-edit-order-all").addEventListener("click", async () => {
-      runsEditSessionSnapshot = await snapshotCurrentData();
+      runsEditSessionSnapshot = await snapshotStores(["runGroups", "missions"]);
       state.editingAllOrder = true;
       renderRunGroups();
     });
@@ -3152,7 +3313,8 @@ function closeGuidedFullscreen() {
 }
 
 function cancelGuidedRunLink() {
-  return `<button type="button" class="gfs-cancel-x" id="grn-cancel" title="Cancel this game run">&#10005;</button>`;
+  const reopened = !!state.guidedRun?.reopened;
+  return `<button type="button" class="gfs-cancel-x" id="grn-cancel" title="${reopened ? "Close (stays incomplete)" : "Cancel this game run"}">&#10005;</button>`;
 }
 function gfsHeaderTopHTML(badgeText, showBack, backEnabled) {
   // "End" only makes sense while the clock is still running.
@@ -3169,12 +3331,26 @@ function wireCancelLink() {
   document.getElementById("grn-cancel").addEventListener("click", async () => {
     const gr = state.guidedRun;
     if (!gr) { closeGuidedFullscreen(); return; }
+    if (gr.reopened) {
+      // A reopened incomplete run: everything tapped is already saved, so ✕
+      // just closes it (still incomplete) instead of throwing it away.
+      state.guidedRun = null;
+      closeGuidedFullscreen();
+      await loadRuns();
+      return;
+    }
     if (!confirm("Cancel and discard this practice game run? Nothing from it will be saved.")) return;
     stopGuidedTimer();
-    await dbDelete("runs", gr.run.id);
+    // Soft-deleted (not removed outright) so the discard reaches the team
+    // too — otherwise a copy that already synced would come back as an
+    // incomplete run on every device.
+    gr.run.deleted = true;
+    gr.run.deletedAt = Date.now();
+    await dbPut("runs", gr.run);
     state.guidedRun = null;
     closeGuidedFullscreen();
     await loadRuns();
+    syncToTeamDrive();
   });
   document.getElementById("grn-end")?.addEventListener("click", endGuidedRunEarly);
 }
@@ -3219,32 +3395,35 @@ function isTaskComplete(t, raw) {
 // (where you see every task in every mission at once, not one at a time).
 function taskRowHTML(t, raw) {
   const max = taskMaxPoints(t);
+  const lock = bonusLockInfo(t, raw);
+  const dis = (val) => (bonusValueDisabled(lock, t, val) ? " disabled" : "");
+  const lockCls = lock?.locked ? " is-bonus-locked" : "";
   if (t.type === "bool") {
     const on = !!raw[t.id];
-    return `<div class="gfs-task-row gfs-task-row-wrap" data-tid="${t.id}" data-type="bool">
-      <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${on ? max : 0} / ${max}</span></span>
+    return `<div class="gfs-task-row gfs-task-row-wrap${lockCls}" data-tid="${t.id}" data-type="bool">
+      <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${on ? max : 0} / ${max}</span>${bonusLockNote(lock)}</span>
       <div class="gfs-choice-strip">
-        <button type="button" class="gfs-choice-btn${on ? " active" : ""}" data-tid="${t.id}" data-val="yes">Yes</button>
-        <button type="button" class="gfs-choice-btn${!on ? " active" : ""}" data-tid="${t.id}" data-val="no">No</button>
+        <button type="button" class="gfs-choice-btn${on ? " active" : ""}" data-tid="${t.id}" data-val="yes"${dis("yes")}>Yes</button>
+        <button type="button" class="gfs-choice-btn${!on ? " active" : ""}" data-tid="${t.id}" data-val="no"${dis("no")}>No</button>
       </div>
     </div>`;
   }
   if (t.type === "number") {
     const val = raw[t.id] ?? 0;
     const btns = Array.from({ length: (t.max || 0) + 1 }, (_, i) =>
-      `<button type="button" class="gfs-num-btn${val === i ? " active" : ""}" data-tid="${t.id}" data-val="${i}">${i}</button>`
+      `<button type="button" class="gfs-num-btn${val === i ? " active" : ""}" data-tid="${t.id}" data-val="${i}"${dis(i)}>${i}</button>`
     ).join("");
-    return `<div class="gfs-task-row gfs-task-row-wrap" data-tid="${t.id}" data-type="number">
-      <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${pointsFromRawTask(t, val)} / ${max}</span></span>
+    return `<div class="gfs-task-row gfs-task-row-wrap${lockCls}" data-tid="${t.id}" data-type="number">
+      <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${pointsFromRawTask(t, val)} / ${max}</span>${bonusLockNote(lock)}</span>
       <div class="gfs-num-strip">${btns}</div>
     </div>`;
   }
   const cur = raw[t.id] ?? "";
   const btns = [`<button type="button" class="gfs-choice-btn${cur === "" ? " active" : ""}" data-tid="${t.id}" data-val="">Not achieved</button>`]
-    .concat((t.options || []).map((o, i) => `<button type="button" class="gfs-choice-btn${String(cur) === String(i) ? " active" : ""}" data-tid="${t.id}" data-val="${i}">${esc(o.label)}</button>`))
+    .concat((t.options || []).map((o, i) => `<button type="button" class="gfs-choice-btn${String(cur) === String(i) ? " active" : ""}" data-tid="${t.id}" data-val="${i}"${dis(String(i))}>${esc(o.label)}</button>`))
     .join("");
-  return `<div class="gfs-task-row gfs-task-row-wrap" data-tid="${t.id}" data-type="choice">
-    <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${pointsFromRawTask(t, cur)} / ${max}</span></span>
+  return `<div class="gfs-task-row gfs-task-row-wrap${lockCls}" data-tid="${t.id}" data-type="choice">
+    <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${pointsFromRawTask(t, cur)} / ${max}</span>${bonusLockNote(lock)}</span>
     <div class="gfs-choice-strip">${btns}</div>
   </div>`;
 }
@@ -3318,28 +3497,30 @@ function iscBadgeText() {
 
 function iscTaskCardHTML(t, raw) {
   const answered = isTaskAnswered(t, raw);
+  const lock = bonusLockInfo(t, raw);
+  const dis = (val) => (bonusValueDisabled(lock, t, val) ? " disabled" : "");
   const max = taskMaxPoints(t);
   const v = raw[t.id];
   let controls;
   if (t.type === "bool") {
     controls = `<div class="isc-bool">
-      <button type="button" class="isc-btn isc-btn-yes${answered && v ? " active" : ""}" data-tid="${t.id}" data-val="yes">Complete</button>
-      <button type="button" class="isc-btn isc-btn-no${answered && !v ? " active" : ""}" data-tid="${t.id}" data-val="no">Incomplete</button>
+      <button type="button" class="isc-btn isc-btn-yes${answered && v ? " active" : ""}" data-tid="${t.id}" data-val="yes"${dis("yes")}>Complete</button>
+      <button type="button" class="isc-btn isc-btn-no${answered && !v ? " active" : ""}" data-tid="${t.id}" data-val="no"${dis("no")}>Incomplete</button>
     </div>`;
   } else if (t.type === "number") {
     controls = `<div class="isc-strip">${Array.from({ length: (t.max || 0) + 1 }, (_, i) =>
-      `<button type="button" class="isc-btn isc-btn-num${answered && Number(v) === i ? (i === 0 ? " active-zero" : " active") : ""}" data-tid="${t.id}" data-val="${i}">${i}</button>`
+      `<button type="button" class="isc-btn isc-btn-num${answered && Number(v) === i ? (i === 0 ? " active-zero" : " active") : ""}" data-tid="${t.id}" data-val="${i}"${dis(i)}>${i}</button>`
     ).join("")}</div>`;
   } else {
     const none = answered && (v === null || v === "");
     controls = `<div class="isc-strip">
       <button type="button" class="isc-btn${none ? " active-zero" : ""}" data-tid="${t.id}" data-val="">Not achieved</button>
-      ${(t.options || []).map((o, i) => `<button type="button" class="isc-btn${answered && !none && String(v) === String(i) ? " active" : ""}" data-tid="${t.id}" data-val="${i}">${esc(o.label)}</button>`).join("")}
+      ${(t.options || []).map((o, i) => `<button type="button" class="isc-btn${answered && !none && String(v) === String(i) ? " active" : ""}" data-tid="${t.id}" data-val="${i}"${dis(String(i))}>${esc(o.label)}</button>`).join("")}
     </div>`;
   }
-  return `<div class="isc-task${answered ? " is-answered" : ""}" id="isc-task-${t.id}" data-type="${t.type}">
+  return `<div class="isc-task${answered ? " is-answered" : ""}${lock?.locked ? " is-bonus-locked" : ""}" id="isc-task-${t.id}" data-type="${t.type}">
     <div class="isc-task-head">
-      <span class="isc-task-name">${esc(t.name)}</span>
+      <span class="isc-task-name">${esc(t.name)}${bonusLockNote(lock)}</span>
       <span class="gfs-task-pts">${answered ? pointsFromRawTask(t, v) : "&ndash;"} / ${max}</span>
     </div>
     ${controls}
@@ -3451,6 +3632,7 @@ function onIscBodyClick(e) {
   if (card.dataset.type === "bool") raw[tid] = v === "yes";
   else if (card.dataset.type === "number") raw[tid] = Number(v);
   else raw[tid] = v === "" ? null : Number(v);
+  enforceBonusRules(raw);
   iscMaybeRecordMissionTiming(tid);
   recordScoreChanges();
   dbPut("runs", gr.run); // save every tap, so a reload/crash mid-run doesn't lose it
@@ -3539,6 +3721,7 @@ function renderGuidedOverview() {
 
 function renderOverviewBody() {
   const { run } = state.guidedRun;
+  enforceBonusRules(run.rawScores);
   const body = document.getElementById("gfs-overview-body");
   const inspectionOn = !!run.equipmentInspectionPassed;
   const tokensLeft = run.precisionTokensRemaining ?? 0;
@@ -3625,6 +3808,46 @@ function updateOverviewTotal() {
   if (el) el.innerHTML = scoreDisplayHTML(state.guidedRun.run, state.missions);
 }
 
+// Opens an incomplete game run — from any device, started by anyone — in
+// the editable Final Overview, with the clock stopped. Every tap saves and
+// syncs like normal, and Save & Finish turns it into a regular saved run.
+async function reopenIncompleteRun(id) {
+  if (state.guidedRun) return;
+  const run = await dbGet("runs", id); // freshest copy, including anything a teammate synced
+  if (!run || run.deleted || !run.inProgress) { await loadRuns(); return; }
+  const idleMs = Date.now() - (run.updatedAt || 0);
+  if (run.updatedAt && idleMs < 3 * 60 * 1000) {
+    const mins = Math.max(1, Math.round(idleMs / 60000));
+    if (!confirm(`This game run was changed ${mins} min ago — someone may still be scoring it on another device. If you both edit it, the last change saved wins. Open it anyway?`)) return;
+  }
+  run.rawScores = run.rawScores || {};
+  run.missionTimings = run.missionTimings || [];
+  run.transitionTimings = run.transitionTimings || [];
+  if (!run.finishedAt) {
+    // The clock is long gone, so the run ends where the last thing was
+    // scored on it (or wherever it had already been ended).
+    const lastScoredMs = (run.scoreLog || []).reduce((mx, e) => Math.max(mx, e.ms || 0), 0);
+    run.totalTimeMs = run.totalTimeMs ?? lastScoredMs;
+    run.finishedAt = (run.startedAt || Date.now()) + run.totalTimeMs;
+    if (run.totalTimeMs < MATCH_LENGTH_MS) run.endedEarly = true;
+  }
+  const legs = state.runGroups.filter((g) => getLegMissions(g).some((m) => visibleTasks(m).length));
+  state.guidedRun = {
+    run,
+    reopened: true,
+    legs,
+    legIdx: Math.max(0, legs.length - 1),
+    phase: "out",
+    matchStartTs: run.startedAt || Date.now(),
+    missionStartTs: Date.now(),
+    loggedFlat: flattenScoreState(run),
+    played30: true,
+    playedBuzzer: true,
+    timeExpired: true,
+    screen: "overview",
+  };
+  renderGuidedOverview();
+}
 async function finalizeGuidedRun() {
   stopGuidedTimer();
   const { run } = state.guidedRun;
@@ -3757,7 +3980,10 @@ function renderRuns() {
   const list = document.getElementById("run-list");
   const stats = document.getElementById("run-stats");
   list.innerHTML = "";
-  const allCompleted = state.runs.filter((r) => !r.inProgress);
+  // Sorted by when each game run started (not its stored order), so a run
+  // synced in from a teammate or saved later still lands under the right day.
+  const allCompleted = state.runs.filter((r) => !r.inProgress)
+    .sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0) || String(a.id).localeCompare(String(b.id)));
   const incomplete = state.runs.filter((r) => r.inProgress);
   const { from, to } = getRunDateFilterRange();
   const completed = allCompleted.filter((r) => { const t = r.startedAt || 0; return t >= from && t <= to; });
@@ -3787,17 +4013,20 @@ function renderRuns() {
 
   incomplete.forEach((run) => {
     const card = document.createElement("div");
-    card.className = "run-card run-card-incomplete";
+    card.className = "run-card run-card-incomplete run-card-clickable";
     card.innerHTML = `
       <div class="rc-row">
         <div class="rc-title-block">
           <div class="run-title">${esc(runDisplayLabel(run))}</div>
-          <div class="run-date">incomplete run</div>
+          <div class="run-date">incomplete run &middot; tap to finish or edit</div>
         </div>
+        <div class="rc-stat"><span class="rc-stat-val">${runTotal(run, state.missions)}</span><span class="rc-stat-label">so far</span></div>
         <button class="btn-icon rc-icon-btn" data-act="del" title="Delete">&#128465;&#65039;</button>
       </div>
     `;
-    card.querySelector('[data-act="del"]').addEventListener("click", async () => {
+    card.addEventListener("click", () => reopenIncompleteRun(run.id));
+    card.querySelector('[data-act="del"]').addEventListener("click", async (ev) => {
+      ev.stopPropagation();
       if (!confirm(`Delete incomplete game run "${runDisplayLabel(run)}"?`)) return;
       run.deleted = true;
       run.deletedAt = Date.now();
@@ -3821,7 +4050,8 @@ function renderRuns() {
       header.textContent = dayLabel(run.startedAt || 0);
       list.appendChild(header);
     }
-    const total = runTotal(run, state.missions);
+    const finalTotal = runTotal(run, state.missions);
+    const timedTotal = runOfficialTotal(run);
     const avgOp = breakdownAvgOpTime(run);
     const card = document.createElement("div");
     card.className = "run-card run-card-clickable";
@@ -3831,7 +4061,8 @@ function renderRuns() {
           <div class="run-title">${esc(runDisplayLabel(run))}</div>
           <div class="run-date">${run.startedAt ? esc(new Date(run.startedAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })) : esc(run.date || "")}</div>
         </div>
-        <div class="rc-stat"><span class="rc-stat-val">${total}</span><span class="rc-stat-label">pts</span></div>
+        <div class="rc-stat"><span class="rc-stat-val">${timedTotal}</span><span class="rc-stat-label">timed</span></div>
+        <div class="rc-stat"><span class="rc-stat-val">${finalTotal}</span><span class="rc-stat-label">final</span></div>
         <div class="rc-stat"><span class="rc-stat-val">${fmtDuration(run.totalTimeMs || 0)}</span><span class="rc-stat-label">time</span></div>
         <div class="rc-stat"><span class="rc-stat-val">${avgOp !== null ? fmtDuration(avgOp) : "&mdash;"}</span><span class="rc-stat-label">avg op</span></div>
         <button class="btn-icon rc-icon-btn" data-act="del" title="Delete">&#128465;&#65039;</button>
@@ -3926,6 +4157,7 @@ function renderBreakdownTabs() {
 
 function renderBreakdownScoresTab() {
   const { run, editing } = state.breakdown;
+  if (editing) enforceBonusRules(run.rawScores);
   const body = document.getElementById("brk-body");
   const inspectionOn = !!run.equipmentInspectionPassed;
   const tokensLeft = run.precisionTokensRemaining ?? 0;
@@ -5517,7 +5749,7 @@ async function writeScoreDataSheet(spreadsheetId) {
 
 // ---- Sheet 3: Analysis ----
 // Reuses the exact same computations already driving the in-app Analysis
-// tab. Three charts (Score Trend, Success Rate, Points/Sec by Mission) sit
+// tab. Three line charts (Score Trend, Success Rate, Total Run Time) sit
 // in a row along the top; their backing data tables are written below them,
 // stacked in column A. Re-running the export deletes any charts already on
 // this sheet first, so repeated exports don't pile up duplicates.
@@ -5531,11 +5763,9 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
     const flagged = rowDefs.filter((row) => row.flagged(r)).length;
     return [runDisplayLabel(r), total ? flagged / total : ""];
   });
-  const missionData = computeMissionAnalytics(completed).sort((a, b) => a.order - b.order);
-  const missionRows = missionData.map((d) => [
-    d.mission.name,
-    d.pointsPerSec != null ? Number(d.pointsPerSec.toFixed(2)) : "",
-  ]);
+  // Total time for each game run, in seconds (a plain number, so the chart
+  // can plot it).
+  const timeRows = completed.map((r) => [runDisplayLabel(r), Number(((r.totalTimeMs || 0) / 1000).toFixed(1))]);
 
   // Clear old charts (same reasoning as the conditional-format cleanup on
   // Score Data: without this, every re-export would add 3 more on top).
@@ -5572,10 +5802,10 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
   const successDataEnd = successDataStart + successRows.length;
   await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A${successHeaderRow + 1}`, [["Run", "Success Rate"], ...successRows]);
 
-  const missionHeaderRow = successDataEnd + 2;
-  const missionDataStart = missionHeaderRow + 1;
-  const missionDataEnd = missionDataStart + missionRows.length;
-  await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A${missionHeaderRow + 1}`, [["Mission", "Points/Sec"], ...missionRows]);
+  const timeHeaderRow = successDataEnd + 2;
+  const timeDataStart = timeHeaderRow + 1;
+  const timeDataEnd = timeDataStart + timeRows.length;
+  await sheetsValuesUpdate(spreadsheetId, `'Analysis'!A${timeHeaderRow + 1}`, [["Run", "Total Run Time (sec)"], ...timeRows]);
 
   // Percent formatting only — no coloring, per your preference.
   await sheetsBatchUpdate(spreadsheetId, [
@@ -5594,14 +5824,14 @@ async function writeAnalysisSheet(spreadsheetId, sheetId) {
 
   const charts = [
     { title: "Score Trend", axisTitle: "Official Score", dataStart: trendDataStart, dataEnd: trendDataEnd, col: 0, domainTitle: "Run", yMax: trendMaxY },
-    { title: "Success Rate", axisTitle: "Success Rate", dataStart: successDataStart, dataEnd: successDataEnd, col: CHART_GAP_COLS, domainTitle: "Run", chartType: "COLUMN" },
-    { title: "Points/Sec by Mission", axisTitle: "Points/Sec", dataStart: missionDataStart, dataEnd: missionDataEnd, col: CHART_GAP_COLS * 2, domainTitle: "Mission", chartType: "COLUMN" },
+    { title: "Success Rate", axisTitle: "Success Rate", dataStart: successDataStart, dataEnd: successDataEnd, col: CHART_GAP_COLS, domainTitle: "Run" },
+    { title: "Total Run Time", axisTitle: "Seconds", dataStart: timeDataStart, dataEnd: timeDataEnd, col: CHART_GAP_COLS * 2, domainTitle: "Run" },
   ];
   const chartRequests = charts.map((c) => ({
     addChart: { chart: { spec: {
       title: c.title,
       basicChart: {
-        chartType: c.chartType || "LINE",
+        chartType: "LINE",
         legendPosition: "NO_LEGEND",
         // Score Trend's axis runs 0 to the next multiple of 100, matching the in-app chart's 100-point gridlines.
         axis: [{ position: "BOTTOM_AXIS", title: c.domainTitle }, { position: "LEFT_AXIS", title: c.axisTitle, ...(c.yMax ? { viewWindowOptions: { viewWindowMode: "EXPLICIT", viewWindowMin: 0, viewWindowMax: c.yMax } } : {}) }],
@@ -5667,9 +5897,9 @@ async function writeBackupSheet(spreadsheetId, sheetId) {
 // rejected or blows past the formula length limit. So each photo gets
 // uploaded once to Google Drive (using the same drive.file OAuth token
 // already granted when connecting Sheets — no separate billing plan needed,
-// unlike Firebase Storage), made link-viewable, and the resulting URL is
-// cached back onto the entry — dbPut here — so re-running the export later
-// doesn't re-upload anything.
+// unlike Firebase Storage), made link-viewable, and its Drive file id is
+// cached back onto the entry — dbPut here — so
+// re-running the export later doesn't re-upload anything.
 async function sha256Hex(str) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -5741,20 +5971,66 @@ async function driveMakePublic(fileId) {
     headers: { Authorization: `Bearer ${state.sheets.accessToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ role: "reader", type: "anyone" }),
   });
-  if (!res.ok) throw new Error(`Drive permission ${res.status}: ${(await res.text().catch(() => "")).slice(0, 300)}`);
+  if (!res.ok) {
+    const err = new Error(`Drive permission ${res.status}: ${(await res.text().catch(() => "")).slice(0, 300)}`);
+    err.status = res.status;
+    throw err;
+  }
+}
+// The URL IMAGE() loads a photo from, built only from its Drive file id —
+// so it keeps working no matter where the file or the BARP Photos folder
+// gets moved to. (The old drive.google.com/thumbnail links often came back
+// as a blank white image inside Sheets; this host serves the real image.)
+function drivePhotoImageUrl(fileId) {
+  return `https://lh3.googleusercontent.com/d/${fileId}=w1000`;
+}
+// Photos exported before file ids were cached only have the old thumbnail
+// URL stored — the id is still in it.
+function cachedPhotoFileId(entry, hash) {
+  const id = entry.uploadedPhotoIds?.[hash];
+  if (id) return id;
+  const oldUrl = entry.uploadedPhotoUrls?.[hash];
+  const m = oldUrl && /[?&]id=([\w-]+)/.exec(oldUrl);
+  return m ? m[1] : null;
 }
 async function ensurePhotoUploaded(entry, photoDataUrl, folderId) {
   const hash = await sha256Hex(photoDataUrl);
-  entry.uploadedPhotoUrls = entry.uploadedPhotoUrls || {};
-  if (entry.uploadedPhotoUrls[hash]) return entry.uploadedPhotoUrls[hash];
+  entry.uploadedPhotoIds = entry.uploadedPhotoIds || {};
   if (!state.sheets.accessToken) throw new Error("Not connected to Google Sheets.");
+  const cachedId = cachedPhotoFileId(entry, hash);
+  const me = window.firebaseAuth?.currentUser?.uid || null;
+  entry.uploadedPhotoBy = entry.uploadedPhotoBy || {};
+  if (cachedId) {
+    const uploadedByMe = me && entry.uploadedPhotoBy[hash] === me;
+    if (!uploadedByMe) {
+      // Uploaded by a teammate's account (or before uploaders were tracked):
+      // this account's drive.file access can't see or change that file, so
+      // just use it as-is rather than re-uploading a duplicate.
+      if (entry.uploadedPhotoIds[hash] !== cachedId) {
+        entry.uploadedPhotoIds[hash] = cachedId;
+        await dbPut("entries", entry);
+      }
+      return drivePhotoImageUrl(cachedId);
+    }
+    // Our own upload: re-apply "anyone with the link" every export, since
+    // moving a photo (or the whole folder) somewhere else in Drive can
+    // change who's allowed to see it, which is what makes IMAGE() show
+    // nothing. If the file is gone entirely (deleted), upload it again.
+    try {
+      await withTimeout(driveMakePublic(cachedId), 20000, "Setting photo sharing");
+      return drivePhotoImageUrl(cachedId);
+    } catch (e) {
+      if (e.status !== 404) return drivePhotoImageUrl(cachedId); // network hiccup etc. — the file's probably still fine
+    }
+  }
   const blob = await (await fetch(photoDataUrl)).blob();
   const fileId = await withTimeout(driveUploadPhoto(blob, `${hash}.jpg`, folderId), 20000, "Photo upload");
   await withTimeout(driveMakePublic(fileId), 20000, "Setting photo sharing");
-  const url = `https://drive.google.com/thumbnail?id=${fileId}&sz=w1000`;
-  entry.uploadedPhotoUrls[hash] = url;
+  entry.uploadedPhotoIds[hash] = fileId;
+  if (me) entry.uploadedPhotoBy[hash] = me;
+  if (entry.uploadedPhotoUrls) delete entry.uploadedPhotoUrls[hash];
   await dbPut("entries", entry); // cache so future exports skip re-uploading this photo
-  return url;
+  return drivePhotoImageUrl(fileId);
 }
 // Runs async work over `items` with at most `limit` running at once —
 // used to upload several photos in parallel instead of one dead-strict
@@ -5960,8 +6236,18 @@ function setSyncStatus(text) {
   const el = document.getElementById("drive-sync-status");
   if (el) el.textContent = text;
 }
+// The updatedAt of each record as the cloud last had it, per collection
+// (filled in by the live listeners and by our own pushes). A record only
+// gets pushed when this device has a newer copy than that.
+const cloudUpdatedAt = {};
+// Collections whose first snapshot has arrived. Nothing is pushed until all
+// of them have: before then this device doesn't know what the cloud has,
+// and pushing blind is how an old copy used to overwrite a newer one.
+const listenersReady = new Set();
+function syncReady() { return FIRESTORE_COLLECTIONS.every((c) => listenersReady.has(c)); }
 function syncToTeamDrive() {
   if (!state.firebaseUser) return; // not signed in — nothing to do
+  if (!syncReady()) { driveSyncQueued = true; return; } // runs once the cloud's current data is in
   if (driveSyncInFlight) { driveSyncQueued = true; return; }
   driveSyncInFlight = true;
   setSyncStatus("Syncing…");
@@ -5985,9 +6271,16 @@ async function performFirestoreSync() {
   const db = window.firebaseDb;
   const writes = [];
   for (const storeName of FIRESTORE_COLLECTIONS) {
+    const known = cloudUpdatedAt[storeName] || (cloudUpdatedAt[storeName] = new Map());
     const records = await dbGetAll(storeName);
     for (const rec of records) {
-      writes.push(setDoc(doc(collection(db, storeName), String(rec.id)), rec));
+      const key = String(rec.id);
+      const mine = rec.updatedAt || 0;
+      // Only push what the cloud doesn't have yet, or has an older copy of.
+      if (known.has(key) && mine <= known.get(key)) continue;
+      writes.push(setDoc(doc(collection(db, storeName), key), rec).then(() => {
+        if (!known.has(key) || known.get(key) < mine) known.set(key, mine);
+      }));
     }
   }
   await Promise.all(writes);
@@ -6004,21 +6297,38 @@ function startFirestoreListeners() {
     onSnapshot(collection(db, storeName), async (snapshot) => {
       let changed = false;
       let repush = false;
+      const known = cloudUpdatedAt[storeName] || (cloudUpdatedAt[storeName] = new Map());
       for (const change of snapshot.docChanges()) {
         if (change.type === "removed") continue; // deletes are soft-deletes stored as normal docs, not real Firestore removals
+        if (change.doc.metadata?.hasPendingWrites) continue; // just our own push echoing back
         const remote = change.doc.data();
-        // Don't let an older cloud copy undo a delete (or a restore) made on
-        // this device — e.g. the app was closed before the delete finished
-        // uploading, or a teammate's device pushed its stale copy. Whichever
-        // happened last wins, and this device re-sends its copy to fix the cloud.
-        const local = remote && remote.id != null ? await dbGet(storeName, remote.id) : null;
-        if (local && local.deleted && !remote.deleted && (local.deletedAt || 0) > (remote.restoredAt || 0)) { repush = true; continue; }
-        if (local && !local.deleted && remote.deleted && (local.restoredAt || 0) > (remote.deletedAt || 0)) { repush = true; continue; }
-        await dbPut(storeName, remote);
+        if (!remote || remote.id == null) continue;
+        const remoteAt = remote.updatedAt || 0;
+        known.set(String(remote.id), remoteAt);
+        const local = await dbGet(storeName, remote.id);
+        if (local) {
+          const localAt = local.updatedAt || 0;
+          // Newest copy wins. If this device's copy is newer (edited while
+          // offline, or a teammate's device pushed something stale), keep
+          // it and send it back up to fix the cloud.
+          if (localAt > remoteAt) { repush = true; continue; }
+          if (localAt === remoteAt && recordsMatch(local, remote)) continue; // already have exactly this
+          if (localAt === 0 && remoteAt === 0) {
+            // Both copies are from before updatedAt existed — fall back to
+            // the old rule: don't let an older copy undo a delete/restore.
+            if (local.deleted && !remote.deleted && (local.deletedAt || 0) > (remote.restoredAt || 0)) { repush = true; continue; }
+            if (!local.deleted && remote.deleted && (local.restoredAt || 0) > (remote.deletedAt || 0)) { repush = true; continue; }
+          }
+        }
+        await dbPutRaw(storeName, remote); // as-is: it's the cloud's change, not a new local one
         changed = true;
       }
+      const firstSnapshot = !listenersReady.has(storeName);
+      listenersReady.add(storeName);
       if (changed) await refreshAfterRemoteChange(storeName);
-      if (repush) syncToTeamDrive();
+      // Once every collection's current data is in, push whatever this
+      // device changed while it was offline (or before signing in).
+      if (repush || (firstSnapshot && syncReady())) syncToTeamDrive();
       setSyncStatus("Connected");
     }, (e) => { setSyncStatus("Sync failed — will retry on the next change."); showErrorBanner(`Team sync listener failed: ${e.message}`); });
   });

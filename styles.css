@@ -826,7 +826,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
   background: var(--amber); border-radius: 12px; padding: 4px;
 }
 .side-widget-step {
-  width: 52px; height: 32px; border: none; border-radius: 9px;
+  width: 60px; height: 32px; border: none; border-radius: 9px;
   background: rgba(0,0,0,0.12); color: var(--ink-deep);
   font-family: var(--mono); font-size: 1.2rem; font-weight: 700; line-height: 1; cursor: pointer;
 }
@@ -995,3 +995,13 @@ input[type="checkbox"].switch:checked::after { transform: translateX(18px); }
 .cutoff-current-next { font-size: 0.72rem; color: var(--text-soft); opacity: 0.75; margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cutoff-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .cutoff-footer .cutoff-summary { font-size: 0.9rem; color: var(--ink-deep); }
+
+/* --- Bonus tasks locked until their mission's main task is done --- */
+.is-bonus-locked { opacity: 0.5; }
+.is-bonus-locked button:disabled { cursor: not-allowed; }
+.gfs-task-row button:disabled, .isc-task button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.bonus-lock-note {
+  display: block; margin-top: 2px;
+  font-family: var(--body); font-size: 0.72rem; font-weight: 400; font-style: italic;
+  color: var(--text-soft); text-transform: none; letter-spacing: 0;
+}
