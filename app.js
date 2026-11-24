@@ -5655,7 +5655,18 @@ async function writeOneScoreDataSheet(spreadsheetId, sheetId, title, rowDefs, ru
     { autoResizeDimensions: { dimensions: { sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: 5 } } },
   ]);
 }
+// A name clash can still happen if the spreadsheet changes mid-export (e.g.
+// a teammate exporting at the same moment) — re-reading it and trying once
+// more sorts that out, since the second pass reuses the tab by its name.
 async function writeScoreDataSheet(spreadsheetId) {
+  try {
+    await writeScoreDataSheetOnce(spreadsheetId);
+  } catch (e) {
+    if (!/already exists/i.test(e.message)) throw e;
+    await writeScoreDataSheetOnce(spreadsheetId);
+  }
+}
+async function writeScoreDataSheetOnce(spreadsheetId) {
   const rowDefs = buildScoreRowDefs();
   const sortedRuns = state.runs.filter((r) => !r.inProgress).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   const chunks = [];
@@ -5673,25 +5684,26 @@ async function writeScoreDataSheet(spreadsheetId) {
   }
 
   const meta = await sheetsFetch(spreadsheetId);
+  // Sheets treats tab names as the same regardless of upper/lower case.
+  const norm = (t) => String(t).trim().toLowerCase();
   const titleById = new Map(meta.sheets.map((s) => [s.properties.sheetId, s.properties.title]));
-  const idByTitle = new Map(meta.sheets.map((s) => [s.properties.title, s.properties.sheetId]));
+  const idByTitle = new Map(meta.sheets.map((s) => [norm(s.properties.title), s.properties.sheetId]));
   const stored = await loadScoreDataSheetIds(meta.sheets);
 
-  // Pick which existing tab each chunk writes into: the one remembered from
-  // the last export first, then any tab that already has the exact name
-  // (e.g. left behind by an export that failed before it could save its
-  // tab list — which used to make every later export fail with "a sheet
-  // with that name already exists").
+  // Pick which existing tab each chunk writes into: a tab that already has
+  // the exact name first (so in the usual case nothing needs renaming at
+  // all, and a tab can never be stuck holding a name another chunk needs),
+  // then the one remembered from the last export, then a brand-new tab.
   const claimed = new Set();
-  const sheetIds = titles.map((_, i) => {
-    const id = stored[i];
-    if (id != null && titleById.has(id) && !claimed.has(id)) { claimed.add(id); return id; }
+  const sheetIds = titles.map((title) => {
+    const holder = idByTitle.get(norm(title));
+    if (holder != null && !claimed.has(holder)) { claimed.add(holder); return holder; }
     return null;
   });
-  titles.forEach((title, i) => {
+  titles.forEach((_, i) => {
     if (sheetIds[i] != null) return;
-    const holder = idByTitle.get(title);
-    if (holder != null && !claimed.has(holder)) { claimed.add(holder); sheetIds[i] = holder; }
+    const id = stored[i];
+    if (id != null && titleById.has(id) && !claimed.has(id)) { claimed.add(id); sheetIds[i] = id; }
   });
 
   // Create tabs for any chunk still without one, under throwaway names —
@@ -5707,25 +5719,28 @@ async function writeScoreDataSheet(spreadsheetId) {
     });
   }
 
-  // Rename everything in one batch (Google applies the steps in order):
-  // move any unrelated tab that's sitting on a name we need out of the way,
-  // park our tabs on temporary names, then give them their final names.
-  // Doing it this way means no step can ever collide with a name in use.
-  const usedTitles = new Set(titleById.values());
-  const renames = [];
-  titles.forEach((title, i) => {
-    const holder = idByTitle.get(title);
+  // Rename what's left in steps, each its own request, so no step depends
+  // on Google applying a batch in order: first move any unrelated tab that's
+  // sitting on a name we need out of the way (normally none, since a tab
+  // with the right name was claimed above), then park our tabs on temporary
+  // names, then give them their final names.
+  const usedTitles = new Set([...titleById.values()].map(norm));
+  const moves = [];
+  titles.forEach((title) => {
+    const holder = idByTitle.get(norm(title));
     if (holder != null && !sheetIds.includes(holder)) {
       let alt = `${title} (old)`, n = 2;
-      while (usedTitles.has(alt)) alt = `${title} (old ${n++})`;
-      usedTitles.add(alt);
-      renames.push({ updateSheetProperties: { properties: { sheetId: holder, title: alt }, fields: "title" } });
+      while (usedTitles.has(norm(alt))) alt = `${title} (old ${n++})`;
+      usedTitles.add(norm(alt));
+      moves.push({ updateSheetProperties: { properties: { sheetId: holder, title: alt }, fields: "title" } });
     }
   });
   const needsRename = sheetIds.map((id, i) => (titleById.get(id) !== titles[i] ? i : null)).filter((i) => i != null);
-  needsRename.forEach((i) => renames.push({ updateSheetProperties: { properties: { sheetId: sheetIds[i], title: `barp-tmp-${sheetIds[i]}` }, fields: "title" } }));
-  needsRename.forEach((i) => renames.push({ updateSheetProperties: { properties: { sheetId: sheetIds[i], title: titles[i] }, fields: "title" } }));
-  if (renames.length) await sheetsBatchUpdate(spreadsheetId, renames);
+  const parks = needsRename.map((i) => ({ updateSheetProperties: { properties: { sheetId: sheetIds[i], title: `barp-tmp-${sheetIds[i]}` }, fields: "title" } }));
+  const finals = needsRename.map((i) => ({ updateSheetProperties: { properties: { sheetId: sheetIds[i], title: titles[i] }, fields: "title" } }));
+  for (const step of [moves, parks, finals]) {
+    if (step.length) await sheetsBatchUpdate(spreadsheetId, step);
+  }
 
   // Delete leftover Score Data tabs from earlier exports that this export
   // doesn't use any more (e.g. an old "9/6 - 9/12" tab whose runs are now
@@ -5733,7 +5748,7 @@ async function writeScoreDataSheet(spreadsheetId) {
   const keep = new Set(sheetIds);
   const stale = meta.sheets
     .map((s) => s.properties)
-    .filter((pr) => !keep.has(pr.sheetId) && (stored.includes(pr.sheetId) || /^Score Data\b/.test(pr.title)))
+    .filter((pr) => !keep.has(pr.sheetId) && (stored.includes(pr.sheetId) || /^Score Data\b/i.test(pr.title) || /^barp-(new|tmp)-/.test(pr.title)))
     .map((pr) => pr.sheetId);
   if (stale.length) await sheetsBatchUpdate(spreadsheetId, stale.map((sheetId) => ({ deleteSheet: { sheetId } })));
 
