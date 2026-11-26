@@ -3348,7 +3348,7 @@ function taskRowHTML(t, raw) {
   }
   const cur = raw[t.id] ?? "";
   const btns = [`<button type="button" class="gfs-choice-btn${cur === "" ? " active" : ""}" data-tid="${t.id}" data-val="">Not achieved</button>`]
-    .concat((t.options || []).map((o, i) => `<button type="button" class="gfs-choice-btn${String(cur) === String(i) ? " active" : ""}" data-tid="${t.id}" data-val="${i}"${dis(String(i))}>${esc(o.label)}</button>`))
+    .concat((t.options || []).map((o, i) => `<button type="button" class="gfs-choice-btn${String(cur) === String(i) ? " active" : ""}" data-tid="${t.id}" data-val="${i}">${esc(o.label)}</button>`))
     .join("");
   return `<div class="gfs-task-row gfs-task-row-wrap" data-tid="${t.id}" data-type="choice">
     <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${pointsFromRawTask(t, cur)} / ${max}</span></span>
@@ -3441,7 +3441,7 @@ function iscTaskCardHTML(t, raw) {
     const none = answered && (v === null || v === "");
     controls = `<div class="isc-strip">
       <button type="button" class="isc-btn${none ? " active-zero" : ""}" data-tid="${t.id}" data-val="">Not achieved</button>
-      ${(t.options || []).map((o, i) => `<button type="button" class="isc-btn${answered && !none && String(v) === String(i) ? " active" : ""}" data-tid="${t.id}" data-val="${i}"${dis(String(i))}>${esc(o.label)}</button>`).join("")}
+      ${(t.options || []).map((o, i) => `<button type="button" class="isc-btn${answered && !none && String(v) === String(i) ? " active" : ""}" data-tid="${t.id}" data-val="${i}">${esc(o.label)}</button>`).join("")}
     </div>`;
   }
   return `<div class="isc-task${answered ? " is-answered" : ""}" id="isc-task-${t.id}" data-type="${t.type}">
