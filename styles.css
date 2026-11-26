@@ -178,6 +178,7 @@ main { padding: 18px 16px 40px; max-width: 640px; margin: 0 auto; }
 }
 .stat-box .stat-num { font-family: var(--mono); font-size: 1.3rem; color: var(--amber); display: block; }
 .stat-box .stat-label { font-size: 0.68rem; color: var(--moss-light); text-transform: uppercase; letter-spacing: 0.04em; }
+.stat-box .stat-of { font-size: 0.8rem; color: var(--paper); opacity: 0.7; }
 
 .run-list { display: flex; flex-direction: column; gap: 8px; }
 .run-day-header {
@@ -997,12 +998,3 @@ input[type="checkbox"].switch:checked::after { transform: translateX(18px); }
 .cutoff-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .cutoff-footer .cutoff-summary { font-size: 0.9rem; color: var(--ink-deep); }
 
-/* --- Bonus tasks locked until their mission's main task is done --- */
-.is-bonus-locked { opacity: 0.5; }
-.is-bonus-locked button:disabled { cursor: not-allowed; }
-.gfs-task-row button:disabled, .isc-task button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-.bonus-lock-note {
-  display: block; margin-top: 2px;
-  font-family: var(--body); font-size: 0.72rem; font-weight: 400; font-style: italic;
-  color: var(--text-soft); text-transform: none; letter-spacing: 0;
-}

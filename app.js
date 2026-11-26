@@ -2054,75 +2054,6 @@ const SEASON_MISSIONS = [
     { id: "sm-15-t3", name: "Environmental bonus (compost hatch)", type: "bool", points: 10 },
   ] },
 ];
-// Bonus tasks that only count once their mission's main task is done (by
-// bank task id: bonus -> the task it depends on). E.g. the Lucky Leaves
-// "second leaf" bonus isn't possible if the first leaf never came out. A
-// counted bonus on a counted main task (Seeds of Renewal) also can't go
-// higher than the main task's count.
-const BONUS_REQUIRES = {
-  "sm-1-t1": "sm-1-t0",
-  "sm-3-t1": "sm-3-t0",
-  "sm-4-t1": "sm-4-t0",
-  "sm-7-t1": "sm-7-t0",
-  "sm-14-t1": "sm-14-t0",
-  "sm-15-t3": "sm-15-t2",
-};
-function taskBankId(t) { return t.bankTaskId || t.id; }
-function taskAchieved(t, v) {
-  if (t.type === "bool") return !!v;
-  if (t.type === "number") return (Number(v) || 0) > 0;
-  return !(v === null || v === undefined || v === "");
-}
-// For a bonus task: its main task in the current mission list, whether the
-// bonus is locked, and (for counted bonuses) the highest count allowed.
-// Returns null for tasks that aren't a bonus, or whose main task isn't
-// assigned to any Run (then there's nothing to check against).
-function bonusLockInfo(t, raw) {
-  const reqId = BONUS_REQUIRES[taskBankId(t)];
-  if (!reqId) return null;
-  let base = null;
-  for (const m of state.missions) {
-    base = visibleTasks(m).find((x) => taskBankId(x) === reqId);
-    if (base) break;
-  }
-  if (!base) return null;
-  const scores = raw || {};
-  const answered = Object.prototype.hasOwnProperty.call(scores, base.id);
-  const v = scores[base.id];
-  const locked = !taskAchieved(base, v);
-  const maxAllowed = t.type === "number" && base.type === "number" ? Math.min(t.max || 0, Number(v) || 0) : null;
-  return { base, answered, locked, maxAllowed };
-}
-// Keeps bonus values consistent with their main tasks after a score change:
-// a main task scored as not done zeroes its bonus (which also marks the
-// bonus as answered, so interactive scoring skips past it), and a counted
-// bonus is clamped to the main task's count.
-function enforceBonusRules(raw) {
-  if (!raw) return;
-  for (const m of state.missions) {
-    for (const t of visibleTasks(m)) {
-      const info = bonusLockInfo(t, raw);
-      if (!info || !info.answered) continue;
-      if (info.locked) {
-        const zero = t.type === "bool" ? false : t.type === "number" ? 0 : null;
-        if (raw[t.id] !== zero) raw[t.id] = zero;
-      } else if (info.maxAllowed != null && (Number(raw[t.id]) || 0) > info.maxAllowed) {
-        raw[t.id] = info.maxAllowed;
-      }
-    }
-  }
-}
-// Whether a given button value is unavailable for a bonus task right now.
-function bonusValueDisabled(info, t, val) {
-  if (!info) return false;
-  const zero = t.type === "bool" ? val === "no" : t.type === "number" ? Number(val) === 0 : val === "";
-  if (info.locked) return !zero;
-  if (info.maxAllowed != null) return Number(val) > info.maxAllowed;
-  return false;
-}
-function bonusLockNote(info) {
-  return info && info.locked ? `<span class="bonus-lock-note">Needs &ldquo;${esc(info.base.name)}&rdquo; first</span>` : "";
-}
 // Previous names of season tasks that have since been renamed (by bank task
 // id) — only used so importing an older exported scoresheet still matches.
 const RENAMED_TASK_OLD_NAMES = {
@@ -3395,26 +3326,23 @@ function isTaskComplete(t, raw) {
 // (where you see every task in every mission at once, not one at a time).
 function taskRowHTML(t, raw) {
   const max = taskMaxPoints(t);
-  const lock = bonusLockInfo(t, raw);
-  const dis = (val) => (bonusValueDisabled(lock, t, val) ? " disabled" : "");
-  const lockCls = lock?.locked ? " is-bonus-locked" : "";
   if (t.type === "bool") {
     const on = !!raw[t.id];
-    return `<div class="gfs-task-row gfs-task-row-wrap${lockCls}" data-tid="${t.id}" data-type="bool">
-      <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${on ? max : 0} / ${max}</span>${bonusLockNote(lock)}</span>
+    return `<div class="gfs-task-row gfs-task-row-wrap" data-tid="${t.id}" data-type="bool">
+      <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${on ? max : 0} / ${max}</span></span>
       <div class="gfs-choice-strip">
-        <button type="button" class="gfs-choice-btn${on ? " active" : ""}" data-tid="${t.id}" data-val="yes"${dis("yes")}>Yes</button>
-        <button type="button" class="gfs-choice-btn${!on ? " active" : ""}" data-tid="${t.id}" data-val="no"${dis("no")}>No</button>
+        <button type="button" class="gfs-choice-btn${on ? " active" : ""}" data-tid="${t.id}" data-val="yes">Yes</button>
+        <button type="button" class="gfs-choice-btn${!on ? " active" : ""}" data-tid="${t.id}" data-val="no">No</button>
       </div>
     </div>`;
   }
   if (t.type === "number") {
     const val = raw[t.id] ?? 0;
     const btns = Array.from({ length: (t.max || 0) + 1 }, (_, i) =>
-      `<button type="button" class="gfs-num-btn${val === i ? " active" : ""}" data-tid="${t.id}" data-val="${i}"${dis(i)}>${i}</button>`
+      `<button type="button" class="gfs-num-btn${val === i ? " active" : ""}" data-tid="${t.id}" data-val="${i}">${i}</button>`
     ).join("");
-    return `<div class="gfs-task-row gfs-task-row-wrap${lockCls}" data-tid="${t.id}" data-type="number">
-      <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${pointsFromRawTask(t, val)} / ${max}</span>${bonusLockNote(lock)}</span>
+    return `<div class="gfs-task-row gfs-task-row-wrap" data-tid="${t.id}" data-type="number">
+      <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${pointsFromRawTask(t, val)} / ${max}</span></span>
       <div class="gfs-num-strip">${btns}</div>
     </div>`;
   }
@@ -3422,8 +3350,8 @@ function taskRowHTML(t, raw) {
   const btns = [`<button type="button" class="gfs-choice-btn${cur === "" ? " active" : ""}" data-tid="${t.id}" data-val="">Not achieved</button>`]
     .concat((t.options || []).map((o, i) => `<button type="button" class="gfs-choice-btn${String(cur) === String(i) ? " active" : ""}" data-tid="${t.id}" data-val="${i}"${dis(String(i))}>${esc(o.label)}</button>`))
     .join("");
-  return `<div class="gfs-task-row gfs-task-row-wrap${lockCls}" data-tid="${t.id}" data-type="choice">
-    <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${pointsFromRawTask(t, cur)} / ${max}</span>${bonusLockNote(lock)}</span>
+  return `<div class="gfs-task-row gfs-task-row-wrap" data-tid="${t.id}" data-type="choice">
+    <span class="gfs-task-name">${esc(t.name)} <span class="gfs-task-pts">${pointsFromRawTask(t, cur)} / ${max}</span></span>
     <div class="gfs-choice-strip">${btns}</div>
   </div>`;
 }
@@ -3497,19 +3425,17 @@ function iscBadgeText() {
 
 function iscTaskCardHTML(t, raw) {
   const answered = isTaskAnswered(t, raw);
-  const lock = bonusLockInfo(t, raw);
-  const dis = (val) => (bonusValueDisabled(lock, t, val) ? " disabled" : "");
   const max = taskMaxPoints(t);
   const v = raw[t.id];
   let controls;
   if (t.type === "bool") {
     controls = `<div class="isc-bool">
-      <button type="button" class="isc-btn isc-btn-yes${answered && v ? " active" : ""}" data-tid="${t.id}" data-val="yes"${dis("yes")}>Complete</button>
-      <button type="button" class="isc-btn isc-btn-no${answered && !v ? " active" : ""}" data-tid="${t.id}" data-val="no"${dis("no")}>Incomplete</button>
+      <button type="button" class="isc-btn isc-btn-yes${answered && v ? " active" : ""}" data-tid="${t.id}" data-val="yes">Complete</button>
+      <button type="button" class="isc-btn isc-btn-no${answered && !v ? " active" : ""}" data-tid="${t.id}" data-val="no">Incomplete</button>
     </div>`;
   } else if (t.type === "number") {
     controls = `<div class="isc-strip">${Array.from({ length: (t.max || 0) + 1 }, (_, i) =>
-      `<button type="button" class="isc-btn isc-btn-num${answered && Number(v) === i ? (i === 0 ? " active-zero" : " active") : ""}" data-tid="${t.id}" data-val="${i}"${dis(i)}>${i}</button>`
+      `<button type="button" class="isc-btn isc-btn-num${answered && Number(v) === i ? (i === 0 ? " active-zero" : " active") : ""}" data-tid="${t.id}" data-val="${i}">${i}</button>`
     ).join("")}</div>`;
   } else {
     const none = answered && (v === null || v === "");
@@ -3518,9 +3444,9 @@ function iscTaskCardHTML(t, raw) {
       ${(t.options || []).map((o, i) => `<button type="button" class="isc-btn${answered && !none && String(v) === String(i) ? " active" : ""}" data-tid="${t.id}" data-val="${i}"${dis(String(i))}>${esc(o.label)}</button>`).join("")}
     </div>`;
   }
-  return `<div class="isc-task${answered ? " is-answered" : ""}${lock?.locked ? " is-bonus-locked" : ""}" id="isc-task-${t.id}" data-type="${t.type}">
+  return `<div class="isc-task${answered ? " is-answered" : ""}" id="isc-task-${t.id}" data-type="${t.type}">
     <div class="isc-task-head">
-      <span class="isc-task-name">${esc(t.name)}${bonusLockNote(lock)}</span>
+      <span class="isc-task-name">${esc(t.name)}</span>
       <span class="gfs-task-pts">${answered ? pointsFromRawTask(t, v) : "&ndash;"} / ${max}</span>
     </div>
     ${controls}
@@ -3632,7 +3558,6 @@ function onIscBodyClick(e) {
   if (card.dataset.type === "bool") raw[tid] = v === "yes";
   else if (card.dataset.type === "number") raw[tid] = Number(v);
   else raw[tid] = v === "" ? null : Number(v);
-  enforceBonusRules(raw);
   iscMaybeRecordMissionTiming(tid);
   recordScoreChanges();
   dbPut("runs", gr.run); // save every tap, so a reload/crash mid-run doesn't lose it
@@ -3721,7 +3646,6 @@ function renderGuidedOverview() {
 
 function renderOverviewBody() {
   const { run } = state.guidedRun;
-  enforceBonusRules(run.rawScores);
   const body = document.getElementById("gfs-overview-body");
   const inspectionOn = !!run.equipmentInspectionPassed;
   const tokensLeft = run.precisionTokensRemaining ?? 0;
@@ -3994,7 +3918,7 @@ function renderRuns() {
     return;
   }
   if (!completed.length) {
-    list.innerHTML = `<p class="empty-sub">No completed game runs in that date range.</p>`;
+    list.innerHTML = `<p class="empty-sub">No completed game runs in that date range (${allCompleted.length} saved in total).</p>`;
   }
 
   if (completed.length) {
@@ -4002,7 +3926,9 @@ function renderRuns() {
     const best = Math.max(...totals);
     const avg = totals.reduce((a, b) => a + b, 0) / totals.length;
     const avgGameTime = completed.reduce((s, r) => s + (r.totalTimeMs || 0), 0) / completed.length;
+    const filtered = completed.length !== allCompleted.length;
     stats.innerHTML = `
+      <div class="stat-box"><span class="stat-num">${completed.length}${filtered ? `<span class="stat-of"> / ${allCompleted.length}</span>` : ""}</span><span class="stat-label">${filtered ? "Game runs shown" : "Saved game runs"}</span></div>
       <div class="stat-box"><span class="stat-num">${best}</span><span class="stat-label">Best score</span></div>
       <div class="stat-box"><span class="stat-num">${avg.toFixed(1)}</span><span class="stat-label">Avg score</span></div>
       <div class="stat-box"><span class="stat-num">${fmtDuration(avgGameTime)}</span><span class="stat-label">Avg game time</span></div>
@@ -4117,16 +4043,26 @@ function renderRunBreakdown(run) {
       <button type="button" class="btn btn-primary btn-full" id="brk-close-btn">Close</button>
     </div>
   `);
-  document.getElementById("brk-back").addEventListener("click", closeGuidedFullscreen);
+  // While editing, the ← becomes ✕: it cancels the edit (throwing away
+  // every change made since tapping ✏️) instead of leaving the screen.
+  document.getElementById("brk-back").addEventListener("click", () => {
+    const b = state.breakdown;
+    if (b.editing) cancelBreakdownEdit();
+    else closeGuidedFullscreen();
+  });
   document.getElementById("brk-close-btn").addEventListener("click", closeGuidedFullscreen);
   document.getElementById("brk-edit-btn").addEventListener("click", async () => {
     const b = state.breakdown;
     const wasEditing = b.editing;
+    // Edits change the run in place as you tap, so remember exactly how it
+    // was before editing started — that's what ✕ puts back.
+    if (!wasEditing) b.beforeEdit = JSON.parse(JSON.stringify(b.run));
     // Flip the screen right away (so the tap feels instant and closing the
     // screen mid-save can't break anything), then save in the background.
     b.editing = !b.editing;
     renderBreakdownTabs();
     if (wasEditing) {
+      b.beforeEdit = null;
       await dbPut("runs", b.run);
       await loadRuns();
       syncToTeamDrive();
@@ -4135,6 +4071,20 @@ function renderRunBreakdown(run) {
   renderBreakdownTabs();
 }
 
+// Puts the run back exactly as it was when ✏️ was tapped. Nothing was
+// saved while editing, so there's nothing to undo in storage.
+function cancelBreakdownEdit() {
+  const b = state.breakdown;
+  if (!b || !b.editing) return;
+  if (b.beforeEdit) {
+    Object.keys(b.run).forEach((k) => { delete b.run[k]; });
+    Object.assign(b.run, JSON.parse(JSON.stringify(b.beforeEdit)));
+  }
+  b.beforeEdit = null;
+  b.editing = false;
+  renderBreakdownTabs();
+  refreshBreakdownTotal();
+}
 function renderBreakdownTabs() {
   const b = state.breakdown;
   document.querySelectorAll(".brk-tab-btn").forEach((btn) => {
@@ -4149,6 +4099,11 @@ function renderBreakdownTabs() {
     editBtn.title = b.editing ? "Save changes" : "Edit";
     editBtn.classList.toggle("is-saving", b.editing);
   }
+  const backBtn = document.getElementById("brk-back");
+  if (backBtn) {
+    backBtn.innerHTML = b.editing ? "&#10005;" : "&#8592;";
+    backBtn.title = b.editing ? "Cancel editing (discard changes)" : "Back";
+  }
   const footer = document.getElementById("brk-footer");
   if (footer) footer.hidden = b.editing;
   if (b.tab === "scores") renderBreakdownScoresTab();
@@ -4157,7 +4112,6 @@ function renderBreakdownTabs() {
 
 function renderBreakdownScoresTab() {
   const { run, editing } = state.breakdown;
-  if (editing) enforceBonusRules(run.rawScores);
   const body = document.getElementById("brk-body");
   const inspectionOn = !!run.equipmentInspectionPassed;
   const tokensLeft = run.precisionTokensRemaining ?? 0;
