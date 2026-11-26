@@ -5800,7 +5800,7 @@ async function writeScoreDataSheetOnce(spreadsheetId) {
   const keep = new Set(sheetIds);
   const stale = meta.sheets
     .map((s) => s.properties)
-    .filter((pr) => !keep.has(pr.sheetId) && (/^Score Data\b/i.test(pr.title) || /^barp-(new|tmp)-/.test(pr.title)))
+    .filter((pr) => !keep.has(pr.sheetId) && (/^Score Data\b/i.test(pr.title) || /^barp-(new|tmp|fresh)-/.test(pr.title)))
     .map((pr) => pr.sheetId);
   for (const sheetId of stale) await sheetsDeleteSheetIfExists(spreadsheetId, sheetId);
 
