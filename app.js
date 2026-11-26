@@ -5257,6 +5257,53 @@ function sheetsBatchUpdate(spreadsheetId, requests) {
     body: JSON.stringify({ requests }),
   });
 }
+// Deleting a tab that's already gone (e.g. another device's export just
+// removed it) isn't a problem — the goal was for it not to exist.
+async function sheetsDeleteSheetIfExists(spreadsheetId, sheetId) {
+  try {
+    await sheetsBatchUpdate(spreadsheetId, [{ deleteSheet: { sheetId } }]);
+  } catch (e) {
+    if (!/No sheet with id/i.test(e.message)) throw e;
+  }
+}
+// "Start fresh": deletes every tab in the export spreadsheet (a spreadsheet
+// must always keep at least one, so a blank placeholder holds its place
+// for a moment), recreates the standard tabs, and forgets the remembered
+// Score Data tabs — so the export rewrites everything from scratch, with
+// no leftover formatting, colors, filters, or stray tabs.
+async function resetExportSpreadsheet(spreadsheetId) {
+  const meta = await sheetsFetch(spreadsheetId);
+  const placeholder = `barp-fresh-${Date.now()}`;
+  const resp = await sheetsBatchUpdate(spreadsheetId, [{ addSheet: { properties: { title: placeholder } } }]);
+  const placeholderId = resp.replies[0].addSheet.properties.sheetId;
+  for (const s of meta.sheets) await sheetsDeleteSheetIfExists(spreadsheetId, s.properties.sheetId);
+  await dbPut("meta", { key: "scoreDataSheetIds", value: [] });
+  await writeTeamSheetsConfig({ scoreDataSheetIds: [] });
+  const ids = await ensureSheetsExist(spreadsheetId);
+  await sheetsDeleteSheetIfExists(spreadsheetId, placeholderId);
+  return ids;
+}
+// Team-wide "someone is exporting right now" marker, so two devices don't
+// rewrite the same spreadsheet at the same moment (which is what left
+// half-renamed tabs and "No sheet with id" errors behind).
+const EXPORT_LOCK_MS = 5 * 60 * 1000;
+async function otherDeviceExportingSince() {
+  const cfg = await readTeamSheetsConfig();
+  const lock = cfg?.exportLock;
+  if (!lock || !lock.at || Date.now() - lock.at > EXPORT_LOCK_MS) return null;
+  if (lock.by === exportDeviceId()) return null;
+  return lock.at;
+}
+function exportDeviceId() {
+  try {
+    let id = localStorage.getItem("barpExportDeviceId");
+    if (!id) { id = crypto.randomUUID(); localStorage.setItem("barpExportDeviceId", id); }
+    return id;
+  } catch (e) { return "unknown"; }
+}
+async function setExportLock(on) {
+  await writeTeamSheetsConfig({ exportLock: on ? { by: exportDeviceId(), at: Date.now() } : null });
+}
 
 async function sheetsCreateSpreadsheet() {
   const res = await fetch("https://sheets.googleapis.com/v4/spreadsheets", {
@@ -5287,6 +5334,8 @@ function renderSheetsFileStatus() {
     fileStatusEl.hidden = true;
     exportBtn.hidden = true;
   }
+  const freshRow = document.getElementById("sheets-export-fresh-row");
+  if (freshRow) freshRow.hidden = exportBtn.hidden;
 }
 
 // ---- Team-shared Sheets export config ----
@@ -5662,7 +5711,7 @@ async function writeScoreDataSheet(spreadsheetId) {
   try {
     await writeScoreDataSheetOnce(spreadsheetId);
   } catch (e) {
-    if (!/already exists/i.test(e.message)) throw e;
+    if (!/already exists|No sheet with id/i.test(e.message)) throw e;
     await writeScoreDataSheetOnce(spreadsheetId);
   }
 }
@@ -5745,12 +5794,21 @@ async function writeScoreDataSheetOnce(spreadsheetId) {
   // Delete leftover Score Data tabs from earlier exports that this export
   // doesn't use any more (e.g. an old "9/6 - 9/12" tab whose runs are now
   // covered by "9/6 - 11/10"), so only the current set of tabs remains.
+  // Only ever tabs that are clearly BARP's own Score Data / temporary tabs
+  // by name — never a tab just because its id was remembered (a stale id
+  // could belong to some other tab by now).
   const keep = new Set(sheetIds);
   const stale = meta.sheets
     .map((s) => s.properties)
-    .filter((pr) => !keep.has(pr.sheetId) && (stored.includes(pr.sheetId) || /^Score Data\b/i.test(pr.title) || /^barp-(new|tmp)-/.test(pr.title)))
+    .filter((pr) => !keep.has(pr.sheetId) && (/^Score Data\b/i.test(pr.title) || /^barp-(new|tmp)-/.test(pr.title)))
     .map((pr) => pr.sheetId);
-  if (stale.length) await sheetsBatchUpdate(spreadsheetId, stale.map((sheetId) => ({ deleteSheet: { sheetId } })));
+  for (const sheetId of stale) await sheetsDeleteSheetIfExists(spreadsheetId, sheetId);
+
+  // Keep every Score Data tab together at the front, oldest first, instead
+  // of new ones landing at the end after the other tabs.
+  await sheetsBatchUpdate(spreadsheetId, sheetIds.map((sheetId, i) => ({
+    updateSheetProperties: { properties: { sheetId, index: i }, fields: "index" },
+  })));
 
   // Remember the tab list now, before writing contents, so if anything
   // below fails the next export reuses these tabs instead of tripping on them.
@@ -6199,14 +6257,29 @@ document.getElementById("btn-sheets-export").addEventListener("click", async () 
   if (!spreadsheetId) { showErrorBanner("Connect Google Sheets first."); return; }
   const statusEl = document.getElementById("sheets-export-status");
   const btn = document.getElementById("btn-sheets-export");
+  const freshBox = document.getElementById("sheets-export-fresh");
+  const fresh = !!freshBox?.checked;
+  if (fresh && !confirm("Start fresh: this deletes EVERY tab in the export spreadsheet (including any tabs or formatting added by hand) and rewrites it all from the app. Continue?")) return;
+  const busySince = await otherDeviceExportingSince();
+  if (busySince) {
+    const mins = Math.max(1, Math.round((Date.now() - busySince) / 60000));
+    if (!confirm(`Another device started exporting ${mins} min ago and may still be going. Exporting from two devices at once can mix up the tabs. Export anyway?`)) return;
+  }
   btn.disabled = true;
   sheetsExportInProgress = true;
   await acquireExportWakeLock();
   try {
+    await setExportLock(true);
     statusEl.textContent = "Checking export sheet…";
     spreadsheetId = await verifyOrRecreateSpreadsheet(spreadsheetId, statusEl);
-    statusEl.textContent = "Setting up sheets…";
-    const sheetIds = await ensureSheetsExist(spreadsheetId);
+    let sheetIds;
+    if (fresh) {
+      statusEl.textContent = "Starting fresh — clearing the export sheet…";
+      sheetIds = await resetExportSpreadsheet(spreadsheetId);
+    } else {
+      statusEl.textContent = "Setting up sheets…";
+      sheetIds = await ensureSheetsExist(spreadsheetId);
+    }
     statusEl.textContent = "Writing Time Data…";
     await writeTimeDataSheet(spreadsheetId, sheetIds["Time Data"]);
     statusEl.textContent = "Writing Score Data…";
@@ -6227,6 +6300,8 @@ document.getElementById("btn-sheets-export").addEventListener("click", async () 
     btn.disabled = false;
     sheetsExportInProgress = false;
     releaseExportWakeLock();
+    if (freshBox) freshBox.checked = false; // a one-time thing, not a setting
+    setExportLock(false).catch(() => {});
   }
 });
 
